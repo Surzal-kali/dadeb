@@ -302,7 +302,8 @@ after the frameit compile) — graduated to the build lane. Files authored:
   fails, they join the vendored set next build (honest, already decided).
 - debhelper is NOT on this dev box (candidate 14.5, compat 13 declared):
   the build belongs to the rootful VM — `sudo apt install -y debhelper
-  dpkg-dev make gcc` then in the repo root `dpkg-buildpackage -us -uc -b`
+  dpkg-dev make gcc` then in the repo root `dpkg-buildpackage --no-sign
+  --build=binary`
   → `../daharness_0.1.0+pkg1_amd64.deb`, then runbook step 2 becomes
   runnable against a REAL artifact and steps 3-14 proceed.
 
@@ -393,7 +394,8 @@ after the frameit compile) — graduated to the build lane. Files authored:
 - [done] layer 2 on THIS box — see Progress log; the only leftover is the
   tool_repl one-shot which needs a deps-present env and rides the leg below.
 - [next, VM] BUILD on the rootful VM: `sudo apt install -y debhelper
-  dpkg-dev make gcc` → in repo root `dpkg-buildpackage -us -uc -b` →
+  dpkg-dev make gcc` → in repo root `dpkg-buildpackage --no-sign
+  --build=binary` →
   `../daharness_0.1.0+pkg1_amd64.deb`. Then runbook — step 2 (dpkg-deb
   audit) now runs against a real artifact, then `apt install ./…deb`,
   then steps 3-14 (floor with DAHARNESS_TREE=/usr/share/daharness,
