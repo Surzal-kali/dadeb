@@ -334,7 +334,10 @@ after the frameit compile) — graduated to the build lane. Files authored:
   sequence runs dh_prep BETWEEN the two overrides and dh_prep `rm -rf`s
   debian/daharness wholesale; wheels installed in the build override are
   wiped before dh_auto_install re-created the staging tree (symptom:
-  deb byte-identical with and without vendoring).
+  deb byte-identical with and without vendoring). Pin is
+  `pydantic-ai-slim[openai]==2.35.0` — SLIM lacks the openai optional
+  group and the Ollama model raises ImportError at secretary init
+  (VM-proven 2026-10-20: gateway died at _init_secretary_agent).
 - debhelper is NOT on this dev box (candidate 14.5, compat 13 declared):
   the build belongs to the rootful VM — `sudo apt install -y debhelper
   dpkg-dev make gcc` then in the repo root `dpkg-buildpackage --no-sign
@@ -367,6 +370,11 @@ after the frameit compile) — graduated to the build lane. Files authored:
   `daharness-chroma` wrapper + unit serve chroma from vendor/bin/chroma
   (dockerless lane); daemon unit Wants/After chroma with a tolerant 20s
   port-wait ExecStartPre; rules install both; wrapper comments corrected.
+- [2026-10-20] **openai optional group missing (pydantic-ai-slim SLIM)**:
+  gateway died at _init_secretary_agent — pydantic_ai/models/ollama.py
+  raises ImportError without the `openai` package. Vendor pin changed to
+  `pydantic-ai-slim[openai]==2.35.0` (extra group syntax; pip resolves
+  the openai version against the slim's own constraints).
 - [2026-10-20] **Vendor order flipped to PREPEND (apt-wins-overlaps dead)**:
   rebuild #2 rode 343MB of wheels (deb 455KB → 63MB), daemon start still
   exit 1 — ImportError `_clean_attribute_value` from apt's

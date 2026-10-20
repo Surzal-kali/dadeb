@@ -26,7 +26,7 @@ override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness/vendor
 	python3 -m pip install --no-compile --target \
 	  debian/daharness/usr/share/daharness/vendor \
-	  "chromadb==1.5.9" "pydantic-ai-slim==2.35.0"
+	  "chromadb==1.5.9" "pydantic-ai-slim[openai]==2.35.0"
 	for d in $(TREE_DIRS); do \
 	  cp -a $$d debian/daharness/usr/share/daharness/; \
 	done
