@@ -48,6 +48,34 @@ daharness (0.1.0+pkg2) kali; urgency=high
     The reap is now getattr-tolerant and the Brain's spawn site
     registers its /tmp/brain.log fd like the MSF/ZAP/Playwright sites
     (closes a standing fd leak too).
+  * teardown repair 2 (VM 2026-10-20): systemd's KillMode=process leaves
+    child hygiene entirely to stop(), and signal handlers were installed
+    only AFTER launch_all — with ZAP absent, wait_for_zap burned 60s
+    before handlers existed, so systemctl stop/restart mid-upgrade hit
+    Python's default SIGTERM: instant main death, no reap, orphaned
+    Brain/msfrpcd on live sockets ("State 'stop-sigterm' timed out",
+    left-over-process warnings on every later start). SIGTERM/SIGINT
+    handlers + the shutdown event now install before launch; the ZAP
+    launcher-absent branch marks the wait as answerable so launch is
+    not held 60s on a machine with no ZAP. A TERM arriving mid-boot now
+    races the launch: the remainder is abandoned and stop() reaps what
+    already exists (verified: stop mid-launch completes in ~1s with
+    ExecMainStatus=0 instead of systemd's 30s SIGKILL).
+  * msfrpcd orphan fix (VM 2026-10-20): msfrpcd self-daemonizes, so the
+    tracked launcher exited immediately and the ruby daemon reparented
+    to PID 1, surviving every stop() reap (one fresh PPID-1 msfrpcd per
+    boot cycle). msfrpcd now spawns with -f (foreground) like every other
+    child; stop() reaps it with the same SIGTERM-then-SIGKILL path
+    (verified: all children gone after stop, zero left-over-process
+    warnings).
+  * ZAP launch fix for the deb lane (VM 2026-10-20): zap_home (the daemon's
+    -dir) was created under framework_root, but the service runs as user
+    'daharness' while /usr/share/daharness is root-owned — mkdir failed
+    with PermissionError BEFORE any log line, the coroutine died silently
+    and wait_for_zap burned its 60s on a daemon that never started. The
+    fallback path is $ZAP_HOME env, else <state dir>/.zap_home
+    (/var/lib/daharness/.zap_home); ZAP now comes up and is reaped with
+    everything else.
 
  -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
 

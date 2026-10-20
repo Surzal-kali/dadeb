@@ -407,6 +407,37 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [done 2026-10-20] **VM teardown forensics: three sibling bugs, live-fired
+  and fixed** — after the _child_log_fds fix landed, the full systemd
+  journal window decoded the rest of the chain (main killed at
+  11:21:33, "State 'stop-sigterm' timed out", fresh PPID-1 msfrpcd per
+  cycle, ZAP never listening):
+  1. **Unprotected boot window, deeper than thought**: handlers-before-
+     launch converted mid-boot SIGTERM into a *pending* shutdown, but
+     main still sat through the remainder of launch_all (60s ZAP wait)
+     while systemd's TimeoutStopSec=30 SIGKILLed it anyway — children
+     orphaned again. Fix: the launch is raced against the shutdown
+     event (FIRST_COMPLETED in run_framework); a TERM arriving
+     mid-launch aborts the remainder and goes straight to stop() —
+     verified live: stop 4s into a boot completes in 1.2s with
+     Result=success instead of the 30s timeout-kill.
+  2. **msfrpcd self-daemonizes**: the tracked launcher exited right
+     after fork and the ruby daemon reparented to PID 1, outside every
+     stop() reap (its own "already running; connecting to it" path then
+     made each boot attach to the previous orphan). Fix: spawn with
+     -f (foreground); stop() now reaps it like the Brain/ZAP logs
+     ("all-reaped" on the VM post-stop, no left-over-process warnings).
+  3. **ZAP never came up on the deb**: zap_home is created under
+     framework_root, but the service user is 'daharness' and
+     /usr/share/daharness is root-owned — PermissionError killed the
+     coroutine BEFORE its "[+] Starting ZAP" log (nothing in the log,
+     empty /tmp/zap.log, 60s burn, silent). Fix: $ZAP_HOME override,
+     else <state dir>/.zap_home (/var/lib/daharness/.zap_home).
+     Verified: ZAP listening post-boot and reaped with the rest.
+  Deployed via paramiko SFTP + sudo install; sha256 of the deployed
+  file matched the working tree. Full boot→stop cycles on the VM are
+  clean: ExecMainStatus=0, zero children (Brain/msfrpcd/ZAP) after
+  stop, NRestarts=0.
 - [done 2026-10-20] **bootstrap crash: 'FrameworkLoader' object has no
   attribute '_child_log_fds'** — killed daharness.service on the VM
   after a fresh install. Root cause: stop()'s reap loop popped

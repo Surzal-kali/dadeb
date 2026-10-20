@@ -383,6 +383,11 @@ class FrameworkLoader:
                 "(apt install zaproxy) or set ZAP_BIN to the zap.sh path.",
                 ", ".join(c or "<unset>" for c in zap_candidates),
             )
+            # Tell wait_for_zap so the launch doesn't sit through its full
+            # default timeout on a box with no ZAP installed: launcher absent
+            # is a permanent answer, not a slow daemon (VM 2026-10-20: the
+            # 60s wait was the entire unprotected-boot window).
+            self.zap_daemon_absent = True
             return
 
         # Daemon JVM heap — sized by $ZAP_XMX (default 512m, bump for large
@@ -410,7 +415,23 @@ class FrameworkLoader:
         ]
         # Pin the home dir using -dir argument; ZAP often ignores ZAP_HOME env var.
         zap_home = self.framework_root / ".zap_home"
-        zap_home.mkdir(exist_ok=True)
+        try:
+            zap_home.mkdir(exist_ok=True)
+        except OSError as mk_err:
+            # Deb lane: the tree under /usr/share/daharness is root-owned while
+            # the service runs as 'daharness' (VM 2026-10-20: PermissionError
+            # here killed the ZAP spawn before any log line, leaving
+            # wait_for_zap to burn its full 60s on a daemon that never
+            # started). Fall back to the writable state dir; ZAP_HOME wins
+            # for non-standard layouts.
+            zap_home = (
+                Path(os.environ["ZAP_HOME"])
+                if os.environ.get("ZAP_HOME")
+                else Path.cwd() / ".zap_home"
+            )
+            zap_home.mkdir(parents=True, exist_ok=True)
+            logger.info("[+] ZAP home moved to %s (%s); set ZAP_HOME to pin it.",
+                        zap_home, mk_err.strerror)
         cmd.extend(["-dir", str(zap_home)])
 
         # --- Root guard: never run the ZAP daemon as root. -----------------
@@ -519,6 +540,11 @@ class FrameworkLoader:
         import requests as _requests
         host = host or ZAP_HOST
         port = port or ZAP_PORT
+        if getattr(self, "zap_daemon_absent", False):
+            logger.info("[i] ZAP launcher absent; skipping the %ss readiness "
+                        "wait (zap_* tools will fail until zaproxy is "
+                        "installed)", timeout)
+            return False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -890,22 +916,49 @@ async def run_framework():
     daemon_mode = "--daemon" in sys.argv
     loader = FrameworkLoader(FRAMEWORK_ROOT)
 
+    # Install signal handlers BEFORE launch_all, not after: with ZAP absent
+    # the launch can sit inside wait_for_zap's full timeout, and a `systemctl
+    # restart`/`stop` in that window previously hit Python's still-default
+    # SIGTERM — instant death, no child reap, and KillMode=process then left
+    # the Brain + msfrpcd orphaned on their sockets (VM 2026-10-20). An early
+    # install turns the signal into a pending shutdown: boot completes, then
+    # `shutdown_event.wait()` returns immediately and stop() reaps cleanly.
+    shutdown_event = asyncio.Event()
+    def request_shutdown(*_):
+        shutdown_event.set()
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
+
     try:
-        await loader.launch_all()
-        # The secretary chat lane is trimmed from this packaged build
-        # (headless posture: the driving LLM is external — an Open WebUI
-        # model or any gateway/MCP client). Both invocation forms
-        # foreground the services stack; the interactive tool lane lives
-        # in tool_repl.py and re-indexing via `python -m daharness.core`.
-        if not daemon_mode:
-            logger.info("[*] Secretary chat lane removed from this build; "
-                        "foregrounding the services stack (--daemon is implicit).")
-        shutdown_event = asyncio.Event()
-        def request_shutdown(*_):
-            shutdown_event.set()
-        signal.signal(signal.SIGTERM, request_shutdown)
-        signal.signal(signal.SIGINT, request_shutdown)
-        await shutdown_event.wait()
+        # Race the launch against the shutdown signal: a TERM/INT arriving
+        # while services are still launching must NOT have main sit through
+        # the remainder of the boot (systemd's TimeoutStopSec would SIGKILL
+        # it mid-wait and orphan the children — with KillMode=process the
+        # children are nobody's to kill; VM 2026-10-20). Instead: abandon
+        # the rest of the launch and let stop() reap what already exists.
+        launch_task = asyncio.create_task(loader.launch_all())
+        shutdown_waiter = asyncio.create_task(shutdown_event.wait())
+        done, _pending = await asyncio.wait(
+            {launch_task, shutdown_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if shutdown_waiter in done:
+            logger.info("[*] Shutdown requested while services were still "
+                        "launching; aborting the remaining launch and "
+                        "reaping children.")
+            launch_task.cancel()
+            await asyncio.gather(launch_task, return_exceptions=True)
+        else:
+            await launch_task
+            # The secretary chat lane is trimmed from this packaged build
+            # (headless posture: the driving LLM is external — an Open WebUI
+            # model or any gateway/MCP client). Both invocation forms
+            # foreground the services stack; the interactive tool lane lives
+            # in tool_repl.py and re-indexing via `python -m daharness.core`.
+            if not daemon_mode:
+                logger.info("[*] Secretary chat lane removed from this build; "
+                            "foregrounding the services stack (--daemon is implicit).")
+            await shutdown_waiter
     except asyncio.CancelledError:
         # Expected: our SIGINT handler cancelled main_task. Swallow it and fall
         # through to the finally so stop() can reap children gracefully. (We

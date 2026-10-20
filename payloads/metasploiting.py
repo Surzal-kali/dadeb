@@ -164,8 +164,14 @@ class MetasploitClient:
                 if msf_log is None:
                     msf_log = asyncio.subprocess.DEVNULL
                     print("[!] /tmp/msfconsole_mcp*.log unwritable; msfrpcd stdout -> DEVNULL")
+                # -f keeps the daemon in the foreground: without it msfrpcd
+                # self-daemonizes, the tracked launcher exits and the ruby
+                # daemon reparents to PID 1, escaping bootstrap.stop()'s reap
+                # (observed live on the packaging VM 2026-10-20: an msfrpcd
+                # per boot cycle, PPID 1, holding :55553).
                 launched_process = await asyncio.create_subprocess_exec(
                     self.mcp_path,
+                    "-f",
                     "-U", user,
                     "-P", pwd,
                     "-S",
