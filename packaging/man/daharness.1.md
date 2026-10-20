@@ -32,9 +32,11 @@ Runs the daharness service stack for authorized security research:
 
 # CONFIGURATION
 
-Environment is read from, in order: *$DAHARNESS_ENV*, then
-**/etc/daharness/daharness.env**, then the tree's *.env* — first existing file
-wins. See **daharness.env(5)**.
+The systemd units load **/etc/daharness/daharness.env** via
+*EnvironmentFile=* (system profile: WORKSPACE_ROOT, BRAIN_SOCKET,
+GATEWAY_HOST, GATEWAY_PORT, GATEWAY_API_KEY); operator shells use the
+tree's *.env* (*bootstrap.py*, *api_gateway.py* and *tool_repl.py* load
+it with *override=True*). See **daharness.env(5)**.
 
 Privileged lanes (raw-socket scanning, low-port OOB) are not part of this
 baseline; they degrade honestly and are documented in **daharness-safety(7)**.
@@ -47,5 +49,5 @@ baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 
 # SEE ALSO
 
-**daharness-repl(1)**, **daharness-kernel(1)**, **daharness.env(5)**,
-**daharness-tools(7)**, **daharness-safety(7)**
+**daharness-repl(1)**, **daharness-kernel(1)**, **daharness-pg(1)**,
+**daharness.env(5)**, **daharness-tools(7)**, **daharness-safety(7)**

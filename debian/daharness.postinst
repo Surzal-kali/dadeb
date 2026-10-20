@@ -8,4 +8,22 @@ if ! getent passwd daharness >/dev/null; then
         --shell /usr/sbin/nologin daharness
 fi
 
+# Gateway API key: generate once when the conffile placeholder is still
+# empty, so a stock deb never boots an unauthenticated gateway. The
+# in-place conffile edit triggers the upgrade prompt ("keep current" — the
+# default — preserves the live key); clearing the line + a re-configure
+# regenerates it.
+if [ -r /etc/daharness/daharness.env ] && \
+   grep -q '^GATEWAY_API_KEY=""$' /etc/daharness/daharness.env; then
+    if command -v openssl >/dev/null 2>&1; then
+        KEY=$(openssl rand -hex 32)
+    else
+        KEY=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    fi
+    if [ -n "$KEY" ]; then
+        sed -i "s|^GATEWAY_API_KEY=.*$|GATEWAY_API_KEY=\"$KEY\"|" /etc/daharness/daharness.env
+        echo "daharness: generated GATEWAY_API_KEY into /etc/daharness/daharness.env"
+    fi
+fi
+
 #DEBHELPER#

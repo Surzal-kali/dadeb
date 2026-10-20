@@ -31,6 +31,20 @@ and end the turn; further calls are refused with structured guidance (not a
 transient error). Terminal-lane tools (memory, findings, unknowns) stay
 callable past the cap so the model can comply.
 
+## Gateway bind + auth posture
+
+The REST/MCP gateway binds GATEWAY_HOST:GATEWAY_PORT — loopback
+(127.0.0.1:5000) in this profile. GATEWAY_API_KEY arms key auth
+(X-API-Key or Bearer) over the whole REST + /mcp surface; the packaged
+profile generates a random key at install (postinst), so a stock deb
+never boots an off-host tool-execution gateway unauthenticated.
+
+With or without a key, /docs, /redoc, /openapi.json and /health stay
+unauthenticated by design (spec + liveness reachability) — remember this
+when widening the bind: anything on 0.0.0.0 advertises the full API
+surface shape via openapi.json. Unauthenticated AND non-loopback
+together logs a boot-time error rather than serving silently.
+
 ## Local-only LLM policy
 
 The secretary runs on a locally hosted model (Ollama, loopback/LAN) — never a
@@ -44,6 +58,22 @@ slug, so a purge erases one engagement in a single transaction while the
 journal audit trail stays append-only until the operator closes it. Arming is
 REPL-only.
 
+## Engagement-Postgres lane (optional)
+
+Off by default: no Postgres server ships; the journal runs on the SQLite
+stores. `sudo daharness-pg init` provisions a **dedicated** Postgres
+cluster (`daharness`, port 5433) whose fate msfdb can never touch (msf's
+own `main` cluster keeps 5432), creates one no-superuser LOGIN role per
+lane (harness_operator/brain_lane/gateway_lane/repl_lane), and mints
+random per-role passwords into `/etc/daharness/pg.env` (0640
+root:daharness). Lanes hold INSERT/SELECT (+ evidence UPDATE); **no lane
+ever holds DELETE** — purge runs as a SECURITY DEFINER owner function the
+operator alone calls. The server listens on loopback only with password
+auth (scram-sha-256 on current Kali's PG 18); the operator REPL reaches it
+via group membership. Postgres
+absent or the cluster down = honest degrade back to SQLite stores, logged
+once, never a crash.
+
 ## Credential-reuse sweep
 
 Every recovered credential gets ONE validation attempt against each other
@@ -52,4 +82,5 @@ in the evidence store.
 
 # SEE ALSO
 
-**daharness-repl(1)**, **daharness-tools(7)**, **daharness.env(5)**
+**daharness-repl(1)**, **daharness-tools(7)**, **daharness.env(5)**,
+**daharness-pg(1)**

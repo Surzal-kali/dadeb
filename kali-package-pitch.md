@@ -64,8 +64,9 @@ them): apk/ (jadx doctor probe), binaries/ (r2 BINARY_TARGETS_ROOT), pcaps/
 All 34 .md stay in place for now (man-lane decision below); knowledge/ = all-md
 operator reference, zero code coupling — kept.
 Amputated: tests/, dabooks/, dockered/ (remnants saved), egg-info, .github,
-.vscode, requirements-dev.txt. Remnants: packaging/postgres/init/ (Suggests
-conffiles-later), packaging/reference/ (chroma-config.yaml, 10-refresh-stubs.sh,
+.vscode, requirements-dev.txt. Remnants: packaging/postgres/init/ now installed
+material (daharness-pg lane, 2026-10-20 — see Progress log), packaging/reference/
+(chroma-config.yaml, 10-refresh-stubs.sh,
 lab-dns-setup.sh), devdocs/ (quarantine: burpconfig.json [zero refs, operator
 data — fate open], dabooks/dockered READMEs).
 
@@ -220,11 +221,11 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
 0. SNAPSHOT the VM immediately post-first-install. Everything below is
    replayable from this state without reinstalling.
 1. Interpreter gate: `python3 -V` — must be >= 3.12 (Kali current ships
-   3.13; cp wheels all cover it — chromadb via abi3).
+   3.14; cp wheels all cover it — chromadb via abi3).
 2. Pre-install audit (before apt touches anything; deb file in hand):
    DEB=./daharness_0.1.0_amd64.deb; mkdir -p /tmp/da-audit
    `dpkg-deb -c $DEB | grep frameit` → compiled .so ships in-tree;
-   `dpkg-deb -c $DEB | grep share/man` → six .gz man pages;
+   `dpkg-deb -c $DEB | grep share/man` → seven .gz man pages;
    `dpkg-deb -c $DEB | grep /etc/daharness/` → conffiles under /etc/.
    `dpkg-deb -x $DEB /tmp/da-audit` extracts WITHOUT installing, then
    `file /tmp/da-audit/usr/share/daharness/listeners/plugins/frameit.so`
@@ -266,8 +267,12 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
    Operator lanes (kernel/REPL CLIs you run as yourself) need group
    membership: `usermod -aG daharness $USER` + re-login — RuntimeDirectory
    is 0770 daharness:daharness and the socket binds group-shareable.
-9. Gateway: curl http://127.0.0.1:5000/health; POST /tools/search top-k
-   smoke (semantic lane needs the vendored chromadb — proves it).
+9. Gateway: curl http://127.0.0.1:5000/health (always-open exempt
+   endpoint); POST /tools/search top-k smoke WITH the installed key:
+   `curl -sS -H "X-API-Key: $(grep -oP '(?<=^GATEWAY_API_KEY=")[^"]+' /etc/daharness/daharness.env)" -H "Content-Type: application/json" -d '{"intent":"port scan","top_k":3}' http://127.0.0.1:5000/tools/search`
+   (semantic lane needs the vendored chromadb — proves it; a 401 means
+   the gateway didn't see the conffile key through EnvironmentFile=,
+   which is F2 regressions in one probe).
 10. REPL one-shot: `daharness-repl --selftest` (or equivalent) from a
     fresh shell; registry index count ≈ the 97-tool universe.
 11. pytest lane (needs dev tree copied in — tests/ are amputated from the
@@ -277,8 +282,22 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
     vendored chromadb, so test_tool_tags collection may finally pass.
 12. impacket arbiter re-run on VM's python3-impacket version: import 8/8
     internals + nthash ground truth (8846f7eaee8fb117ad06bdd830b7586c).
-13. Man leg: `man daharness daharness-repl daharness-kernel daharness.env
-    daharness-tools daharness-safety` — all render; `whatis daharness` hits.
+13. Man leg: `man daharness daharness-repl daharness-kernel daharness-pg
+    daharness.env daharness-tools daharness-safety` — all render;
+    `whatis daharness` hits.
+13b. Optional engagement-Postgres lane (deliberate; drivers ride Suggests,
+    server provisioned on demand): `sudo apt install -y ./daharness_*.deb
+    --install-suggests` (or bare `sudo apt install postgresql`), then
+    `sudo daharness-pg init` — dedicated 'daharness' cluster on 5433
+    (msfdb's main cluster on 5432 untouched in both directions), harness db
+    + lane roles + per-lane passwords into /etc/daharness/pg.env; restart
+    `daharness daharness-kernel`, probe:
+    PGPASSWORD=$(grep ^HARNESS_DB_PASSWORD_REPL /etc/daharness/pg.env |
+    cut -d= -f2) psql -h 127.0.0.1 -p 5433 -U repl_lane -d harness -c
+    'select 1' → expect 1. Journal lane then writes PG rows on the next
+    dispatch; `daharness-pg stop` drops the lane back to the SQLite stores
+    without losing the audit trail. Skip this step = lane silently off
+    (fresh-deb experience unchanged).
 14. Lifecycle: `apt purge -y daharness` → conffiles purge prompt, verify
     /var/lib/daharness policy (leftover? documented?), snapshot-replay to
     reinstall cleanly. This validates the engagement one-purge design
@@ -382,6 +401,22 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [done 2026-10-20] **Optional engagement-Postgres lane shipped
+  (daharness-pg)** — operator-decided pull-forward of the §7 "arrives with
+  team mode" doctrine (user: "huge plus, optional command to start up").
+  New `/usr/bin/daharness-pg` (init|start|stop|status) provisions a
+  DEDICATED pg_createcluster `daharness` on **5433** — msfdb's `main`
+  cluster on 5432 untouched in both directions; creates the `harness` db,
+  runs the (now-installed) init bundle with ON_ERROR_STOP=1, mints random
+  per-lane passwords into `/etc/daharness/pg.env` (0640 root:daharness,
+  reused on re-init; rotation = move file aside + re-init). Units gain
+  tolerant `EnvironmentFile=-/etc/daharness/pg.env` (daemon + kernel);
+  conffile carries the commented HARNESS_DB_* doc block; control Suggests
+  +postgresql; new daharness-pg(1); env(5)/safety(7)/daharness(1) updated;
+  runbook step 13b + lifecycle/purge note (pg.env is operator data).
+  Untouched until an operator runs init: absent postgres = lane silently
+  off on the SQLite stores (unchanged fresh-deb experience, §7 honest gap
+  honored).
 - [2026-10-20] **dh-enable gap ROOT-CAUSED + preset auto-enable shipped**
   (commits `0ec74bd` + `0847b70`): postinst expansion was always correct
   (dh_installsystemd/14.5); the veto is Kali policy —
@@ -546,7 +581,9 @@ after the frameit compile) — graduated to the build lane. Files authored:
       availability for cp312/313/314 feeds the actual build step.
   (b) Suggests/Recommends lane — python3-pg8000 + python3-psycopg for the
       opt-in postgres lane (both code guards verified as honest degraders;
-      psycopg also rides the installed python3-psycopg 3.3.5-1).
+      psycopg also rides the installed python3-psycopg 3.3.5-1); server
+      side now shipped as `postgresql` Suggests + the daharness-pg
+      provisioner (2026-10-20 — see Progress log).
 - [probe, VM leg] repo-packaged-but-version-behind compat checks (apt
   install + API probe, needs a rootful box): python3-mcp 1.26.0 vs pin
   1.29.0 (streamable-HTTP server surface used by api_gateway /mcp), and
@@ -572,3 +609,24 @@ after the frameit compile) — graduated to the build lane. Files authored:
   resolve_workspace_root() and brain_socket_path()).
 - [open] devdocs/burpconfig.json fate (zero refs; operator data — keep as
   /usr/share doc or drop).
+- [done 2026-10-20] F1+F2 patch (damage-report 8a): gateway auth now
+  armable from the package — conffile gains GATEWAY_API_KEY (postinst
+  generates a random key when the placeholder is empty; upgrade conffile
+  prompt default 'keep current' preserves it) + GATEWAY_HOST knob pinned
+  127.0.0.1 in the system profile; bootstrap GATEWAY_HOST/GATEWAY_PORT
+  knobs replace the hardcoded 0.0.0.0:5000 (loopback default, ZAP
+  pattern) and api_gateway.run() logs an error on unauth + non-loopback.
+  F2: EnvironmentFile=/etc/daharness/daharness.env on daemon + kernel
+  units (chroma already had it); inert Environment=DAHARNESS_ENV and
+  duplicate BRAIN_SOCKET Environment= lines dropped — the conffile is now
+  read by all three units. Docs truth: env(5) LOADING section rewritten
+  (previous SEARCH ORDER / $DAHARNESS_ENV claim was never implemented);
+  safety(7) gains the bind + auth posture section incl. the F3 exempt-
+  endpoints note; user-profile unit path corrected to
+  /usr/share/doc/daharness/systemd-user. Residue: .env.example
+  OPEN_TERMINAL_URL/KEY commented lines removed (retired lane Sep 18
+  2026; the quarantined devdocs README mention stays pending the
+  burpconfig-fate ticket). Runbook step 1 Python 3.13 → 3.14 freshness;
+  step 9 now carries the X-API-Key header so the smoke probes F2+key in
+  one call. Version bumped 0.1.0+pkg1 → 0.1.0+pkg2 (pkg1 was already
+  built+smoked on the VM).

@@ -15,13 +15,18 @@ RuntimeDirectory=daharness
 RuntimeDirectoryMode=0770
 StateDirectory=daharness
 StateDirectoryMode=0750
-Environment=DAHARNESS_ENV=/etc/daharness/daharness.env
-Environment=BRAIN_SOCKET=/run/daharness/brain.sock
-WorkingDirectory=/var/lib/daharness
 # Kernel connection file + JUPYTER_RUNTIME_DIR artifacts are chowned to the
 # attaching operator by tool_repl.py (see _kernel_owner()); this receives the
 # uid/name. Multi-operator: the group share is the fallback.
 Environment=DAHARNESS_KERNEL_OWNER=""
+# Conffile wires the profile knobs (WORKSPACE_ROOT, BRAIN_SOCKET) — the
+# old Environment=DAHARNESS_ENV/BRAIN_SOCKET lines were inert/duplicate;
+# chroma already read this file via EnvironmentFile (wired 2026-10-20).
+EnvironmentFile=/etc/daharness/daharness.env
+# Optional engagement-Postgres lane (`daharness-pg init` generates it);
+# tolerant = REPL kernel journals to the SQLite stores until the lane is up.
+EnvironmentFile=-/etc/daharness/pg.env
+WorkingDirectory=/var/lib/daharness
 ExecStart=/usr/bin/daharness-kernel
 # No tty: the kernel arms the SIGTERM/shutdown_request exit path
 StandardInput=null

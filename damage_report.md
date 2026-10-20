@@ -153,12 +153,3 @@ F5 LOW/DOC — pitch freshness: pitch "Python 3.13" blurb stale (Kali ships
      devdocs/dockered-README.md (F4; merge with burpconfig ticket).
   e. Man-page read for posture documentation: daharness-safety(7) should
      state bind + auth posture of the packaged profile.
-
-9) RE-VERIFY (fresh sandbox, if the clone smells stale)
--------------------
-  cd /root/dadeb && git fetch && git log --oneline -3 && git status --short
-  # empty diff below f2addad..HEAD over utils/ = session never touched core:
-  git log --oneline f2addad..HEAD -- utils/
-  # census:
-  git diff --name-status f2addad..HEAD | wc -l
-================================================================================

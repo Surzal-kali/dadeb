@@ -46,6 +46,17 @@ override_dh_auto_install:
 	# vendored chroma server: the registry dials CHROMA_HOST/PORT (9000);
 	# no docker on the deb lane, the vendored closure serves it natively
 	install -D -m 0755 packaging/bin/daharness-chroma debian/daharness/usr/bin/daharness-chroma
+	# optional engagement-Postgres lane (daharness-pg(1)) + its init bundle:
+	# installed but inert until `sudo apt install postgresql` + `daharness-pg init`.
+	install -D -m 0755 packaging/bin/daharness-pg debian/daharness/usr/bin/daharness-pg
+	install -d -m 0755 debian/daharness/usr/share/daharness/postgres/init
+	install -m 0644 packaging/postgres/init/001_roles.sh \
+		packaging/postgres/init/002_schemas.sql \
+		packaging/postgres/init/003_functions.sql \
+		packaging/postgres/init/004_operator_registry_acl.sql \
+		debian/daharness/usr/share/daharness/postgres/init/
+	# daharness-pg.1 is picked up by the packaging/man/*.1 glob in
+	# debian/daharness.manpages
 	# post-install import-floor audit (runbook step 4): the deb carries its
 	# own floor driver; packaging/ is not an ALLOWED_TOOL_ROOT so the Brain
 	# never mints it as a tool.

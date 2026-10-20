@@ -22,7 +22,11 @@ Type=simple
 UMask=0007
 RuntimeDirectory=daharness
 StateDirectory=daharness
-Environment=DAHARNESS_ENV=%h/.config/daharness/daharness.env
+# User-profile knobs (WORKSPACE_ROOT, BRAIN_SOCKET) load from the
+# operator-owned conffile — create it with the user-profile deltas from
+# daharness.env(5); tolerant (-) so a missing file still boots with
+# dev-tree defaults. The old Environment=DAHARNESS_ENV form was inert.
+EnvironmentFile=-%h/.config/daharness/daharness.env
 ExecStart=/usr/bin/daharness --daemon
 KillMode=process
 Restart=on-failure

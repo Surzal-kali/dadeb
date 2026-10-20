@@ -1,3 +1,31 @@
+daharness (0.1.0+pkg2) kali; urgency=high
+
+  * F1, gateway auth armable from the package: conffile gains
+    GATEWAY_API_KEY (postinst generates a random key when the
+    placeholder is empty) and GATEWAY_HOST (system profile pin,
+    127.0.0.1); bootstrap GATEWAY_HOST/GATEWAY_PORT knobs replace the
+    hardcoded 0.0.0.0:5000 (loopback default, ZAP pattern); api_gateway
+    logs a boot-time error on unauthenticated + non-loopback binds.
+  * F2, /etc/daharness/daharness.env is now live: EnvironmentFile= on
+    the daemon + kernel units (chroma already read it); the inert
+    Environment=DAHARNESS_ENV and duplicate BRAIN_SOCKET unit lines are
+    dropped, so daemon/kernel/chroma all resolve WORKSPACE_ROOT through
+    the StateDirectory-conffile chain.
+  * F3/F4/F5: daharness-safety(7) bind + auth posture section;
+    daharness.env(5) LOADING section rewritten to the implemented wiring;
+    .env.example OPEN_TERMINAL residue dropped; runbook Python-3.13
+    blurb refreshed to 3.14 and step-9 gateway smoke carries the API key.
+  * Optional engagement-Postgres lane: /usr/bin/daharness-pg
+    (init|start|stop|status) provisions a dedicated 'daharness' cluster
+    on 5433 (msfdb's main cluster on 5432 untouched), creates the harness
+    db + lane roles from the now-installed init bundle, and writes
+    per-lane passwords to root:daharness 0640 /etc/daharness/pg.env
+    (daharness-pg.1). Units gain tolerant EnvironmentFile=-pg.env; conffile
+    documents HARNESS_DB_* knobs; postgresql added to Suggests. Lane is
+    inert until an operator runs daharness-pg init.
+
+ -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
+
 daharness (0.1.0+pkg1) kali; urgency=medium
 
   * First packaged build: debhelper 13 lane; frameit.so compiled at build

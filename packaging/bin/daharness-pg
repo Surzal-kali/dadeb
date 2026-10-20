@@ -1,0 +1,210 @@
+#!/bin/sh
+# daharness-pg(1) — optional engagement-cobweb Postgres lane for the deb.
+#
+# Provisions a DEDICATED pg_createcluster named 'daharness' on :5433 so
+# msfdb's 'main' cluster on :5432 stays untouched in both directions
+# (msfdb re-init can never drop our db; our cluster never steals its port).
+# Creates the 'harness' database, runs the init bundle
+# (/usr/share/daharness/postgres/init/) to mint the per-lane roles +
+# SECURITY DEFINER purge function + operator registry ACL, and writes the
+# resolved HARNESS_DB_* knobs to /etc/daharness/pg.env (root:daharness
+# 0640, group-readable so the operator REPL can source it).
+#
+# Nothing here runs until an operator says so; absent postgres the package
+# installs fine and journals stay on the SQLite evidence store (lane
+# silently off, honest degrade). `apt install postgresql` (or --install-
+# suggests) provides pg_createcluster/psql/createdb.
+#
+# Idempotent: re-init reuses existing lane passwords from pg.env (they are
+# only rolled when pg.env does not exist — rotate by moving the file aside
+# and re-running init), re-runs the bundle (roles are IF NOT EXISTS;
+# schemas/tables/functions are IF NOT EXISTS / stable REPLACE), then
+# rewrites pg.env from live state. Clusters created here are autostart:
+# after a reboot postgresql.service brings them up.
+set -u
+
+CLUSTER=daharness
+PORT=5433
+DBNAME=harness
+PG_ENV=/etc/daharness/pg.env
+INIT_DIR=/usr/share/daharness/postgres/init
+
+err()  { echo "daharness-pg: $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+usage() {
+	cat <<'USAGE'
+daharness-pg — engagement-cobweb Postgres lane (optional; deb profile)
+
+  daharness-pg init     provision/repair the dedicated cluster + harness db
+                        + lane roles; write /etc/daharness/pg.env
+  daharness-pg start    start the 'daharness' cluster
+  daharness-pg stop     stop the 'daharness' cluster (journal lane degrades
+                        to SQLite stores — nothing is lost except PG-only
+                        rows written while down)
+  daharness-pg status   cluster + port + env-file state
+
+Run init/start/stop via sudo. Requires the postgresql server packages
+(apt install postgresql). See daharness-pg(1).
+USAGE
+}
+
+gen_hex() {
+	openssl rand -hex 16 2>/dev/null \
+		|| dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
+}
+
+need_root() {
+	[ "$(id -u)" -eq 0 ] || die "$1 must run as root (sudo daharness-pg $1)"
+}
+
+cluster_major() {
+	pg_lsclusters --no-header 2>/dev/null | awk -v c="$CLUSTER" '$2 == c { print $1; exit }'
+}
+
+run_roles_script() {
+	POSTGRES_USER=postgres POSTGRES_DB="$DBNAME" \
+	HARNESS_DB_OPERATOR_PASSWORD="$PW_OPERATOR" \
+	HARNESS_DB_BRAIN_PASSWORD="$PW_BRAIN" \
+	HARNESS_DB_GATEWAY_PASSWORD="$PW_GATEWAY" \
+	HARNESS_DB_REPL_PASSWORD="$PW_REPL" \
+	runuser -u postgres -- bash "$INIT_DIR/001_roles.sh"
+}
+
+run_sql() {
+	runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 --dbname="$DBNAME" -f "$1"
+}
+
+cmd_init() {
+	need_root init
+	for tool in pg_createcluster pg_ctlcluster psql createdb; do
+		command -v "$tool" >/dev/null 2>&1 || {
+			err "missing $tool — install the postgres server first:"
+			die "  sudo apt install postgresql   (pg_createcluster/psql/createdb ship with it)"
+		}
+	done
+	[ -d "$INIT_DIR" ] || die "init bundle missing: $INIT_DIR (daharness package upgrade needed)"
+
+	MAJOR=$(cluster_major)
+	if [ -z "$MAJOR" ]; then
+		MAJOR=$(psql --version | sed -n 's/^psql (PostgreSQL) \([0-9]*\).*/\1/p')
+		[ -n "$MAJOR" ] || die "cannot detect a server major (psql --version) — is postgresql installed?"
+		echo "creating dedicated cluster '${CLUSTER}' (PostgreSQL ${MAJOR}, port ${PORT}) ..."
+		pg_createcluster --start -p "$PORT" "$MAJOR" "$CLUSTER" >/dev/null \
+			|| die "pg_createcluster failed for ${MAJOR}/${CLUSTER} (see its output)"
+	else
+		echo "cluster ${MAJOR}/${CLUSTER} exists; ensuring it is running ..."
+		pg_ctlcluster "$MAJOR" "$CLUSTER" start 2>/dev/null || true
+	fi
+
+	# pg_createcluster --start usually races its own readiness; wait briefly.
+	i=0
+	while ! pg_isready -q -h 127.0.0.1 -p "$PORT" 2>/dev/null; do
+		i=$((i + 1)); [ "$i" -gt 20 ] && die "cluster did not become ready on :${PORT} (check pg_lsclusters)"
+		sleep 1
+	done
+
+	# Database before the bundle (001's GRANT CONNECT references it).
+	if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DBNAME}'" | grep -q 1; then
+		runuser -u postgres -- createdb "$DBNAME" \
+			|| die "createdb ${DBNAME} failed"
+		echo "created database '${DBNAME}'"
+	fi
+
+	# Lane passwords: reuse pg.env if it already carries all four, else mint.
+	if [ -f "$PG_ENV" ]; then
+		# shellcheck disable=SC1090
+		. "$PG_ENV"
+		if [ "${HARNESS_DB_PASSWORD_OPERATOR:-}" ] && [ "${HARNESS_DB_PASSWORD_BRAIN:-}" ] \
+			&& [ "${HARNESS_DB_PASSWORD_GATEWAY:-}" ] && [ "${HARNESS_DB_PASSWORD_REPL:-}" ]; then
+			echo "reusing existing lane passwords from ${PG_ENV}"
+		fi
+	fi
+	PW_OPERATOR=${HARNESS_DB_PASSWORD_OPERATOR:-$(gen_hex)}
+	PW_BRAIN=${HARNESS_DB_PASSWORD_BRAIN:-$(gen_hex)}
+	PW_GATEWAY=${HARNESS_DB_PASSWORD_GATEWAY:-$(gen_hex)}
+	PW_REPL=${HARNESS_DB_PASSWORD_REPL:-$(gen_hex)}
+	: "${PW_OPERATOR:?gen_hex failed}" "${PW_BRAIN:?gen_hex failed}" \
+		"${PW_GATEWAY:?gen_hex failed}" "${PW_REPL:?gen_hex failed}"
+
+	echo "running init bundle (roles, schemas, functions, operator ACL) ..."
+	run_roles_script || die "001_roles.sh failed (bundle output above)"
+	run_sql "$INIT_DIR/002_schemas.sql" || die "002_schemas.sql failed"
+	run_sql "$INIT_DIR/003_functions.sql" || die "003_functions.sql failed"
+	run_sql "$INIT_DIR/004_operator_registry_acl.sql" || die "004_operator_registry_acl.sql failed"
+
+	umask 027
+	{
+		echo "# daharness engagement-cobweb lane — generated by 'daharness-pg init'."
+		echo "# Sourced by the systemd units (EnvironmentFile=-) and by operator"
+		echo "# shells that run the REPL (. ${PG_ENV}). Rotate: move this file"
+		echo "# aside, re-run init, restart daharness units."
+		echo "HARNESS_DB_HOST=127.0.0.1"
+		echo "HARNESS_DB_PORT=${PORT}"
+		echo "HARNESS_DB_NAME=${DBNAME}"
+		echo "HARNESS_DB_PASSWORD_OPERATOR=${PW_OPERATOR}"
+		echo "HARNESS_DB_PASSWORD_BRAIN=${PW_BRAIN}"
+		echo "HARNESS_DB_PASSWORD_GATEWAY=${PW_GATEWAY}"
+		echo "HARNESS_DB_PASSWORD_REPL=${PW_REPL}"
+	} > "${PG_ENV}.new" || die "cannot write ${PG_ENV}.new"
+	chown root:daharness "${PG_ENV}.new" 2>/dev/null \
+		|| err "group 'daharness' missing; leaving ${PG_ENV}.new root:root — re-run the package postinst"
+	chmod 0640 "${PG_ENV}.new"
+	mv "${PG_ENV}.new" "$PG_ENV"
+
+	cat <<EOF
+engagement-Postgres lane is up:
+  cluster ${MAJOR}/${CLUSTER} on 127.0.0.1:${PORT}, database ${DBNAME}
+  lane knobs written to ${PG_ENV} (root:daharness 0640)
+  restart the daharness units to pick them up:
+    sudo systemctl restart daharness daharness-kernel
+  reboot-safe: the cluster is autostart (postgresql.service).
+  probe:
+    PGPASSWORD=\$(grep ^HARNESS_DB_PASSWORD_REPL ${PG_ENV} | cut -d= -f2) \\
+      psql -h 127.0.0.1 -p ${PORT} -U repl_lane -d ${DBNAME} -c 'select 1'
+EOF
+}
+
+cmd_start() {
+	need_root start
+	MAJOR=$(cluster_major)
+	[ -n "$MAJOR" ] || die "no '${CLUSTER}' cluster yet — run: sudo daharness-pg init"
+	pg_ctlcluster "$MAJOR" "$CLUSTER" start
+	echo "cluster ${MAJOR}/${CLUSTER} started on :${PORT}"
+}
+
+cmd_stop() {
+	need_root stop
+	MAJOR=$(cluster_major)
+	[ -n "$MAJOR" ] || die "no '${CLUSTER}' cluster to stop"
+	pg_ctlcluster "$MAJOR" "$CLUSTER" stop
+	echo "cluster ${MAJOR}/${CLUSTER} stopped (journal lane falls back to SQLite stores)"
+}
+
+cmd_status() {
+	if pg_lsclusters --no-header 2>/dev/null | grep -q " ${CLUSTER} "; then
+		pg_lsclusters --no-header 2>/dev/null | grep " ${CLUSTER} "
+	else
+		echo "cluster '${CLUSTER}': not provisioned (lane off; SQLite stores active)"
+		return 0
+	fi
+	if pg_isready -q -h 127.0.0.1 -p "$PORT" 2>/dev/null; then
+		echo "listening on 127.0.0.1:${PORT}: ready"
+	else
+		echo "listening on 127.0.0.1:${PORT}: NOT ready"
+	fi
+	if [ -f "$PG_ENV" ]; then
+		echo "knobs: ${PG_ENV} present ($(stat -c '%U:%a' "$PG_ENV" 2>/dev/null))"
+	else
+		echo "knobs: ${PG_ENV} missing (units cannot reach the lane yet)"
+	fi
+}
+
+case "${1:-}" in
+	init)   shift; cmd_init "$@" ;;
+	start)  shift; cmd_start "$@" ;;
+	stop)   shift; cmd_stop "$@" ;;
+	status) shift; cmd_status "$@" ;;
+	-h|--help|help) usage ;;
+	*) usage >&2; exit 2 ;;
+esac

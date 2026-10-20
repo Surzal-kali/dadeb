@@ -79,6 +79,14 @@ ZAP_PROXY_BIND = os.getenv("ZAP_PROXY_BIND", "0.0.0.0")
 # via shell export before restart, e.g.  export ZAP_XMX=2g
 ZAP_XMX = os.getenv("ZAP_XMX", "512m")
 
+# API gateway (bootstrap-assembled service, api_gateway.run()): bind +
+# port knobs. Loopback default mirrors the ZAP pattern — the tool-execution
+# gateway stays host-local; GATEWAY_HOST=0.0.0.0 is a conscious widening
+# (daharness-safety(7) posture: unauth + non-loopback is the one forbidden
+# combination and logs an error at boot).
+GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
+GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "5000"))
+
 # Burp Suite MCP Server BApp (auxiliaries/burp_mcp.py uses these).  Unlike
 # ZAP/MSF, Burp is NOT launched by this bootstrap — the operator runs the
 # Burp GUI with the MCP Server BApp loaded.  These vars configure where the
@@ -623,7 +631,7 @@ class FrameworkLoader:
         """Starts the API server as an async task."""
         try:
             from api_gateway import run as FrameworkAPI
-            await FrameworkAPI(loader=self, host="0.0.0.0", port=5000)
+            await FrameworkAPI(loader=self, host=GATEWAY_HOST, port=GATEWAY_PORT)
         except Exception as e:
             logger.error("[!] API server failed to start: %s", e, exc_info=True)
 

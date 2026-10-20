@@ -1121,6 +1121,17 @@ async def run(loader, host="127.0.0.1", port=5000):
 
     # Start the API gateway
     api_gateway = APIGateway(tool_registry, memory_service)
+    # Bind-posture guard (ZAP pattern): the unauthenticated gateway is only
+    # acceptable on loopback. Widen + unauth = off-host tool execution.
+    if not (api_gateway.api_key or os.getenv("GATEWAY_API_KEY")) and host not in (
+        "127.0.0.1", "localhost", "::1",
+    ):
+        logger.error(
+            "[gateway] binding %s:%s WITHOUT GATEWAY_API_KEY — tool execution "
+            "is reachable off-host. Set GATEWAY_API_KEY (daharness-safety(7)) "
+            "or keep the bind on loopback.",
+            host, port,
+        )
     import uvicorn
     config = uvicorn.Config(api_gateway.app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)

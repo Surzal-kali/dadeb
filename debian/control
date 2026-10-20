@@ -31,7 +31,7 @@ Depends: python3,
          python3-uvicorn,
          python3-psutil
 Recommends: metasploit-framework, owasp-zap, wordlists
-Suggests: python3-pg8000, python3-psycopg, python3-pip, masscan
+Suggests: python3-pg8000, python3-psycopg, python3-pip, masscan, postgresql
 Description: headless orchestration harness for authorized security research
  A local "tool secretary" (LM agent) semantically searches a vector-indexed
  tool registry (ChromaDB), selects modules and executes them with approval

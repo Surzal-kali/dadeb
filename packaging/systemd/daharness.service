@@ -18,8 +18,18 @@ RuntimeDirectoryMode=0770
 # /var/lib/daharness — WORKSPACE_ROOT for the system profile
 StateDirectory=daharness
 StateDirectoryMode=0750
-Environment=DAHARNESS_ENV=/etc/daharness/daharness.env
-Environment=BRAIN_SOCKET=/run/daharness/brain.sock
+# Conffile wires the profile knobs (WORKSPACE_ROOT, BRAIN_SOCKET,
+# GATEWAY_*, CHROMA_PORT) into the unit environment — the earlier
+# Environment=DAHARNESS_ENV form was inert (no code reads that var; only
+# <tree>/.env is loaded by bootstrap, and the deb ships no .env).
+# Wired 2026-10-20 after the fresh-deb smoke showed the daemon resolving
+# state paths against the root-owned code checkout instead of the
+# StateDirectory the unit itself was provisioning.
+EnvironmentFile=/etc/daharness/daharness.env
+# Optional engagement-Postgres lane: absent file = lane stays silently off
+# (`daharness-pg init` generates /etc/daharness/pg.env); tolerant so the
+# fresh-deb experience is unchanged.
+EnvironmentFile=-/etc/daharness/pg.env
 WorkingDirectory=/var/lib/daharness
 # Chroma boots in ~2-5s; a short tolerant head start (disabled chroma unit
 # never blocks the daemon — the registry's server-connection failure is
