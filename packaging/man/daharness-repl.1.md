@@ -40,5 +40,5 @@ Interactive commands and modes:
 
 # SEE ALSO
 
-**daharness(1)**, **daharness-kernel(1)**, **daharness-tools(7)**,
-**daharness-safety(7)**
+**daharness(1)**, **daharness-kernel(1)**, **daharness-index(1)**,
+**daharness-tools(7)**, **daharness-safety(7)**

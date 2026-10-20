@@ -30,6 +30,8 @@ daharness (0.1.0+pkg2) kali; urgency=high
     (no packaged lane reads it; EMBED_MODEL/OLLAMA_BASE_URL stay for the
     registry/memory lanes). The driving LLM headless is external
     (Open WebUI / gateway client); daharness-tools(7) rewritten.
+  Follow-up: daharness-index(1) — the operator re-index wrapper (the
+  runbook's discovery smoke would otherwise hit an empty registry).
 
  -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
 

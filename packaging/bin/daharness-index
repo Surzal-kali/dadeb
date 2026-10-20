@@ -1,0 +1,52 @@
+#!/bin/sh
+# daharness-index(1) — (re-)build the tool-registry index in chroma.
+#
+# Every discovery lane reads this index — gateway /tools/search,
+# /tools/execute (both exact-id and semantic), /mcp tools/list, REPL ghost
+# text, memory recall. A fresh deb ships an EMPTY collection and nothing
+# indexes it for you (the daemon never runs bootstrap_registry), so this
+# command is the operator's one-typing re-index pass.
+#
+# The indexer writes through the chroma HTTP server — the caller needs no
+# filesystem ownership of the registry data, so this runs as any user.
+# Two live dependencies are probed first (vendored chroma server; Ollama
+# + the embed model) and a DOWN probe prints the exact fix instead of a
+# python traceback. Probes read the same knobs the units do from
+# /etc/daharness/daharness.env (tolerant source), so a conffile retune of
+# CHROMA_PORT / EMBED_MODEL / OLLAMA_BASE_URL is honored here too.
+#
+# Flags pass straight through: `--clear` wipes the collection first, re-run
+# to refresh (idempotent upsert; new tools appear without a rebuild).
+set -u
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
+if [ -r /etc/daharness/daharness.env ]; then
+	set -a
+	. /etc/daharness/daharness.env
+	set +a
+fi
+CHROMA_HOST=${CHROMA_HOST:-localhost}
+CHROMA_PORT=${CHROMA_PORT:-9000}
+OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+
+err() { echo "daharness-index: $*" >&2; }
+
+if ! command -v curl >/dev/null 2>&1 || ! command -v ss >/dev/null 2>&1; then
+	# Probe tooling absent: skip the probes and let python report honestly.
+	exec python3 -m daharness.core "$@"
+fi
+
+if ! ss -ltnH 2>/dev/null | grep -q ":${CHROMA_PORT} "; then
+	err "chroma is not listening on ${CHROMA_HOST}:${CHROMA_PORT} — discovery has no backend."
+	err "  fix: sudo systemctl start daharness-chroma   (then re-run daharness-index)"
+	exit 1
+fi
+if ! curl -fsS --max-time 5 "${OLLAMA_BASE_URL}/api/tags" 2>/dev/null \
+	| grep -q "\"name\":\"${EMBED_MODEL}"; then
+	err "Ollama at ${OLLAMA_BASE_URL} is down or lacks embed model '${EMBED_MODEL}'."
+	err "  fix: sudo systemctl start ollama && ollama pull ${EMBED_MODEL}"
+	err "  (knobs: EMBED_MODEL / OLLAMA_BASE_URL in /etc/daharness/daharness.env;"
+	err "   inventory probe: curl -s ${OLLAMA_BASE_URL}/api/tags)"
+	exit 1
+fi
+exec python3 -m daharness.core "$@"

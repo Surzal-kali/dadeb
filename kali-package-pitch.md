@@ -225,7 +225,7 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
 2. Pre-install audit (before apt touches anything; deb file in hand):
    DEB=./daharness_0.1.0_amd64.deb; mkdir -p /tmp/da-audit
    `dpkg-deb -c $DEB | grep frameit` → compiled .so ships in-tree;
-   `dpkg-deb -c $DEB | grep share/man` → seven .gz man pages;
+   `dpkg-deb -c $DEB | grep share/man` → eight .gz man pages;
    `dpkg-deb -c $DEB | grep /etc/daharness/` → conffiles under /etc/.
    `dpkg-deb -x $DEB /tmp/da-audit` extracts WITHOUT installing, then
    `file /tmp/da-audit/usr/share/daharness/listeners/plugins/frameit.so`
@@ -267,6 +267,12 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
    Operator lanes (kernel/REPL CLIs you run as yourself) need group
    membership: `usermod -aG daharness $USER` + re-login — RuntimeDirectory
    is 0770 daharness:daharness and the socket binds group-shareable.
+8b. Re-index (fresh deb ships an EMPTY chroma registry): `daharness-index`
+    — probes chroma + the Ollama embed model first (exact fix on failure),
+    then embeds the ~97-tool universe into the collection (≈ a minute).
+    Run it BEFORE the step-9 discovery smoke; an unindexed registry makes
+    /tools/search return nothing (404s on /tools/execute) and that is the
+    "fresh install looks broken" trap, not a bug. `--clear` rebuilds.
 9. Gateway: curl http://127.0.0.1:5000/health (always-open exempt
    endpoint); POST /tools/search top-k smoke WITH the installed key:
    `curl -sS -H "X-API-Key: $(grep -oP '(?<=^GATEWAY_API_KEY=")[^"]+' /etc/daharness/daharness.env)" -H "Content-Type: application/json" -d '{"intent":"port scan","top_k":3}' http://127.0.0.1:5000/tools/search`
@@ -408,13 +414,23 @@ after the frameit compile) — graduated to the build lane. Files authored:
   handler) collapses, so bare `daharness` now daemonizes exactly like
   `--daemon` (logged). SECRETARY_MODEL dropped from the packaged conffile
   (it was unread by every packaged lane); EMBED_MODEL + OLLAMA_BASE_URL
-  stay (registry/memory lanes read them; one `python -m daharness.core`
-  re-index pass still feeds the chroma registry). pydantic-ai-slim
+  stay (registry/memory lanes read them; one `daharness-index` pass still
+  feeds the chroma registry — the operator re-index wrapper, below). pydantic-ai-slim
   vendor STAYS: ToolRegistry.__init__ constructs the agent object at
   boot (VM-proven ImportError otherwise) even though nothing headless
   runs a turn. In-tree interactive secretary remains available via
   `daharness.core --chat` (dev tree). tools(7) framework-loop section +
   daharness(1) OPTIONS + env(5) rewritten to the headless truth.
+- [done 2026-10-20] **daharness-index(1) operator re-index wrapper** —
+  the runbook had a gap: fresh deb ships an EMPTY chroma registry and
+  step-9's discovery smoke would 404/never-match ("fresh install looks
+  broken"). The wrapper probes chroma + Ollama/embed first (prints the
+  exact fix: systemctl start daharness-chroma / ollama pull
+  nomic-embed-text), sources the system conffile for its knobs, then
+  execs `python -m daharness.core "$@"` with the PYTHONPATH=<tree>
+  vendor lane armed. Writes only through the chroma HTTP server → runs
+  as any user, no sudo. New daharness-index.1; runbook step 8b; SEE ALSO
+  links in daharness(1)/daharness-repl(1).
 - [done 2026-10-20] **Optional engagement-Postgres lane shipped
   (daharness-pg)** — operator-decided pull-forward of the §7 "arrives with
   team mode" doctrine (user: "huge plus, optional command to start up").

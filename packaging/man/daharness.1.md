@@ -30,7 +30,7 @@ Runs the daharness service stack for authorized security research:
 : Foregrounds the services stack. Passing it is optional — the interactive
   secretary chat loop was trimmed from the packaged build, so bare
   `daharness` behaves identically (interactive tool lane: *daharness-repl*(1);
-  registry re-index: `python -m daharness.core`).
+registry re-index: **daharness-index**(1)).
 
 # CONFIGURATION
 
@@ -52,4 +52,5 @@ baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 # SEE ALSO
 
 **daharness-repl(1)**, **daharness-kernel(1)**, **daharness-pg(1)**,
-**daharness.env(5)**, **daharness-tools(7)**, **daharness-safety(7)**
+**daharness-index(1)**, **daharness.env(5)**, **daharness-tools(7)**,
+**daharness-safety(7)**
