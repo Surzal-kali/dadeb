@@ -187,7 +187,7 @@ def framework_health() -> Dict[str, Any]:
         from daharness.findings import ensure_ids_db
         ensure_ids_db(str(db_path))
         db_exists = True
-    except Exception:
+    except Exception as exc:
         db_exists = False
         wk_readable = os.access(str(workspace), os.R_OK) and os.access(str(workspace), os.X_OK)
         db_readable = os.path.exists(str(db_path)) and os.access(str(db_path), os.R_OK)

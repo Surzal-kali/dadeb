@@ -326,6 +326,27 @@ def _cleanup_brain_log():
         print(f"[!] Could not clear {log_path}: {e}")
 
 
+def socket_lane_perms(dir_mode: int) -> tuple[int, int, int]:
+    """Map a socket-dir's permission bits to (umask, socket_perm, lock_perm).
+
+    One decision point for every lane that shares run/: the socket dir's own
+    mode says how lanes share it, and the bind follows that shape instead of
+    forcing world access over it.
+
+    - group-writable (system profile: RuntimeDirectoryMode 0770 /
+      StateDirectoryMode 2770 setgid, operator joined via the daharness
+      group) binds a 0770 socket and 0660 lock;
+    - world-writable (legacy container lanes with no shared group) keeps the
+      old 0777/0666 behavior;
+    - owner-only (single-user dev checkout, umask 0022) gets 0700/0600.
+    """
+    if dir_mode & 0o020:
+        return 0o007, 0o770, 0o660
+    if dir_mode & 0o002:
+        return 0o000, 0o777, 0o666
+    return 0o077, 0o700, 0o600
+
+
 async def start_brain():
     loop = asyncio.get_running_loop()
     # SIGTERM (what bootstrap.stop() sends) would otherwise kill the process
@@ -376,12 +397,7 @@ async def start_brain():
         _dir_mode = os.stat(sock_dir).st_mode
     except OSError:
         _dir_mode = 0
-    if _dir_mode & 0o020:
-        _lane_umask, _sock_perm, _lock_perm = 0o007, 0o770, 0o660
-    elif _dir_mode & 0o002:
-        _lane_umask, _sock_perm, _lock_perm = 0o000, 0o777, 0o666
-    else:
-        _lane_umask, _sock_perm, _lock_perm = 0o077, 0o700, 0o600
+    _lane_umask, _sock_perm, _lock_perm = socket_lane_perms(_dir_mode)
     try:
         lock_fh = open(os.path.join(sock_dir, "brain.lock"), "w")
         lock_path = os.path.join(sock_dir, "brain.lock")
