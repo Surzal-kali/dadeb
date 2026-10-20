@@ -407,6 +407,19 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [done 2026-10-20] **bootstrap crash: 'FrameworkLoader' object has no
+  attribute '_child_log_fds'** — killed daharness.service on the VM
+  after a fresh install. Root cause: stop()'s reap loop popped
+  `_child_log_fds` directly, but the table is created lazily by the
+  spawn sites (MSF/ZAP/Playwright) — the Brain's spawn NEVER registered
+  an entry. On the deb (ZAP launcher absent, MSF not installed) the
+  Brain is the only child, so any teardown — SIGTERM, or stop() from
+  run_framework's finally after a launch error — hit the missing
+  attribute; the AttributeError also masked whatever launch error got
+  it there. Fix: getattr-tolerant reap in stop() + the Brain's spawn
+  site registers its /tmp/brain.log fd (mirroring the other sites,
+  closing a standing fd leak for the daemon's lifetime). Simulated
+  both paths (unregistered child, registered fd close+drain) green.
 - [done 2026-10-20] **packaging gap: replkit/ not staged** — first VM
   reinstall hit "No module named replkit" immediately on
   daharness-repl: the tree-copy loop in debian/rules staged the other

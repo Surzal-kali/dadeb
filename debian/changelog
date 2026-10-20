@@ -38,6 +38,16 @@ daharness (0.1.0+pkg2) kali; urgency=high
     the tree-copy loop now stages replkit alongside the other packages.
   (evasion/ was never missing — it has been in the tree-copy set since
   pkg1; its absence would fail discovery coverage, not imports.)
+  * teardown repair: _child_log_fds AttributeError killed
+    daharness.service on a fresh install. stop()'s reap popped the
+    child-log-fd table directly, but registration is lazy at the spawn
+    sites; on a deb where ZAP's launcher is absent and MSF is not
+    installed, the Brain is the only child and (until now) also
+    registered nothing, so any teardown (SIGTERM or the finally after a
+    launch error) died with AttributeError, masking the original error.
+    The reap is now getattr-tolerant and the Brain's spawn site
+    registers its /tmp/brain.log fd like the MSF/ZAP/Playwright sites
+    (closes a standing fd leak too).
 
  -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
 

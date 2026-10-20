@@ -298,6 +298,15 @@ class FrameworkLoader:
                 start_new_session=True,
             )
             self.active_tasks.append(process)
+            # Register the Brain's log fd like the MSF/ZAP/Playwright spawn
+            # sites do, so stop()'s reap closes it. Registration ALSO seeds
+            # _child_log_fds for stop(): when the Brain is the only child
+            # (ZAP launcher absent, MSF not installed) a bare
+            # ``self._child_log_fds.pop`` in stop() used to raise
+            # AttributeError and fail the unit on teardown (VM 2026-10-20).
+            if hasattr(brain_log, "close"):
+                self._child_log_fds = getattr(self, "_child_log_fds", {})
+                self._child_log_fds[id(process)] = brain_log
 
             # The sidecar runs its startup tool scan (BRAIN_SCAN_DIRS) BEFORE
             # binding the socket, so cold imports (impacket, scapy/packetcraft,
@@ -706,14 +715,19 @@ class FrameworkLoader:
             if procs:
                 await asyncio.gather(*(_reap_proc(p) for p in procs), return_exceptions=True)
             # Close any child log fds (e.g. the ZAP daemon's /tmp/zap.log
-            # writer) once the matching Process has been reaped.
+            # writer) once the matching Process has been reaped. The dict is
+            # spawned lazily at the spawn sites — a child launched before any
+            # site registered (or an early launch failure) must not crash
+            # teardown here.
+            log_fds = getattr(self, "_child_log_fds", {})
             for proc in procs:
-                fd = self._child_log_fds.pop(id(proc), None)
+                fd = log_fds.pop(id(proc), None)
                 if fd is not None:
                     try:
                         fd.close()
                     except Exception:
                         pass
+            self._child_log_fds = log_fds
 
         # Shield so a task cancellation (asyncio.run's KeyboardInterrupt path)
         # can't cut reaping short; children already got SIGTERM above, and the
