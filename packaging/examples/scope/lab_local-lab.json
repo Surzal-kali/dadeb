@@ -1,0 +1,15 @@
+{
+  "platform": "lab",
+  "handle": "local-lab",
+  "source": "manual",
+  "in_scope": [
+    {"asset_type": "CIDR", "asset_identifier": "<your-lab-VPN-subnet>/24",
+     "instruction": "OffSec PG Practice / course lab VPN — fill actual subnet"},
+    {"asset_type": "CIDR", "asset_identifier": "192.168.56.0/24",
+     "instruction": "VirtualBox host-only — GOAD and owned VMs"}
+  ],
+  "out_of_scope_assets": [],
+  "policy": {
+    "notes": "Vendor lab ROE governs (OffSec PG/course terms); owned hardware per user authorization. Proctored EXAM WINDOWS EXCLUDED — no LLM assistance during exams, ever."
+  }
+}

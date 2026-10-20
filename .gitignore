@@ -18,6 +18,8 @@ chroma-data/
 findings_md/
 scope/
 *.scope
+# the deb ships an editable copy of the lab template — never ignore it
+!packaging/examples/scope/
 /binaries/*
 !/binaries/.gitkeep
 !/binaries/README.md
