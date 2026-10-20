@@ -375,6 +375,72 @@ def _check_scan_tools() -> List[Dict[str, Any]]:
     return out
 
 
+def _check_postgres() -> Dict[str, Any]:
+    """Engagement-cobweb Postgres lane (deb wrapper: daharness-pg, :5433).
+
+    available = the lane port is ANSWERING (cluster up). Down states split
+    into exactly one fixable story each: tooling absent (dev box), init
+    never run (no pg.env), provisioned but stopped — so the remediation
+    line always names the command the operator can copy verbatim
+    (daharness-pg init / start), matching the wrapper's own usage text.
+    """
+    import shutil
+    import socket as _socket
+
+    port = int(os.getenv("HARNESS_DB_PORT", "5433"))
+    env_file = os.getenv("DAHARNESS_PG_ENV", "/etc/daharness/pg.env")
+    host = "127.0.0.1"
+    up = False
+    try:
+        with _socket.create_connection((host, port), timeout=1.0):
+            up = True
+    except OSError:
+        pass
+
+    base: Dict[str, Any] = {"provider": "postgres", "remediation": ""}
+    if up:
+        base["available"] = True
+        base["reason"] = f"cluster answering on {host}:{port}"
+        return base
+
+    if not (shutil.which("psql") and shutil.which("pg_createcluster")):
+        base["available"] = False
+        base["reason"] = (
+            "postgres tooling absent on this lane (psql/pg_createcluster "
+            "not in PATH)"
+        )
+        base["remediation"] = (
+            "deb lane: apt install postgresql && sudo daharness-pg init — "
+            "dev lane: pip install -e \".[db]\" + the dockered compose "
+            "postgres (dockered/docker-compose.yaml, init scripts under "
+            "dockered/postgres/init/)"
+        )
+        return base
+
+    if not os.path.exists(env_file):
+        base["available"] = False
+        base["reason"] = (
+            f"postgres present but the lane was never initialized (no "
+            f"{env_file})"
+        )
+        base["remediation"] = (
+            "sudo daharness-pg init — provisions the dedicated 'daharness' "
+            f"cluster on :{port}, mints lane roles + purge function, writes "
+            f"{env_file}"
+        )
+        return base
+
+    base["available"] = False
+    base["reason"] = (
+        f"cluster provisioned (pg.env present) but not answering on "
+        f"{host}:{port}"
+    )
+    base["remediation"] = (
+        "sudo daharness-pg start (init re-runs idempotently to repair)"
+    )
+    return base
+
+
 def _check_secretary_model() -> Dict[str, Any]:
     """Is SECRETARY_MODEL actually pulled on the Ollama host?"""
     model = os.getenv("SECRETARY_MODEL", "ornith-1.5:35b")
@@ -400,7 +466,7 @@ def _check_secretary_model() -> Dict[str, Any]:
 
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
-                 "secretary_model", "snapshot_cache")
+                 "secretary_model", "snapshot_cache", "postgres")
 
 
 @framework_tool(
@@ -408,17 +474,19 @@ PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
     "raw-socket capability, msfconsole/msfvenom + RPC port, the scanner "
     "tools (nmap/ffuf/hydra/sqlmap), the secretary model on the Ollama "
-    "host, plus the snapshot cache stats. Each probe returns "
+    "host, the snapshot cache stats, and the optional engagement-cobweb "
+    "Postgres lane. Each probe returns "
     "available/reason/remediation so a 'can I run X' question is answered "
     "before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache)."
+    "(r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|postgres)."
 )
 def framework_doctor(provider: str = "") -> Dict[str, Any]:
     """Probe per-lane capability and return a doctor report.
 
     Args:
         provider: Optional single lane to probe
-            (r2|jadx|masscan|msf|scanners|secretary_model).  Empty = full sweep.
+            (r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|
+            postgres).  Empty = full sweep.
     """
     p = (provider or "").strip().lower()
     providers: Dict[str, Any] = {}
@@ -446,6 +514,8 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
             ),
             "remediation": "",
         }
+    if p in ("", "postgres"):
+        providers["postgres"] = _check_postgres()
 
     # Contract: every record carries its own provider name (the shape tests
     # assert it, and downstream consumers format it from the record alone).
@@ -457,7 +527,8 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
         providers["_unknown_provider"] = {
             "available": False, "provider": p,
             "reason": f"unknown provider {p!r}",
-            "remediation": "pick one of: r2, jadx, masscan, msf, scanners, secretary_model",
+            "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
+                           "secretary_model, snapshot_cache, postgres",
         }
 
     ok = sum(1 for v in providers.values() if v.get("available"))

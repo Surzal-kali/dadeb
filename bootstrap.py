@@ -912,8 +912,171 @@ async def _zap_protect_launch_sync() -> None:
         logger.warning("[!] ZAP protect-mode sync failed (non-fatal): %s", e)
 
 
+# --- Prelaunch guard: never crash the stack a unit already owns -------------
+
+SERVICES_STACK = (
+    ("brain", "brain socket"),
+    ("gateway", "API gateway"),
+    ("zap", "OWASP ZAP"),
+    ("msf", "msfrpcd"),
+)
+
+
+def _stack_live_probes() -> dict:
+    """Probe each services-stack member BEFORE launching anything.
+
+    connect() is the only honest probe: a bind attempt on a live port could
+    momentarily steal a lane under an SO_REUSEPORT daemon, and ZAP/msfrpcd
+    answer new connections cheaply. Every probe is sync and timeout-capped —
+    this runs before launch, not inside a request lane.
+    """
+    probes = {}
+
+    def _tcp_up(host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return True
+        except OSError:
+            return False
+
+    probes["gateway"] = _tcp_up("127.0.0.1", GATEWAY_PORT)
+    probes["zap"] = _tcp_up(ZAP_HOST, ZAP_PORT)
+    probes["msf"] = _tcp_up("127.0.0.1", MSF_RPC_PORT)
+    probes["brain"] = False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1.0)
+            probe.connect(str(brain_socket_path()))
+        probes["brain"] = True
+    except OSError:
+        pass
+    return probes
+
+
+def _systemctl_is_active(unit: str = "daharness.service") -> Optional[str]:
+    """'active' / 'activating' / 'inactive' / ... — None when systemctl itself
+    is absent (dev tree on a non-managed box; there is nothing to ask)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True, timeout=5,
+        )
+        return proc.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _build_cli():
+    """daharness(1) — the services-stack CLI: honest --help, doctor, guard bypass.
+
+    No parser previously meant unknown args (including --help) silently fell
+    through into launching the stack — the exact footgun the prelaunch guard
+    now pairs with.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="daharness",
+        description="Services stack: Brain sidecar, OWASP ZAP, msfrpcd MCP, "
+                    "API gateway. The systemd daharness.service runs this "
+                    "same binary with --daemon.",
+        epilog=(
+            "companion wrappers:\n"
+            "  daharness-repl     interactive tool lane (REPL)\n"
+            "  daharness-index    re-index the tool registry\n"
+            "  daharness-chroma   optional embedded Chroma lane\n"
+            "  daharness-kernel   Jupyter kernel\n"
+            "  daharness-pg       engagement-cobweb Postgres lane — "
+            "setup is: sudo daharness-pg init\n"
+            "  daharness doctor   per-provider capability probe (r2, jadx, "
+            "msf, scanners, postgres, ...)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--daemon", action="store_true",
+                        help="systemd form: launch the stack and wait for SIGTERM")
+    parser.add_argument("--force", action="store_true",
+                        help="bypass the prelaunch guard (accept port conflicts)")
+    parser.add_argument("command", nargs="?", choices=["doctor"],
+                        help="doctor: probe framework capabilities and exit")
+    return parser
+
+
+def _print_doctor(provider: str = "") -> int:
+    from auxiliaries.framework_status import framework_doctor
+
+    report = framework_doctor(provider=provider)
+    print(f"framework doctor — {report.get('overall')} "
+          f"({report.get('available')} providers up)")
+    for name, rep in report.get("providers", {}).items():
+        state = "up" if rep.get("available") else "down"
+        print(f"  {name:<16} {state:<4} {rep.get('reason', '')}")
+        if not rep.get("available") and rep.get("remediation"):
+            print(f"    fix: {rep['remediation']}")
+    return 0 if report.get("overall") == "ok" else 1  # scriptable exit code
+
+
+def _prelaunch_guard(force: bool = False) -> int:
+    """Refuse — cleanly and with an exit code — to double-launch the stack.
+
+    The daharness(1) CLI and the systemd daharness.service run the SAME
+    bootstrap: without this guard a manual `daharness` on a unit-managed box
+    races the unit for every TCP port (gateway 5000 bind failure = the
+    traceback the operator saw) and fights the Brain singleton. Only the
+    HUMAN lane checks; the unit lane (INVOCATION_ID set by systemd) launches
+    normally, and force=True is the operator's explicit "I know" bypass.
+    Returns 0 to proceed, non-zero to exit with a clean message.
+    """
+    if os.getenv("INVOCATION_ID"):  # we ARE the unit — its lane owns launch
+        return 0
+    live = _stack_live_probes()
+    alive = [name for name, _ in SERVICES_STACK if live[name]]
+    if not alive:
+        return 0
+    if force:
+        print("[i] --force: launching over the live stack (port conflicts "
+              "are yours to own).")
+        return 0
+
+    unit = _systemctl_is_active()
+    print("[!] Something is already running the services stack here:")
+    for name, label in SERVICES_STACK:
+        print(f"      {label:<14} {'up' if live[name] else 'down'}")
+    if unit:
+        print(f"    systemd reports daharness.service as: {unit}")
+        print("    This CLI would race the unit lane for the same ports/sockets.")
+        print("    Drive the live stack instead:")
+        print("      daharness-repl            # interactive tool lane")
+        print(f"      curl -fsS http://127.0.0.1:{GATEWAY_PORT}/health")
+        print("    Or take the ports back:")
+        print("      sudo systemctl stop daharness  &&  daharness")
+        print("    Foreground launch over the guard (advanced):")
+        print("      daharness --force")
+    else:
+        print("    Not managed by systemd on this box — leftovers from an "
+              "earlier foreground run.")
+        print("    Drive them (daharness-repl) or stop them before launching.")
+        print("    Bypass: daharness --force")
+    # Partial stacks are the wedged state: say so loudly.
+    return 78 if (unit and len(alive) < len(SERVICES_STACK)) else 1
+
+
 async def run_framework():
-    daemon_mode = "--daemon" in sys.argv
+    args = _build_cli().parse_args()
+
+    if args.command == "doctor":
+        sys.exit(_print_doctor())
+
+    guard_rc = _prelaunch_guard(force=args.force)
+    if guard_rc:
+        sys.exit(guard_rc)
+
+    daemon_mode = args.daemon
     loader = FrameworkLoader(FRAMEWORK_ROOT)
 
     # Install signal handlers BEFORE launch_all, not after: with ZAP absent

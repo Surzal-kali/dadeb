@@ -73,6 +73,15 @@ python tool_repl.py sweep      # smoke-test every tool with safe args
 pytest tests/
 ```
 
+`bootstrap.py` is also the deb CLI (`daharness`) and refuses to
+double-launch: it now takes `--help`, `--daemon` (systemd form), `--force`
+(bypass), and a `doctor` subcommand that prints the per-provider capability
+report (`daharness doctor postgres` for a single lane). With the services
+stack or its `daharness.service` already live, the CLI prints remediation
+(drive the live stack via `daharness-repl`, `sudo systemctl stop daharness`,
+or `--force`) instead of crashing on a port double-bind. The Postgres cobweb
+lane is provisioned with `sudo daharness-pg init` (deb) once installed.`
+
 Details: all env knobs (`.env.example` — 240 lines of them, most optional),
 external CLI tools
 ([Nmap, ZAP, Metasploit, ffuf, …](#external-dependencies)), Docker bench

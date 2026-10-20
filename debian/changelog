@@ -15,6 +15,22 @@ daharness (0.1.0+pkg4) kali; urgency=high
     tested (tests/test_framework_health.py).
   * REPL selftest macro: honest EX_NOINPUT when a tree has no tests/
     directory, instead of pytest exit-4 usage noise.
+  * The daharness CLI grew an argparse front door: --help/--daemon, a
+    `doctor` subcommand that prints the framework_doctor report compactly
+    (up/down per provider + copy-verbatim fixes; non-zero exit for
+    scripting) and a prelaunch guard — when the services stack (Brain /
+    API gateway / ZAP / msfrpcd) or its systemd daharness.service is
+    already live, the CLI refuses with a clean remediation message (rc 78
+    wedged-unit / rc 1 foreign leftovers) instead of racing the exact
+    double-bind traceback seen with systemd enabled. INVOCATION_ID
+    lets the unit lane skip the guard (it owns launch); `--force` is the
+    explicit bypass.
+  * framework_doctor gained a `postgres` provider: answers "can I use the
+    engagement-cobweb Postgres lane" with one fixable story per state —
+    tooling absent (apt + daharness-pg init / dev-lane dockered), init
+    never run (sudo daharness-pg init), provisioned but down (sudo
+    daharness-pg start) — port taken from $HARNESS_DB_PORT (default
+    5433).
 
  -- Surzal-kali <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 16:36:00 -0600
 
