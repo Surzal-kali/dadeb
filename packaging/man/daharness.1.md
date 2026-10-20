@@ -27,8 +27,10 @@ Runs the daharness service stack for authorized security research:
 # OPTIONS
 
 **--daemon**
-: Services only, no interactive chat loop. This is the form used by the
-  *daharness.service* systemd unit.
+: Foregrounds the services stack. Passing it is optional — the interactive
+  secretary chat loop was trimmed from the packaged build, so bare
+  `daharness` behaves identically (interactive tool lane: *daharness-repl*(1);
+  registry re-index: `python -m daharness.core`).
 
 # CONFIGURATION
 

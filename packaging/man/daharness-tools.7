@@ -5,17 +5,24 @@
 daharness\-tools \(em daharness tool anatomy and execution model
 .SH DESCRIPTION
 .SS The framework loop
-A locally hosted LLM secretary (see \f[B]daharness.env(5)\f[R],
-SECRETARY_MODEL) semantically searches a vector\-indexed tool registry,
-then executes tools with human\-in\-the\-loop approval:
+The driving model searches the vector\-indexed tool registry, then
+executes tools through the transports; results are projected before they
+enter the model\(aqs context:
 .IP
 .EX
-search_tools  \->  execute_tool  \->  transport dispatch  \->  result projection
+search  \->  execute  \->  transport dispatch  \->  result projection
 .EE
 .PP
-\f[B]Grounding rule\f[R]: \f[CR]execute_tool\f[R] refuses any
-\f[I]tool_id\f[R] not surfaced by \f[CR]search_tools\f[R] in the current
-conversation \(em no hallucinated tool calls.
+In the packaged, headless build the \f[B]driving LLM is external\f[R]
+\(em an Open WebUI model or any gateway/MCP client: discovery is
+\f[I]/tools/search\f[R], execution \f[I]/tools/execute\f[R] or MCP
+\f[I]tools/call\f[R], and an unknown \f[I]tool_id\f[R] is a loud 404
+with a schema\-checked 422 on undeclared arguments (no hallucinated tool
+calls).
+The approval\-gated secretary lane remains an in\-tree interactive lane
+only (\f[CR]daharness.core \-\-chat\f[R]); gateway/MCP calls bypass it
+\(em the per\-turn tool budget is the headless brake (see
+\f[B]daharness\-safety\f[R](7)).
 .SS Transports
 .IP \(bu 2
 \f[B]LOCAL_FILE\f[R] \(em argparse modules discovered by static AST

@@ -23,6 +23,13 @@ daharness (0.1.0+pkg2) kali; urgency=high
     (daharness-pg.1). Units gain tolerant EnvironmentFile=-pg.env; conffile
     documents HARNESS_DB_* knobs; postgresql added to Suggests. Lane is
     inert until an operator runs daharness-pg init.
+  * Secretary chat lane trimmed for the headless build: bootstrap's
+    interactive branch (secretary _chat + boot-time indexing) is removed,
+    bare `daharness` now foregrounds the services stack exactly like
+    --daemon; SECRETARY_MODEL dropped from /etc/daharness/daharness.env
+    (no packaged lane reads it; EMBED_MODEL/OLLAMA_BASE_URL stay for the
+    registry/memory lanes). The driving LLM headless is external
+    (Open WebUI / gateway client); daharness-tools(7) rewritten.
 
  -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
 

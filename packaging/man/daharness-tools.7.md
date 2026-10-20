@@ -10,14 +10,20 @@ daharness-tools — daharness tool anatomy and execution model
 
 ## The framework loop
 
-A locally hosted LLM secretary (see **daharness.env(5)**, SECRETARY_MODEL)
-semantically searches a vector-indexed tool registry, then executes tools with
-human-in-the-loop approval:
+The driving model searches the vector-indexed tool registry, then executes
+tools through the transports; results are projected before they enter the
+model's context:
 
-    search_tools  ->  execute_tool  ->  transport dispatch  ->  result projection
+    search  ->  execute  ->  transport dispatch  ->  result projection
 
-**Grounding rule**: `execute_tool` refuses any *tool_id* not surfaced by
-`search_tools` in the current conversation — no hallucinated tool calls.
+In the packaged, headless build the **driving LLM is external** — an Open
+WebUI model or any gateway/MCP client: discovery is */tools/search*,
+execution */tools/execute* or MCP *tools/call*, and an unknown *tool_id*
+is a loud 404 with a schema-checked 422 on undeclared arguments (no
+hallucinated tool calls). The approval-gated secretary lane remains an
+in-tree interactive lane only (`daharness.core --chat`); gateway/MCP calls
+bypass it — the per-turn tool budget is the headless brake (see
+**daharness-safety**(7)).
 
 ## Transports
 

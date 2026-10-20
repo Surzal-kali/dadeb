@@ -55,10 +55,6 @@ splits session state across processes.
 
 # KEY POLICY KNOBS
 
-**SECRETARY_MODEL**
-: Chat model for the tool secretary (Ollama). Locally hosted only — never a
-  cloud LLM API.
-
 **EMBED_MODEL**
 : Ollama embedding model shared by the tool registry and memory lanes
   (default nomic-embed-text). Change it, then re-index: `python -m

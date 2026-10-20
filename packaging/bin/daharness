@@ -1,6 +1,8 @@
 #!/bin/sh
-# daharness(1) — daemon + services stack (Brain, ZAP, MSF MCP, API gateway).
-# Interactive chat loop with no args; --daemon for services only (systemd unit).
+# daharness(1) — services stack (Brain, ZAP, MSF MCP, API gateway).
+# --daemon is the systemd form; no args now behaves identically (the
+# interactive secretary chat loop is trimmed from this build — re-index
+# via `python -m daharness.core`, interactive tool lane via daharness-repl).
 # PYTHONPATH=<tree> arms sitecustomize.py (script-dir sitecustomize does NOT
 # auto-import on py3.13/3.14 — verified empirically); it PREPENDS vendor/
 # so the exact-pinned vendored closure wins overlaps (VM-proven: apt's

@@ -21,7 +21,6 @@ if sys.version_info < MIN_PYTHON:
     )
     sys.exit(1)
 
-from daharness import _chat, ToolRegistry, OllamaEmbeddingFunction  # noqa: E402
 from daharness.findings import ensure_ids_db  # noqa: E402  -- after .env load
 from constants import brain_socket_path  # noqa: E402  -- after .env load
 
@@ -876,54 +875,23 @@ async def _zap_protect_launch_sync() -> None:
 async def run_framework():
     daemon_mode = "--daemon" in sys.argv
     loader = FrameworkLoader(FRAMEWORK_ROOT)
-    loop = asyncio.get_running_loop()
-    main_task = asyncio.current_task()
-    sigint_count = 0
-
-    def _graceful_sigint():
-        """First Ctrl+C: cancel the main task so it flows into the finally ->
-        stop() reaping path (clean socket unlink, awaited child exits). Second
-        Ctrl+C: don't wait for graceful stop() -- it may be stuck -- hard-kill
-        children and exit immediately so nothing is orphaned on a live socket.
-        """
-        nonlocal sigint_count
-        sigint_count += 1
-        if sigint_count == 1:
-            logger.info("[*] Interrupt received; shutting down gracefully "
-                        "(Ctrl+C again to force-quit)...")
-            main_task.cancel()
-        else:
-            logger.warning("[!] Second interrupt: force-killing children and exiting")
-            loader._hard_kill_children()
-            os._exit(130)  # 128 + SIGINT(2); bypasses finally -- children already killed
 
     try:
         await loader.launch_all()
-        if daemon_mode:
-            shutdown_event = asyncio.Event()
-            def request_shutdown(*_):
-                shutdown_event.set()
-            signal.signal(signal.SIGTERM, request_shutdown)
-            signal.signal(signal.SIGINT, request_shutdown)
-            await shutdown_event.wait()
-        else:
-            # Interactive mode (restricted). Install a graceful SIGINT handler
-            # so a single Ctrl+C cancels the main task and flows into the
-            # finally -> stop() reaping path, instead of raising a raw
-            # KeyboardInterrupt mid-await that could leave cleanup half-done and
-            # children orphaned. add_signal_handler dispatches the callback on
-            # the loop thread (safe to cancel a task); fall back to signal.signal
-            # on platforms (e.g. Windows) that don't implement it.
-            try:
-                loop.add_signal_handler(signal.SIGINT, _graceful_sigint)
-            except NotImplementedError:
-                signal.signal(signal.SIGINT, lambda *_: _graceful_sigint())
-            logger.info("[*] Indexing framework tools...")
-            await loader.vector_registry.bootstrap_registry()
-            logger.info("[*] Entering interactive mode. Type 'exit' to quit.")
-            while True:
-                    await _chat(registry=loader.vector_registry)
-                    break
+        # The secretary chat lane is trimmed from this packaged build
+        # (headless posture: the driving LLM is external — an Open WebUI
+        # model or any gateway/MCP client). Both invocation forms
+        # foreground the services stack; the interactive tool lane lives
+        # in tool_repl.py and re-indexing via `python -m daharness.core`.
+        if not daemon_mode:
+            logger.info("[*] Secretary chat lane removed from this build; "
+                        "foregrounding the services stack (--daemon is implicit).")
+        shutdown_event = asyncio.Event()
+        def request_shutdown(*_):
+            shutdown_event.set()
+        signal.signal(signal.SIGTERM, request_shutdown)
+        signal.signal(signal.SIGINT, request_shutdown)
+        await shutdown_event.wait()
     except asyncio.CancelledError:
         # Expected: our SIGINT handler cancelled main_task. Swallow it and fall
         # through to the finally so stop() can reap children gracefully. (We
@@ -942,8 +910,8 @@ async def run_framework():
             await loader.stop()
         except KeyboardInterrupt:
             # Defence in depth: a raw KeyboardInterrupt still reached stop()
-            # (e.g. SIGTERM in interactive mode, or a platform where the
-            # add_signal_handler fallback didn't take). Force-kill children so
+            # (a platform that fell back to default SIGINT handling, or a
+            # handler race). Force-kill children so
             # none are orphaned on a live socket, then propagate.
             logger.warning("[!] Interrupt during shutdown: force-killing child processes")
             loader._hard_kill_children()

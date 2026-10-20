@@ -401,6 +401,20 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [done 2026-10-20] **Secretary chat lane trimmed from the packaged
+  build** — answers "do we need a secretary model headless?": no. The
+  LLM in deb mode is EXTERNAL (Open WebUI / gateway-MCP client);
+  bootstrap's interactive branch (index + `_chat` + double-Ctrl+C
+  handler) collapses, so bare `daharness` now daemonizes exactly like
+  `--daemon` (logged). SECRETARY_MODEL dropped from the packaged conffile
+  (it was unread by every packaged lane); EMBED_MODEL + OLLAMA_BASE_URL
+  stay (registry/memory lanes read them; one `python -m daharness.core`
+  re-index pass still feeds the chroma registry). pydantic-ai-slim
+  vendor STAYS: ToolRegistry.__init__ constructs the agent object at
+  boot (VM-proven ImportError otherwise) even though nothing headless
+  runs a turn. In-tree interactive secretary remains available via
+  `daharness.core --chat` (dev tree). tools(7) framework-loop section +
+  daharness(1) OPTIONS + env(5) rewritten to the headless truth.
 - [done 2026-10-20] **Optional engagement-Postgres lane shipped
   (daharness-pg)** — operator-decided pull-forward of the §7 "arrives with
   team mode" doctrine (user: "huge plus, optional command to start up").
@@ -574,9 +588,11 @@ after the frameit compile) — graduated to the build lane. Files authored:
 ## Remaining (ordered)
 - [decided] supply split (2026-10-20, repo-fact corrected):
   (a) VENDORED into the deb — core plumbing the Kali repo truly lacks:
-      chromadb (tool-registry vector store) + pydantic-ai-slim (secretary
-      agent loop). Without these the package fails its basic promises
-      (semantic tool discovery, the agent loop); onnxruntime/tokenizers
+      chromadb (tool-registry vector store) + pydantic-ai-slim (registry
+      boot: ToolRegistry.__init__ constructs the in-tree secretary agent
+      object even though no headless lane RUNS it — see Progress log
+      trim entry). Without these the package fails at boot or loses
+      semantic tool discovery; onnxruntime/tokenizers
       weight accepted as the price of self-sufficiency. Layer-2 wheel
       availability for cp312/313/314 feeds the actual build step.
   (b) Suggests/Recommends lane — python3-pg8000 + python3-psycopg for the
