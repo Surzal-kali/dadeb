@@ -78,6 +78,24 @@ ZAP_PROXY_BIND = os.getenv("ZAP_PROXY_BIND", "0.0.0.0")
 # via shell export before restart, e.g.  export ZAP_XMX=2g
 ZAP_XMX = os.getenv("ZAP_XMX", "512m")
 
+# ChromaDB registry backend (daharness/registry.py dials the same knobs —
+# keep the env names identical). NOT optional: everything semantic (the
+# tool secretary's search_tools, the gateway's find_best_tool, indexing,
+# vector memory recall) rides on this store, so the daemon launches it as
+# a supervised sidecar like Brain/ZAP — the old standalone
+# daharness-chroma.service + degraded-boot hack were retired 2026-10-20.
+# Persistence default: the deb StateDirectory when present, else the dev
+# tree's run/ dir (chroma needs a writable path; /usr/share trees are not).
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "9000"))
+_CHROMA_DEFAULT_PATH = os.getenv("CHROMA_PATH", "")
+if not _CHROMA_DEFAULT_PATH:
+    if os.path.isdir("/var/lib/daharness"):
+        _CHROMA_DEFAULT_PATH = "/var/lib/daharness/chroma"
+    else:
+        _CHROMA_DEFAULT_PATH = str(FRAMEWORK_ROOT / "run" / "chroma")
+CHROMA_PATH = _CHROMA_DEFAULT_PATH
+
 # API gateway (bootstrap-assembled service, api_gateway.run()): bind +
 # port knobs. Loopback default mirrors the ZAP pattern — the tool-execution
 # gateway stays host-local; GATEWAY_HOST=0.0.0.0 is a conscious widening
@@ -557,6 +575,131 @@ class FrameworkLoader:
                        "zap_* tools will fail until it does", timeout)
         return False
 
+    async def start_chroma_daemon(self, host=None, port=None, path=None):
+        """Start the vendored ChromaDB registry backend as a sidecar.
+
+        Same lifecycle shape as ``start_brain_server``/``start_zap_daemon``:
+        asyncio subprocess appended to ``active_tasks`` so ``stop()`` reaps
+        it via the SIGTERM-then-SIGKILL filter. This is the merge of the
+        retired daharness-chroma.service (2026-10-20): the registry backend
+        is the semantic lifeblood — secretary search, gateway semantic
+        lookup, indexing — so it lives and dies with the daemon instead of
+        booting the stack "degraded" against a dead backend (and the old
+        unit's chroma binary SILENTLY exited 0 on an occupied port, which
+        Restart=on-failure read as success — the quiet death that started
+        this).
+
+        Reuse-first: something already ANSWERING on the lane port means a
+        live backend (compose container, dev-tree manual run) — adopt it,
+        never double-spawn. Spawning is only for silent lanes.
+        """
+        import shutil
+        host = host or CHROMA_HOST
+        port = port or CHROMA_PORT
+        path = path or CHROMA_PATH
+
+        def _lane_up() -> bool:
+            import socket as _socket
+            try:
+                with _socket.create_connection((host, port), timeout=1.0):
+                    return True
+            except OSError:
+                return False
+
+        if _lane_up():
+            logger.info("[+] ChromaDB already answering at %s:%s — reusing "
+                        "the live backend (compose container or manual "
+                        "daharness-chroma lane)", host, port)
+            return "reused"
+
+        chroma_candidates = [
+            os.getenv("CHROMA_BIN", ""),
+            "/usr/share/daharness/vendor/bin/chroma",
+            shutil.which("chroma") or "",
+        ]
+        chroma_bin = next(
+            (c for c in chroma_candidates if c and Path(c).exists()), None
+        )
+        if not chroma_bin:
+            logger.error(
+                "[!] chroma server binary not found (tried: %s). The "
+                "registry backend is the semantic lifeblood — install the "
+                "deb vendored closure or `pip install chromadb`, or point "
+                "CHROMA_BIN at the server binary.",
+                ", ".join(c or "<unset>" for c in chroma_candidates),
+            )
+            # Same "permanent answer" contract as ZAP's absent launcher:
+            # wait_for_chroma skips its budget instead of dead-waiting,
+            # and the chroma doctor provider names the remediation.
+            self.chroma_backend_absent = True
+            return None
+
+        # Persistence path must exist before chroma's sqlite opens; the
+        # state root itself is provisioned by the unit's StateDirectory /
+        # the dev tree's run/ dir, so only the leaf is ours.
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+        log_fd, log_path = _open_child_log("chroma")
+        try:
+            logger.info("[+] Starting ChromaDB backend on %s:%s "
+                        "(persist: %s, log: %s)", host, port, path, log_path)
+            process = await asyncio.create_subprocess_exec(
+                chroma_bin, "run",
+                "--path", str(path),
+                "--host", str(host),
+                "--port", str(port),
+                stdout=log_fd,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            self.active_tasks.append(process)
+            if hasattr(log_fd, "close"):
+                self._child_log_fds = getattr(self, "_child_log_fds", {})
+                self._child_log_fds[id(process)] = log_fd
+            return process
+        except Exception as e:
+            logger.error("[!] ChromaDB backend failed to start: %s",
+                         e, exc_info=True)
+            self.chroma_backend_absent = True
+            return None
+
+    async def wait_for_chroma(self, host=None, port=None, timeout=30):
+        """Block until the ChromaDB registry backend answers on its lane.
+
+        Polls a socket connect() once a second up to ``timeout`` seconds
+        (chroma boots in ~2-5s). Semantic search stays DOWN until this
+        returns True — a warning here is the honest signal that the tool
+        secretary / gateway lookup lane is degraded, not a silent dial
+        failure later. Callers after an unavailable backend must surface
+        the same remediation the chroma doctor provider does.
+        """
+        host = host or CHROMA_HOST
+        port = port or CHROMA_PORT
+        if getattr(self, "chroma_backend_absent", False):
+            logger.error("[i] chroma backend absent — skipping the %ss "
+                         "readiness wait. Semantic search stays down until "
+                         "`chroma` is installed; see `daharness doctor "
+                         "chroma`.", timeout)
+            return False
+        import socket as _socket
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with _socket.create_connection((host, port), timeout=2.0):
+                    logger.info("[+] ChromaDB backend is up at %s:%s",
+                                host, port)
+                    return True
+            except OSError:
+                await asyncio.sleep(1)
+        logger.error(
+            "[!] ChromaDB backend did not answer on %s:%s within %ss — "
+            "SEMANTIC SEARCH IS DOWN (secretary search_tools, gateway "
+            "find_best_tool, indexing). The sidecar log is at %s. "
+            "Check `daharness doctor chroma`; manual lane: daharness-chroma.",
+            host, port, timeout,
+            "/tmp/chroma.log",
+        )
+        return False
+
     async def wait_for_burp_mcp(self, timeout=15):
         """Probe the Burp MCP Server BApp's SSE endpoint.
 
@@ -838,6 +981,16 @@ class FrameworkLoader:
         # surfaced as a launch warning, not a silent ffuf/hydra failure later.
         self._preflight_wordlists()
 
+        # Chroma FIRST: the registry backend is the semantic lifeblood
+        # (secretary search, gateway find_best_tool, indexer, vector
+        # recall) and the slowest-starting lane — launch + readiness-wait
+        # before any consumer can dial a dead store (2026-10-20 merge:
+        # replaced the old standalone unit + degraded-boot toleration).
+        self.active_tasks.append(
+            asyncio.create_task(self.start_chroma_daemon())
+        )
+        await self.wait_for_chroma()
+
         # Start services
         self.active_tasks.append(asyncio.create_task(self.start_brain_server()))
         self.active_tasks.append(asyncio.create_task(self.start_zap_daemon()))
@@ -916,6 +1069,7 @@ async def _zap_protect_launch_sync() -> None:
 
 SERVICES_STACK = (
     ("brain", "brain socket"),
+    ("chroma", "chroma lane"),
     ("gateway", "API gateway"),
     ("zap", "OWASP ZAP"),
     ("msf", "msfrpcd"),
@@ -940,6 +1094,7 @@ def _stack_live_probes() -> dict:
             return False
 
     probes["gateway"] = _tcp_up("127.0.0.1", GATEWAY_PORT)
+    probes["chroma"] = _tcp_up(CHROMA_HOST, CHROMA_PORT)
     probes["zap"] = _tcp_up(ZAP_HOST, ZAP_PORT)
     probes["msf"] = _tcp_up("127.0.0.1", MSF_RPC_PORT)
     probes["brain"] = False
@@ -989,7 +1144,8 @@ def _build_cli():
             "companion wrappers:\n"
             "  daharness-repl     interactive tool lane (REPL)\n"
             "  daharness-index    re-index the tool registry\n"
-            "  daharness-chroma   optional embedded Chroma lane\n"
+            "  daharness-chroma   manual/dev Chroma registry lane (the "
+            "daemon runs it as a sidecar)\n"
             "  daharness-kernel   Jupyter kernel\n"
             "  daharness-pg       engagement-cobweb Postgres lane — "
             "setup is: sudo daharness-pg init\n"
@@ -1004,6 +1160,10 @@ def _build_cli():
                         help="bypass the prelaunch guard (accept port conflicts)")
     parser.add_argument("command", nargs="?", choices=["doctor"],
                         help="doctor: probe framework capabilities and exit")
+    parser.add_argument(
+        "provider", nargs="?", default="",
+        help="doctor drill-down (single provider, e.g. 'chroma', "
+             "'postgres'); omitted = full report")
     return parser
 
 
@@ -1070,7 +1230,14 @@ async def run_framework():
     args = _build_cli().parse_args()
 
     if args.command == "doctor":
-        sys.exit(_print_doctor())
+        sys.exit(_print_doctor(provider=args.provider))
+    if args.provider:
+        # `daharness chroma` (provider without 'doctor') would otherwise
+        # fall into a full stack launch — refuse honestly instead.
+        print("daharness: unknown command '%s' (did you mean "
+              "`daharness doctor %s`?)" % (args.provider, args.provider),
+              file=sys.stderr)
+        sys.exit(2)
 
     guard_rc = _prelaunch_guard(force=args.force)
     if guard_rc:

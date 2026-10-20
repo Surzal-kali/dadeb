@@ -1,10 +1,90 @@
 #!/bin/sh
-# daharness-chroma(8) — vendored ChromaDB server for the tool registry.
-# PYTHONPATH=<tree> arms the tree-root sitecustomize.py, which PREPENDS
-# <tree>/vendor so the exact-pinned chromadb closure resolves (chromadb is
-# not apt-provided). Port default matches registry.py (CHROMA_PORT, 9000).
-export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
-exec /usr/share/daharness/vendor/bin/chroma run \
-  --path /var/lib/daharness/chroma \
-  --host localhost \
-  --port "${CHROMA_PORT:-9000}"
+# daharness-chroma — manual/dev lane ONLY.
+#
+# The daharness daemon launches chroma as a supervised sidecar (bootstrap
+# start_chroma_daemon) and reuses any lane that already answers. This
+# wrapper exists for working OUTSIDE the service: dev-tree hacking, a
+# manual bring-up before daharness-index, or a standalone container.
+# If the daemon is up, its sidecar already owns the port — stop the
+# service or pick another port instead of fighting it over :9000.
+set -u
+
+FORCE=0
+PASS_ARGS=""
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            cat <<EOF
+daharness-chroma — manual/dev Chroma registry lane.
+
+The daharness daemon runs chroma as a supervised sidecar and reuses any
+already-listening lane. Run this wrapper only when you are NOT under
+systemd (dev tree, manual bring-up, containers).
+
+Usage: daharness-chroma [chroma args...]
+  --force          start even if the port answers (bind conflict risk: the
+                   daemon's sidecar will adopt whichever lane got there
+                   first — prefer stopping the service instead)
+  all other args   passed through to 'chroma run'
+
+Environment: CHROMA_HOST, CHROMA_PORT, CHROMA_PATH, CHROMA_BIN
+EOF
+            exit 0
+            ;;
+        --force)
+            FORCE=1
+            ;;
+        *)
+            PASS_ARGS="$PASS_ARGS \"$arg\""
+            ;;
+    esac
+done
+# shellcheck disable=SC2086  # PASS_ARGS is word-split on purpose
+eval "set -- $PASS_ARGS"
+
+CHROMA_HOST="${CHROMA_HOST:-localhost}"
+CHROMA_PORT="${CHROMA_PORT:-9000}"
+CHROMA_PATH="${CHROMA_PATH:-$(pwd)/run/chroma}"
+
+CHROMA_BIN="${CHROMA_BIN:-}"
+if [ -z "$CHROMA_BIN" ]; then
+    for cand in /usr/share/daharness/vendor/bin/chroma "$(command -v chroma 2>/dev/null || true)"; do
+        if [ -n "$cand" ] && [ -x "$cand" ]; then
+            CHROMA_BIN="$cand"
+            break
+        fi
+    done
+fi
+if [ -z "$CHROMA_BIN" ] || [ ! -x "$CHROMA_BIN" ]; then
+    echo "daharness-chroma: no chroma binary found" >&2
+    echo "  pip install chromadb (CLI lands in ~/.local/bin) or set CHROMA_BIN." >&2
+    exit 1
+fi
+
+PORT_BUSY=$(python3 - "$CHROMA_HOST" "$CHROMA_PORT" <<'PYEOF'
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket()
+s.settimeout(2.0)
+try:
+    s.connect((host if host != "localhost" else "127.0.0.1", port))
+    print("busy")
+except OSError:
+    print("free")
+finally:
+    s.close()
+PYEOF
+) || PORT_BUSY=free
+
+if [ "$PORT_BUSY" = "busy" ] && [ "$FORCE" -ne 1 ]; then
+    echo "daharness-chroma: something already answers on $CHROMA_HOST:$CHROMA_PORT." >&2
+    echo "  Under systemd that lane is the daemon's chroma sidecar:" >&2
+    echo "    sudo systemctl stop daharness     # frees the port (sidecar goes with it)" >&2
+    echo "  Dev tree with its own compose stack: stop that container instead." >&2
+    echo "  Different port: CHROMA_PORT=9001 $0" >&2
+    echo "  Override anyway (risky): $0 --force" >&2
+    exit 78
+fi
+
+mkdir -p "$CHROMA_PATH" 2>/dev/null || true
+exec "$CHROMA_BIN" run --path "$CHROMA_PATH" --host "$CHROMA_HOST" --port "$CHROMA_PORT" "$@"

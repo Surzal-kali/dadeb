@@ -20,11 +20,11 @@ runtime knob lives here — no baked-in defaults that cannot be overridden.
 Each lane wires the file through the loader that owns it — nothing mints
 a second loader:
 
-1. *systemd system units* (*daharness*, *daharness-kernel*,
-   *daharness-chroma*) — `EnvironmentFile=/etc/daharness/daharness.env`;
-   the manager injects every key into the unit environment before
-   `ExecStart` (and `ExecStartPre`), so the daemon, kernel and chroma
-   lanes all see it.
+1. *systemd system units* (*daharness*, *daharness-kernel*) —
+   `EnvironmentFile=/etc/daharness/daharness.env`; the manager injects
+   every key into the unit environment before `ExecStart`, so the daemon
+   and kernel lanes all see it (the chroma registry backend is the
+   daemon's own sidecar and reads the same unit environment).
 2. *operator REPL / dev-tree lanes* — the *env* file next to the tree
    (*bootstrap.py*, *api_gateway.py*, *tool_repl.py* load it with
    `override=True` for their authoritative-config semantics).

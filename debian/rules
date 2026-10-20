@@ -88,8 +88,6 @@ override_dh_auto_install:
 	  debian/daharness/lib/systemd/system/daharness.service
 	install -D -m 0644 packaging/systemd/daharness-kernel.service \
 	  debian/daharness/lib/systemd/system/daharness-kernel.service
-	install -D -m 0644 packaging/systemd/daharness-chroma.service \
-	  debian/daharness/lib/systemd/system/daharness-chroma.service
 	# Auto-enable lane: Kali's 99-default.preset vetoes every *.service in
 	# the first-install `systemctl preset` pass; preset rules are first-match
 	# by ascending filename, so this file slots between Kali's 95-kali

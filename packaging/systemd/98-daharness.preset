@@ -7,5 +7,4 @@
 # Operator opt-out on a box that must not auto-start the harness:
 #   ln -sf /dev/null /etc/systemd/system-preset/98-daharness.preset
 enable daharness.service
-enable daharness-chroma.service
 enable daharness-kernel.service

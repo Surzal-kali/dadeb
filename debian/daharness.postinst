@@ -107,6 +107,23 @@ if [ -r /etc/daharness/daharness.env ] && \
     fi
 fi
 
+# Chroma merge (2026-10-20): the standalone chroma unit is retired — the
+# daemon launches chroma as a supervised sidecar that reuses (never
+# double-spawns) an answering lane. Upgrades from pkg<=4 ship a still-
+# RUNNING daharness-chroma.service whose unit file this package no longer
+# carries: stop+disable it here, before the sidecar can boot, so the
+# zombie cannot keep :9000 (the merged sidecar's reuse-probe would adopt
+# it and its Restart= keeps respawning a process systemd no longer
+# supervises properly).
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl stop daharness-chroma.service 2>/dev/null || true
+    systemctl disable daharness-chroma.service 2>/dev/null || true
+    if systemctl is-active daharness-chroma.service >/dev/null 2>&1 || \
+       systemctl list-unit-files daharness-chroma.service 2>/dev/null | grep -q daharness-chroma; then
+        echo "daharness: retired daharness-chroma.service (chroma is a daemon sidecar now)"
+    fi
+fi
+
 # Runtime units must be RE-READ by the running systemd before the next
 # (re)start: every service start re-asserts RuntimeDirectoryMode /
 # StateDirectoryMode, and a stale systemd unit cache re-applies the OLD

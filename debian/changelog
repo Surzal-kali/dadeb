@@ -25,6 +25,29 @@ daharness (0.1.0+pkg4) kali; urgency=high
     double-bind traceback seen with systemd enabled. INVOCATION_ID
     lets the unit lane skip the guard (it owns launch); `--force` is the
     explicit bypass.
+  * CHROMA IS A DAEMON SIDECAR NOW — daharness-chroma.service is retired
+    and merge-approved by the operator: the daemon's launch_all starts the
+    registry backend FIRST (before Brain/ZAP), readiness-waits its lane,
+    and reaps it with the generic sidecar shutdown (SIGTERM→grace→SIGKILL).
+    Reuse-first: a lane already ANSWERING on CHROMA_HOST:CHROMA_PORT
+    (compose container, dev-tree manual run) is adopted, never
+    double-spawned. Motivation is the old unit's silent death: `chroma
+    run` on an occupied port printed "Address localhost:9000 is not
+    available" and EXITED 0, which Restart=on-failure recorded as success
+    — the unit went quietly dead and the whole semantic lane (secretary
+    search_tools, gateway find_best_tool, indexing, vector recall)
+    degraded silently. The wrapper (packaging/bin/daharness-chroma) is
+    now guarded for its remaining manual/dev role: refused rc 78 with
+    stop-the-service / CHROMA_PORT / --force remediations when a lane
+    answers, --help, and no consumed-flag passthrough. Absent-binary and
+    wait-timeout are loud (chroma_backend_absent 'permanent answer',
+    'SEMANTIC SEARCH IS DOWN' error naming doctor chroma), and
+    framework_doctor gained a `chroma` provider.
+  * Upgrade path: postinst stops+disables any still-RUNNING legacy
+    daharness-chroma.service before the sidecar can boot (a removed unit
+    file does not stop a running unit — it would keep holding :9000 for
+    the sidecar's reuse-probe to adopt while systemd no longer supervises
+    it).
   * framework_doctor gained a `postgres` provider: answers "can I use the
     engagement-cobweb Postgres lane" with one fixable story per state —
     tooling absent (apt + daharness-pg init / dev-lane dockered), init

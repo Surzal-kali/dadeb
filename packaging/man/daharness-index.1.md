@@ -21,9 +21,10 @@ upsert into the chroma collection that every discovery lane reads —
 *tools/list*, the operator REPL, and memory recall.
 
 Before doing any work it probes its two live dependencies and prints the
-exact fix rather than a traceback: the vendored chroma server
-(daharness-chroma.service) and the Ollama host with the embed model
-(default **nomic-embed-text**). Probe knobs are read from
+exact fix rather than a traceback: the chroma registry backend (the
+*daharness* daemon's own sidecar — or a manual *daharness-chroma* lane
+when running outside the service) and the Ollama host with the embed
+model (default **nomic-embed-text**). Probe knobs are read from
 /etc/daharness/daharness.env (CHROMA_PORT, EMBED_MODEL,
 OLLAMA_BASE_URL), so a conffile retune is honored. The indexer writes
 only through the chroma HTTP server, so it runs as **any user** — no

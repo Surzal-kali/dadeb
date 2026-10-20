@@ -375,6 +375,43 @@ def _check_scan_tools() -> List[Dict[str, Any]]:
     return out
 
 
+def _check_chroma() -> Dict[str, Any]:
+    """ChromaDB registry backend — the semantic lifeblood lane.
+
+    The daemon launches it as a supervised sidecar (2026-10-20 merge of
+    the old daharness-chroma.service); the compose container owns this
+    port on the dockered lane. ONE probe question: does the store answer
+    on CHROMA_HOST:CHROMA_PORT (the same knobs registry.py dials)? If the
+    lane is silent, the secretary's search_tools / the gateway's
+    find_best_tool / indexing are ALL down — the remediation names the
+    sidecar path first, the manual dev lane second.
+    """
+    import socket as _socket
+
+    host = os.getenv("CHROMA_HOST", "localhost")
+    port = int(os.getenv("CHROMA_PORT", "9000"))
+    rec: Dict[str, Any] = {"provider": "chroma", "remediation": ""}
+    try:
+        with _socket.create_connection((host, port), timeout=1.0):
+            rec["available"] = True
+            rec["reason"] = f"registry backend answering at {host}:{port}"
+            return rec
+    except OSError:
+        pass
+    rec["available"] = False
+    rec["reason"] = (
+        f"registry backend not answering on {host}:{port} — secretary "
+        f"search_tools, gateway find_best_tool and indexing are DOWN"
+    )
+    rec["remediation"] = (
+        "boot the stack (systemctl start daharness / python bootstrap.py) "
+        "— the daemon launches chroma as a supervised sidecar and reuses "
+        "a live backend; dev lane: daharness-chroma (CHROMA_BIN=... for "
+        "pip installs)"
+    )
+    return rec
+
+
 def _check_postgres() -> Dict[str, Any]:
     """Engagement-cobweb Postgres lane (deb wrapper: daharness-pg, :5433).
 
@@ -466,7 +503,7 @@ def _check_secretary_model() -> Dict[str, Any]:
 
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
-                 "secretary_model", "snapshot_cache", "postgres")
+                 "secretary_model", "snapshot_cache", "postgres", "chroma")
 
 
 @framework_tool(
@@ -474,11 +511,11 @@ PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
     "raw-socket capability, msfconsole/msfvenom + RPC port, the scanner "
     "tools (nmap/ffuf/hydra/sqlmap), the secretary model on the Ollama "
-    "host, the snapshot cache stats, and the optional engagement-cobweb "
-    "Postgres lane. Each probe returns "
+    "host, the snapshot cache stats, the ChromaDB registry backend, and "
+    "the engagement-cobweb Postgres lane. Each probe returns "
     "available/reason/remediation so a 'can I run X' question is answered "
     "before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|postgres)."
+    "(r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|postgres|chroma)."
 )
 def framework_doctor(provider: str = "") -> Dict[str, Any]:
     """Probe per-lane capability and return a doctor report.
@@ -486,7 +523,7 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
     Args:
         provider: Optional single lane to probe
             (r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|
-            postgres).  Empty = full sweep.
+            postgres|chroma).  Empty = full sweep.
     """
     p = (provider or "").strip().lower()
     providers: Dict[str, Any] = {}
@@ -514,6 +551,8 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
             ),
             "remediation": "",
         }
+    if p in ("", "chroma"):
+        providers["chroma"] = _check_chroma()
     if p in ("", "postgres"):
         providers["postgres"] = _check_postgres()
 
@@ -528,7 +567,8 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
             "available": False, "provider": p,
             "reason": f"unknown provider {p!r}",
             "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
-                           "secretary_model, snapshot_cache, postgres",
+                           "secretary_model, snapshot_cache, postgres, "
+                           "chroma",
         }
 
     ok = sum(1 for v in providers.values() if v.get("available"))

@@ -1,11 +1,12 @@
-# Sketch — system profile, daharness daemon (Brain + ZAP + MSF MCP + API gateway)
+# Sketch — system profile, daharness daemon (Chroma registry backend +
+# Brain + ZAP + MSF MCP + API gateway)
 # Carries over scripts/daharness.service semantics; retargeted for the package
 # layout. Hand to dh_installsystemd; final paths verified on the VM smoke.
 [Unit]
-Description=daharness security framework services (Brain, ZAP, MSF MCP, API gateway)
+Description=daharness security framework services (Chroma registry, Brain, ZAP, MSF MCP, API gateway)
 Documentation=file:///usr/share/doc/daharness/README.md
-After=network-online.target daharness-chroma.service
-Wants=network-online.target daharness-chroma.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -35,10 +36,12 @@ EnvironmentFile=/etc/daharness/daharness.env
 # fresh-deb experience is unchanged.
 EnvironmentFile=-/etc/daharness/pg.env
 WorkingDirectory=/var/lib/daharness
-# Chroma boots in ~2-5s; a short tolerant head start (disabled chroma unit
-# never blocks the daemon — the registry's server-connection failure is
-# contained today and boots the stack degraded, journal-proven).
-ExecStartPre=/bin/sh -c 'i=0; while [ "$i" -lt 20 ]; do ss -ltnH 2>/dev/null | grep -q ":${CHROMA_PORT:-9000} " && exit 0; sleep 1; i=$((i+1)); done; exit 0'
+# Chroma: the registry backend is the daemon's own supervised sidecar now
+# (bootstrap launch_all -> start_chroma_daemon; 2026-10-20 merge of the
+# retired daharness-chroma.service). It reuses an already-answering lane
+# (compose container, manual dev run) and never double-spawns; postinst
+# retires a legacy chroma unit on upgrade so it cannot zombie-hold :9000.
+# The old ExecStartPre port-wait hack is gone with it.
 ExecStart=/usr/bin/daharness --daemon
 # bootstrap handles SIGTERM and reaps its sidecars; don't kill the children first
 KillMode=process
