@@ -30,6 +30,16 @@ namespace (auto-unwrapping): **keys**(value), **pluck**(value, key),
 **find**(value, key), **grep**(value, pattern). Prefer these over guessing the
 nesting.
 
+# DEPENDENCIES
+
+The kernel lane hard-imports the Jupyter closure, so the deb ships it as
+Depends: **python3-ipykernel** (pulls *python3-ipython*,
+*python3-jupyter-client*, *python3-zmq*, *python3-tornado*); Kali builds
+these against the system python. In a checkout, restore the lane with
+`pip install -e ".[jupyter]"`. Without it the unit fails fast — kernel_lane
+prints the remediation string above the traceback (journalctl -u
+daharness-kernel).
+
 # ENVIRONMENT
 
 **DAHARNESS_KERNEL_OWNER**

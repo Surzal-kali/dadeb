@@ -99,6 +99,26 @@ def _chown_kernel_artifact(path, recursive: bool = False, stream=None) -> None:
               file=stream if stream is not None else sys.stdout, flush=True)
 
 
+def _jupyter_closure_remediation(exc: Exception) -> str:
+    """Remediation text for the kernel lane's lazy Jupyter-closure imports.
+
+    ipykernel / jupyter_client are deliberately lazy (this file must stay
+    importable without them), so only the kernel paths reach their absence
+    — and for the systemd unit that means a crash loop, not a REPL. Mirror
+    the doctor pattern: name the missing module AND the fix per lane, then
+    re-raise so the unit keeps failing honestly (journal shows the hint
+    above the traceback).
+    """
+    return (
+        "  ERROR: kernel lane unavailable — "
+        f"{exc.__class__.__name__}: {exc}\n"
+        "    ipykernel (+ IPython, jupyter_client, pyzmq, tornado, traitlets)\n"
+        "    is the Jupyter-closure floor for this lane.\n"
+        "    deb lane:  sudo apt install python3-ipykernel\n"
+        "    pip lane:  pip install -e '.[jupyter]'\n"
+    )
+
+
 def _launch_kernel(kernel_argv: Optional[List[str]] = None) -> None:
     """Start a Jupyter kernel with the framework namespace in ``user_ns``.
 
@@ -110,8 +130,12 @@ def _launch_kernel(kernel_argv: Optional[List[str]] = None) -> None:
     as coroutines on the kernel's own asyncio loop — the notebook-world twin
     of the REPL's ``shell.enable_gui("asyncio")`` wiring.
     """
-    from ipykernel.ipkernel import IPythonKernel
-    from ipykernel.kernelapp import IPKernelApp
+    try:
+        from ipykernel.ipkernel import IPythonKernel
+        from ipykernel.kernelapp import IPKernelApp
+    except ModuleNotFoundError as e:
+        print(_jupyter_closure_remediation(e), file=sys.stderr, flush=True)
+        raise
 
     from replkit.core import discover_tools
     from replkit.namespace import build_ipython_namespace
@@ -236,7 +260,11 @@ def _install_kernelspec() -> None:
     """
     import tool_repl  # the load-bearing shim filename (see replkit/__init__)
 
-    from jupyter_client.kernelspec import KernelSpecManager
+    try:
+        from jupyter_client.kernelspec import KernelSpecManager
+    except ModuleNotFoundError as e:
+        print(_jupyter_closure_remediation(e), file=sys.stderr, flush=True)
+        raise
 
     spec = {
         "argv": [

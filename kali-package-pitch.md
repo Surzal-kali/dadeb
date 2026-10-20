@@ -657,6 +657,17 @@ after the frameit compile) — graduated to the build lane. Files authored:
   deps-present env) — it rides the full-install/VM leg with the pytest lane.
 
 ## Remaining (ordered)
+- [fixed 2026-10-20] kernel unit crash loop — the deb shipped no Jupyter
+  closure, so daharness-kernel.service died at its lazy import
+  (`ModuleNotFoundError: no module named 'ipykernel'`), Restart=on-failure
+  looped, and the unit ended canceled/failed. Fix: Depends lane —
+  python3-ipykernel + python3-ipython + python3-jupyter-client (Kali
+  rolling builds them against the system python 3.14; the 6.29.5 dev pin
+  predates that interpreter, so NOT vendored: the vendor set stays
+  chromadb + pydantic-ai-slim per ledger). replkit/kernel_lane gained a
+  boot tripwire printing the same remediation string per lane, then
+  re-raises, so the unit still fails honestly with a journal hint instead
+  of a bare traceback.
 - [decided] supply split (2026-10-20, repo-fact corrected):
   (a) VENDORED into the deb — core plumbing the Kali repo truly lacks:
       chromadb (tool-registry vector store) + pydantic-ai-slim (registry

@@ -38,6 +38,13 @@ Interactive commands and modes:
 : Arm the engagement cobweb key that ties journal, evidence and findings rows
   together; arming is deliberately REPL-only. See **daharness-safety(7)**.
 
+# DEPENDENCIES
+
+The interactive embed (`ipython` command) hard-imports IPython; the deb
+ships **python3-ipython** as Depends (shared with
+**daharness-kernel(1)**'s python3-ipykernel requirement). In a checkout:
+`pip install -e ".[jupyter]"`.
+
 # SEE ALSO
 
 **daharness(1)**, **daharness-kernel(1)**, **daharness-index(1)**,
