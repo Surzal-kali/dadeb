@@ -2,7 +2,8 @@
 # daharness(1) — daemon + services stack (Brain, ZAP, MSF MCP, API gateway).
 # Interactive chat loop with no args; --daemon for services only (systemd unit).
 # PYTHONPATH=<tree> arms sitecustomize.py (script-dir sitecustomize does NOT
-# auto-import on py3.13/3.14 — verified empirically); it APPENDS vendor/
-# after dist-packages so apt packages win overlaps.
+# auto-import on py3.13/3.14 — verified empirically); it PREPENDS vendor/
+# so the exact-pinned vendored closure wins overlaps (VM-proven: apt's
+# partial python3-opentelemetry-api broke chromadb under append order).
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 exec python3 /usr/share/daharness/bootstrap.py "$@"

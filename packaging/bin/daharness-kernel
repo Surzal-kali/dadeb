@@ -1,7 +1,8 @@
 #!/bin/sh
 # daharness-kernel(1) — Jupyter tool kernel (ZMQ, shares /run/daharness/brain.sock).
 # PYTHONPATH=<tree> arms sitecustomize.py (script-dir sitecustomize does NOT
-# auto-import on py3.13/3.14 — verified empirically); it APPENDS vendor/
-# after dist-packages so apt packages win overlaps.
+# auto-import on py3.13/3.14 — verified empirically); it PREPENDS vendor/
+# so the exact-pinned vendored closure wins overlaps (VM-proven: apt's
+# partial python3-opentelemetry-api broke chromadb under append order).
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 exec python3 /usr/share/daharness/tool_repl.py --kernel "$@"

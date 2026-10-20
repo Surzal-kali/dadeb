@@ -242,13 +242,22 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
    /usr/share/daharness/listeners/plugins/frameit.so; grep .so mtime sane.
 6. Conffiles: dpkg-query -W -f='${Conffiles}\n' daharness; precedence test
    per man(1) CONFIGURATION: set a marker var in /etc/daharness/daharness.env
-   and confirm the service sees it (first-existing-file-wins order).
+   and confirm the service sees it — the env file is systemd-native now
+   (EnvironmentFile= in the units, 2026-10-20 wiring; the old
+   Environment=DAHARNESS_ENV var was inert dead weight, bootstrap only
+   loads <tree>/.env).
 7. systemd: `systemctl daemon-reload && systemctl enable --now daharness`;
    `systemctl status` green; journalctl -u daharness -f → startup sequence:
    wordlist preflight → ZAP → gateway on 5000 → msfrpcd handshake → Brain
-   scan COMPLETES then socket binds.
+   scan COMPLETES then socket binds. Chroma rides along:
+   `systemctl status daharness-chroma` green and `ss -ltn | grep :9000`
+   (the vendored chroma server is the registry backend; the daemon unit
+   Wants/After it and tolerantly waits up to 20s for the port).
 8. Socket probe — REAL connect(), never Path.exists() (stale-socket
    pitfall): python one-liner connect() to /run/daharness/brain.sock.
+   Operator lanes (kernel/REPL CLIs you run as yourself) need group
+   membership: `usermod -aG daharness $USER` + re-login — RuntimeDirectory
+   is 0770 daharness:daharness and the socket binds group-shareable.
 9. Gateway: curl http://127.0.0.1:5000/health; POST /tools/search top-k
    smoke (semantic lane needs the vendored chromadb — proves it).
 10. REPL one-shot: `daharness-repl --selftest` (or equivalent) from a
@@ -346,6 +355,18 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **Daemon boots past chromadb; Brain socket + chroma server
+  wired**: journal showed the daemon ACTIVE with a functional vendored
+  chromadb (registry dials HttpClient), then two lane gaps: Brain bind
+  FileNotFoundError (tree-root run/ absent in the deb; brain.log had 234
+  tools registered — vendoring healthy) and nothing listening on 9000.
+  Fixes shipped: units get `Environment=BRAIN_SOCKET=/run/daharness/brain.sock`
+  (RuntimeDirectory was ALWAYS meant to be the socket home per the unit
+  comment) + `EnvironmentFile=/etc/daharness/daharness.env` (the
+  DAHARNESS_ENV var was inert — bootstrap loads only <tree>/.env); new
+  `daharness-chroma` wrapper + unit serve chroma from vendor/bin/chroma
+  (dockerless lane); daemon unit Wants/After chroma with a tolerant 20s
+  port-wait ExecStartPre; rules install both; wrapper comments corrected.
 - [2026-10-20] **Vendor order flipped to PREPEND (apt-wins-overlaps dead)**:
   rebuild #2 rode 343MB of wheels (deb 455KB → 63MB), daemon start still
   exit 1 — ImportError `_clean_attribute_value` from apt's

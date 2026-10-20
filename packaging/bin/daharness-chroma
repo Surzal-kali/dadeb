@@ -1,0 +1,10 @@
+#!/bin/sh
+# daharness-chroma(8) — vendored ChromaDB server for the tool registry.
+# PYTHONPATH=<tree> arms the tree-root sitecustomize.py, which PREPENDS
+# <tree>/vendor so the exact-pinned chromadb closure resolves (chromadb is
+# not apt-provided). Port default matches registry.py (CHROMA_PORT, 9000).
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
+exec /usr/share/daharness/vendor/bin/chroma run \
+  --path /var/lib/daharness/chroma \
+  --host localhost \
+  --port "${CHROMA_PORT:-9000}"

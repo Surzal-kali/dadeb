@@ -16,6 +16,7 @@ RuntimeDirectoryMode=0770
 StateDirectory=daharness
 StateDirectoryMode=0750
 Environment=DAHARNESS_ENV=/etc/daharness/daharness.env
+Environment=BRAIN_SOCKET=/run/daharness/brain.sock
 WorkingDirectory=/var/lib/daharness
 # Kernel connection file + JUPYTER_RUNTIME_DIR artifacts are chowned to the
 # attaching operator by tool_repl.py (see _kernel_owner()); this receives the
