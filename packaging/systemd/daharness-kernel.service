@@ -26,8 +26,13 @@ ExecStart=/usr/bin/daharness-kernel
 StandardInput=null
 StandardOutput=journal
 StandardError=journal
+# Framework background jobs (nmap/masscan/ffuf/...) spawn detached
+# (start_new_session=True) so orphaned scans survive harness death; killing
+# only the main process on stop preserves that semantic.
+KillMode=process
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
