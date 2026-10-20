@@ -1,3 +1,7 @@
 #!/bin/sh
 # daharness-repl(1) — interactive tool REPL in the packaging tree.
+# PYTHONPATH=<tree> arms sitecustomize.py (script-dir sitecustomize does NOT
+# auto-import on py3.13/3.14 — verified empirically); it APPENDS vendor/
+# after dist-packages so apt packages win overlaps.
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 exec python3 /usr/share/daharness/tool_repl.py "$@"

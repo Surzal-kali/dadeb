@@ -309,12 +309,14 @@ after the frameit compile) — graduated to the build lane. Files authored:
   exit-1 smoke fail): rules vendoring step runs `pip install --no-compile
   --target <staging>/usr/share/daharness/vendor chromadb==1.5.9
   pydantic-ai-slim==2.35.0` (PEP-668-clean: private dir, Build-Depends
-  python3-pip, network needed at build); a committed `sitecustomize.py` at
-  the tree root APPENDS <tree>/vendor at interpreter startup for every
-  packaged lane (it sits sys.path[0] for script-exec), so apt packages win
-  overlaps and vendor fills only apt's gaps. Inert when vendor/ is absent
-  (dev trees stay pristine). Floor arbitrates any version skew (apt
-  pydantic vs vendor-closure minimums) — post-install floor is the judge.
+  python3-pip, network needed at build); the three bin wrappers export
+  `PYTHONPATH=/usr/share/daharness` so the tree-root `sitecustomize.py`
+  arms at interpreter startup and APPENDS <tree>/vendor — apt packages
+  win overlaps, vendor fills only apt's gaps (order PROVEN empirically:
+  script-dir sitecustomize pickup does NOT fire on py3.13/3.14; vendor
+  lands after dist-packages). Inert when vendor/ is absent (dev trees
+  stay pristine). Floor arbitrates any version skew (apt pydantic vs
+  vendor-closure minimums) — post-install floor is the judge.
 - debhelper is NOT on this dev box (candidate 14.5, compat 13 declared):
   the build belongs to the rootful VM — `sudo apt install -y debhelper
   dpkg-dev make gcc` then in the repo root `dpkg-buildpackage --no-sign

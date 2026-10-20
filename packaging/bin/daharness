@@ -1,4 +1,8 @@
 #!/bin/sh
 # daharness(1) — daemon + services stack (Brain, ZAP, MSF MCP, API gateway).
 # Interactive chat loop with no args; --daemon for services only (systemd unit).
+# PYTHONPATH=<tree> arms sitecustomize.py (script-dir sitecustomize does NOT
+# auto-import on py3.13/3.14 — verified empirically); it APPENDS vendor/
+# after dist-packages so apt packages win overlaps.
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 exec python3 /usr/share/daharness/bootstrap.py "$@"
