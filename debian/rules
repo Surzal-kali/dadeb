@@ -23,6 +23,12 @@ override_dh_auto_install:
 	install -D -m 0755 packaging/bin/daharness debian/daharness/usr/bin/daharness
 	install -D -m 0755 packaging/bin/daharness-kernel debian/daharness/usr/bin/daharness-kernel
 	install -D -m 0755 packaging/bin/daharness-repl debian/daharness/usr/bin/daharness-repl
+	# post-install import-floor audit (runbook step 4): the deb carries its
+	# own floor driver; packaging/ is not an ALLOWED_TOOL_ROOT so the Brain
+	# never mints it as a tool.
+	mkdir -p debian/daharness/usr/share/daharness/packaging
+	install -m 0644 packaging/l2_import_floor.py \
+	  debian/daharness/usr/share/daharness/packaging/l2_import_floor.py
 	# user-profile units ship as documented examples (system units are the
 	# enabled ones via dh_installsystemd); verified on the VM smoke
 	mkdir -p debian/daharness/usr/share/doc/daharness/systemd-user

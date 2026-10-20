@@ -287,7 +287,9 @@ after the frameit compile) — graduated to the build lane. Files authored:
   layer-2 landmine, compiled INTO the deb); override_dh_auto_install =
   ship-inventory allowlist copy into /usr/share/daharness (daharness utils
   auxiliaries payloads listeners encoders evasion owui-tools + *.py +
-  .env.example), /etc conffile, three /usr/bin wrappers.
+  .env.example), /etc conffile, three /usr/bin wrappers, AND the layer-2
+  floor driver cherry-picked to /usr/share/daharness/packaging/ so the
+  post-install audit (runbook step 4) runs without the git/zip tree.
   `dh_installsystemd --no-start` — services do NOT auto-start on install;
   the operator enables (runbook step 7). Deliberate.
 - New unit entrypoints in `packaging/bin/`: daharness (bootstrap.py),
