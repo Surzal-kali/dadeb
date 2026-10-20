@@ -32,6 +32,12 @@ daharness (0.1.0+pkg2) kali; urgency=high
     (Open WebUI / gateway client); daharness-tools(7) rewritten.
   Follow-up: daharness-index(1) — the operator re-index wrapper (the
   runbook's discovery smoke would otherwise hit an empty registry).
+  * packaging repair (VM 2026-10-20): replkit/ was missing from the
+    staged tree, so daharness-repl and the kernel unit died instantly
+    with "No module named replkit" (tool_repl imports it top-level);
+    the tree-copy loop now stages replkit alongside the other packages.
+  (evasion/ was never missing — it has been in the tree-copy set since
+  pkg1; its absence would fail discovery coverage, not imports.)
 
  -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
 

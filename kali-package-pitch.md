@@ -407,6 +407,17 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [done 2026-10-20] **packaging gap: replkit/ not staged** — first VM
+  reinstall hit "No module named replkit" immediately on
+  daharness-repl: the tree-copy loop in debian/rules staged the other
+  ALLOWED_TOOL_ROOTS + daharness/utils but not the `replkit` package
+  that tool_repl.py imports top-level (daharness-repl + the kernel unit
+  both exec tool_repl). Fix: replkit joins TREE_DIRS. Static audit of
+  shipped-code imports confirms replkit was the ONLY unshipped top-level
+  tree imported by shipped code (apk/binaries/devdocs/dropbox/knowledge/
+  pcaps/scripts are data lanes, never imported). evasion/ was NOT the
+  gap — staged since pkg1; its absence would show as discovery misses,
+  not an import error.
 - [done 2026-10-20] **Secretary chat lane trimmed from the packaged
   build** — answers "do we need a secretary model headless?": no. The
   LLM in deb mode is EXTERNAL (Open WebUI / gateway-MCP client);

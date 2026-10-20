@@ -1,6 +1,9 @@
 #!/usr/bin/make -f
 
-TREE_DIRS := daharness utils auxiliaries payloads listeners encoders evasion owui-tools
+# replkit joins the copy: tool_repl.py (daharness-repl + the kernel unit)
+# imports it top-level — omitted from the first cut, so the deb's REPL died
+# instantly with "No module named replkit" (observed on VM 2026-10-20).
+TREE_DIRS := daharness utils auxiliaries payloads listeners encoders evasion owui-tools replkit
 
 %:
 	dh $@
