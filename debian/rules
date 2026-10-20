@@ -29,6 +29,14 @@ override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness/packaging
 	install -m 0644 packaging/l2_import_floor.py \
 	  debian/daharness/usr/share/daharness/packaging/l2_import_floor.py
+	# system units: dh_installsystemd sees these in the staging tree and
+	# hooks postinst enable (not started: --no-start, operator starts them
+	# per runbook step 7); kernel unit is the background tool_repl host,
+	# enabled-not-started same posture.
+	install -D -m 0644 packaging/systemd/daharness.service \
+	  debian/daharness/lib/systemd/system/daharness.service
+	install -D -m 0644 packaging/systemd/daharness-kernel.service \
+	  debian/daharness/lib/systemd/system/daharness-kernel.service
 	# user-profile units ship as documented examples (system units are the
 	# enabled ones via dh_installsystemd); verified on the VM smoke
 	mkdir -p debian/daharness/usr/share/doc/daharness/systemd-user

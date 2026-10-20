@@ -290,8 +290,11 @@ after the frameit compile) — graduated to the build lane. Files authored:
   .env.example), /etc conffile, three /usr/bin wrappers, AND the layer-2
   floor driver cherry-picked to /usr/share/daharness/packaging/ so the
   post-install audit (runbook step 4) runs without the git/zip tree.
-  `dh_installsystemd --no-start` — services do NOT auto-start on install;
-  the operator enables (runbook step 7). Deliberate.
+  `dh_installsystemd --no-start` — services are enabled but NOT started on
+  install (system + kernel units ship via the staging-tree install; the
+  operator starts them, runbook step 7: `systemctl start daharness` or
+  `enable --now`, which is idempotent on an already-enabled unit).
+  Deliberate.
 - New unit entrypoints in `packaging/bin/`: daharness (bootstrap.py),
   daharness-kernel (tool_repl.py --kernel), daharness-repl (tool_repl.py).
 - User-profile units ship as /usr/share/doc/daharness/systemd-user/
