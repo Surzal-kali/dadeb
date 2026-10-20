@@ -311,11 +311,14 @@ after the frameit compile) — graduated to the build lane. Files authored:
   pydantic-ai-slim==2.35.0` (PEP-668-clean: private dir, Build-Depends
   python3-pip, network needed at build); the three bin wrappers export
   `PYTHONPATH=/usr/share/daharness` so the tree-root `sitecustomize.py`
-  arms at interpreter startup and APPENDS <tree>/vendor — apt packages
-  win overlaps, vendor fills only apt's gaps (order PROVEN empirically:
-  script-dir sitecustomize pickup does NOT fire on py3.13/3.14; vendor
-  lands after dist-packages). Inert when vendor/ is absent (dev trees
-  stay pristine). Floor arbitrates any version skew (apt pydantic vs
+  arms at interpreter startup and PREPENDS <tree>/vendor — the exact-pinned
+  closure WINS overlaps (order PROVEN empirically twice: script-dir
+  sitecustomize pickup does NOT fire on py3.13/3.14; and the original
+  append order was killed by the VM 2026-10-20 smoke — apt's partial
+  `python3-opentelemetry-api` 1.44.0 shadowed `opentelemetry.attributes`
+  and broke chromadb's exporter chain, so "apt wins overlaps" is dead:
+  a partial apt copy of the same namespace family is worse than none).
+  Inert when vendor/ is absent (dev trees stay pristine). Floor arbitrates any version skew (apt pydantic vs
   vendor-closure minimums) — post-install floor is the judge.
   ORDERING GOTCHA (proven on VM 2026-10-20): the vendoring step MUST live
   in override_dh_auto_install, NOT override_dh_auto_build — dh's implied
@@ -343,6 +346,13 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **Vendor order flipped to PREPEND (apt-wins-overlaps dead)**:
+  rebuild #2 rode 343MB of wheels (deb 455KB → 63MB), daemon start still
+  exit 1 — ImportError `_clean_attribute_value` from apt's
+  python3-opentelemetry-api 1.44.0 (partial copy, no sdk/exporters on the
+  box; pulled by unrelated Kali tooling, UNDECLARED by our control). Under
+  append order apt shadowed `opentelemetry.attributes`. sitecustomize now
+  PREPENDS vendor; exact-pinned closure wins, floor still arbitrates.
 - [2026-10-20] **Vendor step wiped by dh_prep — fixed, direct SSH loop up**:
   paramiko runner to the VM landed; tree already at 5372bb9 (user pushed).
   Rebuild #1 green but the deb was byte-identical to the pre-vendor build —
