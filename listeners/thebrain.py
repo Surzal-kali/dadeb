@@ -357,15 +357,31 @@ async def start_brain():
     # mounts this tree sees the same lockfile/socket inodes, and a second
     # Brain is refused here instead of racing across separate /tmp
     # namespaces (the duplicate-brain bug the old container entrypoint
-    # worked around). Prepare the dir first: world-writable so container
-    # lanes connect as a different uid and a restarted sidecar (possibly a
-    # different uid) can replace the socket.
+    # worked around). Prepare the dir, then FOLLOW the lane's own sharing
+    # shape instead of forcing world access over it: a group-writable dir
+    # (system profile — RuntimeDirectoryMode 0770 / StateDirectoryMode 2770
+    # setgid, operator joined via the daharness group) gets a 0770 socket
+    # and 0660 lock; a world-writable dir (legacy container lanes with no
+    # shared group) keeps the old 0777/0666 behavior; an owner-only dir
+    # (single-user dev checkout, umask 0022) gets a 0700/0600 socket pair.
+    # The old unconditional `chmod(sock_dir, 0o777)` widened /run/daharness
+    # behind the unit's back — the exact world-writable socket dir this
+    # permission pass was staged to close.
     sock_dir = os.path.dirname(socket_path) or "."
     try:
         os.makedirs(sock_dir, exist_ok=True)
-        os.chmod(sock_dir, 0o777)
     except OSError as e:
         print(f"[!] Could not prepare Brain socket dir {sock_dir}: {e}")
+    try:
+        _dir_mode = os.stat(sock_dir).st_mode
+    except OSError:
+        _dir_mode = 0
+    if _dir_mode & 0o020:
+        _lane_umask, _sock_perm, _lock_perm = 0o007, 0o770, 0o660
+    elif _dir_mode & 0o002:
+        _lane_umask, _sock_perm, _lock_perm = 0o000, 0o777, 0o666
+    else:
+        _lane_umask, _sock_perm, _lock_perm = 0o077, 0o700, 0o600
     try:
         lock_fh = open(os.path.join(sock_dir, "brain.lock"), "w")
         lock_path = os.path.join(sock_dir, "brain.lock")
@@ -376,13 +392,11 @@ async def start_brain():
         # per-uid.
         lock_path = f"/tmp/brain.lock-{os.geteuid()}"
         lock_fh = open(lock_path, "w")
-    # Ensure the lock file is world-writable so a brain started as a
-    # different uid (e.g. root vs surzal) can open it for flock.  Without
-    # this, a root-created 0644 lock file blocks non-root starts, which
-    # fall back to a uid-scoped lock and spawn a SECOND brain that can't
-    # bind the socket — the duplicate-brain bug.
+    # Ensure the lock file matches the lane's sharing shape (see the
+    # socket-dir comment above) so a second instance can contest the
+    # singleton only at the same trust level the socket itself allows.
     try:
-        os.chmod(lock_path, 0o666)
+        os.chmod(lock_path, _lock_perm)
     except OSError:
         pass  # best-effort; the file is still flockable by same-uid callers
     try:
@@ -482,16 +496,17 @@ async def start_brain():
                 writer.close()
             except Exception:
                 pass
-    # Bind the socket with a permissive umask so non-root callers can
-    # connect.  When the framework is launched via sudo, the inherited
-    # umask is 0022, which creates the socket as srwxr-xr-x (755) —
-    # Unix domain sockets require WRITE permission to connect, so only
-    # root can reach it.  Any non-root process (a dropped-privilege
-    # subprocess, tool_repl run as the operator, etc.) gets
-    # PermissionError and the framework silently falls back to in-process
-    # dispatch.  Temporarily setting umask=0 makes the socket 0777
-    # atomically (no race window between bind and chmod).
-    _old_umask = os.umask(0o000)
+    # Bind the socket at the lane's trust level: the umask swap lands the
+    # permed mode atomically (no race window between bind and chmod).
+    # 0777 is reserved for world-writable socket dirs (legacy container
+    # lanes); group-shared lanes get 0770 and operator-group members
+    # connect, while other local users cannot. When the framework was
+    # launched via sudo (inherited umask 0022), a default-umask bind would
+    # create the socket srwxr-xr-x — Unix domain sockets require WRITE
+    # permission to connect, so only the owner (root) would reach it and
+    # every operator-lane call silently fell back to in-process dispatch;
+    # the explicit umask per lane replaces the old blanket 0.
+    _old_umask = os.umask(_lane_umask)
     try:
         server = await asyncio.start_unix_server(handle_client, path=socket_path)
     finally:

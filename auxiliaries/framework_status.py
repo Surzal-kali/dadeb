@@ -208,7 +208,14 @@ def framework_health() -> Dict[str, Any]:
                 ),
             }
         else:
-            subsystems["findings_db"] = {"up": False, "detail": f"could not create/open {db_path}"}
+            # Spell out WHY the creation failed — a bare "could not
+            # create/open" once masked a chromadb import error picked up
+            # through daharness/__init__'s registry import chain, which is
+            # nothing like a permission problem on the DB itself.
+            subsystems["findings_db"] = {
+                "up": False,
+                "detail": f"could not create/open {db_path} ({exc})",
+            }
     db_up = db_exists
     if db_exists:
         try:

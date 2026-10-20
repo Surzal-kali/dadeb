@@ -1,3 +1,32 @@
+daharness (0.1.0+pkg3) kali; urgency=high
+
+  * Shared-state permissions actually REACH the running units now: the
+    postinst lays 2770 (setgid) down at the state root, but the next
+    service start re-asserts RuntimeDirectory/StateDirectoryMode from the
+    RUNNING systemd cache — observed live on 0.1.0+pkg2 (VM
+    2026-10-20): stale cached 0750 reset the tree to 0750 at start, so
+    every upgrade-side permission change was stomped at boot ("none of
+    the patches landed"). postinst now ends with an explicit guarded
+    `systemctl daemon-reload` (dh_installsystemd normally does this;
+    belt-and-braces so a unit-file change can never be restarted-over).
+  * Legacy tree file modes: top-level state files with pre-UMask modes
+    (ids.db 0640) stay group-read-only after any upgrade — operator
+    SQLite writes die with "attempt to write a readonly database". The
+    postinst legacy-tree pass now reconciles top-level file modes to
+    g+rw as well as ownership.
+  * Brain socket stops widening the lane behind the unit's back: the
+    unconditional socket-dir chmod 0777 + umask-0 bind (socket 0777
+    world-connectable) is replaced by lane-aware shaping — group-shared
+    dirs get socket 0770/lock 0660 (operator group connects), legacy
+    world-shared container dirs keep 0777/0666, owner-only dev dirs get
+    0700/0600. The unit's 0770 RuntimeDirectory shape is now honored
+    instead of being overwritten at Brain start.
+  * framework_health findings_db: the generic "could not create/open"
+    branch carries the real exception text (a chromadb import error used
+    to masquerade as a DB permission problem).
+
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 16:20:00 -0600
+
 daharness (0.1.0+pkg2) kali; urgency=high
 
   * F1, gateway auth armable from the package: conffile gains
