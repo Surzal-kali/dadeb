@@ -54,6 +54,15 @@ scratch, findings, and the socket with the service lane after re-login
 state sees an honest `lane_blocked: true` permission report from
 *framework_health*, never a phantom "down".
 
+Scope manifests get the same treatment: *postinst* seeds the editable
+lab template into */var/lib/daharness/scope/lab_local-lab.json* (never
+stomping an existing file) so a temp local-lab scope is authored-off-rip
+— edit the subnet/ROE lines, then `python tool_repl.py scope on
+local-lab --platform lab`. Custom manifests follow
+*scope/&lt;platform&gt;_&lt;handle&gt;.json* in the state root and arm
+with any `--platform` value. The pristine copy lives at
+*/usr/share/daharness/examples/scope/lab_local-lab.json*.
+
 Privileged lanes (raw-socket scanning, low-port OOB) are not part of this
 baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 
@@ -64,6 +73,8 @@ baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 */etc/daharness/daharness.env* — configuration
 */etc/profile.d/daharness.sh* — operator-shell plumbing (system-profile
 WORKSPACE_ROOT + BRAIN_SOCKET for shells that lack them)
+*/usr/share/daharness/examples/scope/lab_local-lab.json* — editable lab
+scope-manifest template (postinst seeds it into the state root's *scope/*)
 
 # SEE ALSO
 

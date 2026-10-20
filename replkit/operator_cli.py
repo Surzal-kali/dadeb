@@ -90,7 +90,7 @@ def _scope_command(rest: str):
 
     if sub == "on":
         if len(parts) < 2:
-            print("  Usage: scope on <handle> [--platform h1|bugcrowd|intigriti] [--no-strict] [--ip-boundary]")
+            print("  Usage: scope on <handle> [--platform h1|bugcrowd|intigriti|<custom>] [--no-strict] [--ip-boundary]")
             return
         handle = parts[1]
         platform = "h1"

@@ -109,10 +109,16 @@ Tool REPL commands:
                          sha256(), pp() available as bare names.
                          Envelope helpers: find(r,'key'), pluck(r,'ip'), grep(r,'admin'),
                          keys(r), scratch('scratch:ref', filter='8080').
-  scope on <handle> [--platform h1|bugcrowd|intigriti] [--no-strict] [--ip-boundary]
+  scope on <handle> [--platform h1|bugcrowd|intigriti|<custom>] [--no-strict] [--ip-boundary]
                          Arm the packet-scope gate (send_packet refuses
                          out-of-scope destinations; operator-only, not exposed
                          to the agent). 'scope off' disarms (lab mode).
+                         Operator-authored manifests: author
+                         scope/<platform>_<handle>.json in the state root
+                         (template: /usr/share/daharness/examples/scope/
+                         lab_local-lab.json on the deb, scope/lab_local-lab.json
+                         in the dev tree), then arm e.g.
+                         `scope on local-lab --platform lab`.
   scope status|off|add-ip <ip> [<hostname>]|rm-ip <ip>|list-ips|search <kw> [--assets]
   engagement on <slug> [<roe_note>]   Arm the engagement cobweb key (operator-only,
                          not exposed to the agent): journal + evidence rows across

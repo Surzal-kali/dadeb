@@ -47,6 +47,12 @@ override_dh_auto_install:
 	# roots resolve without code archaeology. Wrappers source it too for
 	# non-login invocations (ssh host cmd, CI).
 	install -D -m 0644 packaging/profile/daharness.sh debian/daharness/etc/profile.d/daharness.sh
+	# scope manifest template: the scope/<platform>_<handle>.json naming and
+	# layout are code knowledge — postinst seeds this into the state root so
+	# an operator can arm a temp local-lab scope off rip (edit, then
+	# `python tool_repl.py scope on local-lab --platform lab`).
+	install -D -m 0644 packaging/examples/scope/lab_local-lab.json \
+		debian/daharness/usr/share/daharness/examples/scope/lab_local-lab.json
 	# entrypoint wrappers (systemd ExecStart targets)
 	install -D -m 0755 packaging/bin/daharness debian/daharness/usr/bin/daharness
 	install -D -m 0755 packaging/bin/daharness-kernel debian/daharness/usr/bin/daharness-kernel

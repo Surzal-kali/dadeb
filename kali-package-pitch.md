@@ -657,6 +657,61 @@ after the frameit compile) — graduated to the build lane. Files authored:
   deps-present env) — it rides the full-install/VM leg with the pytest lane.
 
 ## Remaining (ordered)
+- [fixed 2026-10-20] **operator shells had no route into the system
+  profile — "neither root nor kali reaches the shared state"**. Box-verified
+  chain: the conffile reaches systemd units only (EnvironmentFile); operator
+  shells resolve constants fallbacks (WS=/usr/share/daharness code dir,
+  SOCK=/usr/share/daharness/run/brain.sock — a path nothing ever binds),
+  so even ROOT reported brain-down from a ghost path while kali also hit
+  the DAC wall (group daharness had NO members — nothing ever granted it).
+  Three-part provisioning, verified by rehearsal: (1)
+  /etc/profile.d/daharness.sh fills exactly WORKSPACE_ROOT + BRAIN_SOCKET
+  into shells that lack them (fixture-tested: fills-when-absent, user
+  exports win, missing-conffile no-op, quoted values stripped, GATEWAY_API_KEY
+  never leaks); (2) wrappers (daharness/daharness-repl/daharness-kernel)
+  source it so non-login runs get the same roots — daharness-index already
+  tolerant-sourced the full conffile; (3) postinst grants the daharness
+  group to sudo-group members at install (zero escalation — sudo members
+  are root-equivalent; usermod rehearsal: grants fresh members, skips
+  existing), with `usermod -aG daharness <user>` documented for non-sudo
+  operators. Docs: conffile deltas section rewritten (exports win, no
+  conffile edits needed), daharness(1) gained an OPERATOR ONBOARDING
+  section + FILES entry, env(5) cross-ref; roff regenerated.   Complements the framework_health lane_blocked honesty fix (an out-of-group
+  operator now gets an accurate permission report rather than a phantom "down").
+- [fixed 2026-10-20] **scope manifests were code knowledge — the deb now
+  provisions the lab template the dev tree uses**. The manifest layout
+  (in_scope/out_of_scope_assets/policy) and the
+  scope/<platform>_<handle>.json naming only existed as a dev-tree file
+  (scope/lab_local-lab.json) and an unadvertised convention; `scope on`
+  help claimed platform was h1|bugcrowd|intigriti when it is actually
+  freeform for operator-authored manifests. Shipped: the template rides
+  the deb at /usr/share/daharness/examples/scope/lab_local-lab.json;
+  postinst pre-creates the state root's scope/ dir daharness-owned 0770
+  and seeds it there (0660, group-editable) — strictly guarded, an
+  existing/operator-customized manifest is never stomped, rerun is silent;
+  help text (REPL + operator CLI) now says <custom> platforms with the
+  author-arm recipe (`scope on local-lab --platform lab`). Rehearsed:
+  postinst seed/idempotence/no-stomp over a fake root; E2E against the REAL
+  gate — WORKSPACE_ROOT=scratch-copied template, arm('local-lab','lab')
+  ok, check_scan/check_send accept the 192.168.56.0/24 CI, refuse 8.8.8.8.
+  knowledge/scope_gate.md + daharness(1) (onboarding section + FILES)
+  updated; roff regenerated.
+- [fixed 2026-10-20] board-auth vars were absent from the packaged env
+  surface — .env.example carried only H1 (H1_API_USERNAME/H1_API_TOKEN) +
+  Intigriti (INTIGRITI_USERNAME/INTIGRITI_API_TOKEN) while the code also
+  reads BUGCROWD_USERNAME (public API, falls back to H1 username) and
+  RESEARCHER_USERNAME (last-resort fallback), and daharness.env(5)
+  documented none of them, and the conffile — the ONLY channel that
+  reaches the unit lanes (brain/MCP) on a deb, since program_scope's
+  .env loader points at the read-only checkout — had no rows either.
+  Now: env(5) gained a BOARD AUTH KNOBS section (per-var semantics +
+  fill-where-the-lane-runs + chmod 0600 advice), the conffile carries
+  commented rows, .env.example gained the two missing vars + a
+  deb-vs-devtree channel note; roff regenerated.
+- [fixed 2026-10-20, hygiene] .gitignore's bare `scope/` pattern silently
+  ignored packaging/examples/scope/ — the shipped template could never
+  enter git and a fresh-clone deb build would ship nothing. Negation
+  `!packaging/examples/scope/` added; template staged.
 - [fixed 2026-10-20] kernel unit crash loop — the deb shipped no Jupyter
   closure, so daharness-kernel.service died at its lazy import
   (`ModuleNotFoundError: no module named 'ipykernel'`), Restart=on-failure

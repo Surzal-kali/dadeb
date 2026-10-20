@@ -30,6 +30,25 @@ if getent group daharness >/dev/null; then
     fi
 fi
 
+# Scope-manifest provisioning: a temp local-lab scope should be editable-off-
+# rip, not reconstructed from code knowledge. Seed the lab template into the
+# state root's scope/ dir (pre-created daharness-owned 0770 so the service
+# lane and group-member operators share it). Strictly guarded: an existing
+# manifest — operator-customized or re-run — is never stomped.
+_TEMPLATE=/usr/share/daharness/examples/scope/lab_local-lab.json
+if [ -d /var/lib/daharness ] && [ -r "$_TEMPLATE" ]; then
+    if install -d -m 0770 -o daharness -g daharness /var/lib/daharness/scope 2>/dev/null; then
+        if [ ! -e /var/lib/daharness/scope/lab_local-lab.json ]; then
+            if install -m 0660 -o daharness -g daharness \
+                "$_TEMPLATE" /var/lib/daharness/scope/lab_local-lab.json; then
+                echo "daharness: seeded lab scope template at /var/lib/daharness/scope/lab_local-lab.json"
+                echo "  edit the subnet/ROE, then arm: python tool_repl.py scope on local-lab --platform lab"
+            fi
+        fi
+    fi
+fi
+unset _TEMPLATE
+
 # Gateway API key: generate once when the conffile placeholder is still
 # empty, so a stock deb never boots an unauthenticated gateway. The
 # in-place conffile edit triggers the upgrade prompt ("keep current" — the
