@@ -1,0 +1,48 @@
+Source: daharness
+Section: utils
+Priority: optional
+Maintainer: daharness packaging <operator@localhost>
+Build-Depends: debhelper-compat (= 13), gcc
+Rules-Requires-Root: no
+Standards-Version: 4.7.0
+
+Package: daharness
+Architecture: any
+Depends: python3,
+         nmap,
+         python3-bs4,
+         python3-cryptography,
+         python3-dnspython,
+         python3-dotenv,
+         python3-fastapi,
+         python3-httpx,
+         python3-impacket,
+         python3-mcp,
+         python3-paramiko,
+         python3-prompt-toolkit,
+         python3-pyasn1,
+         python3-pydantic,
+         python3-pymetasploit3,
+         python3-pymysql,
+         python3-requests,
+         python3-scapy,
+         python3-starlette,
+         python3-urllib3,
+         python3-uvicorn,
+         python3-psutil
+Recommends: metasploit-framework, owasp-zap, wordlists
+Suggests: python3-pg8000, python3-psycopg, python3-pip, masscan
+Description: headless orchestration harness for authorized security research
+ A local "tool secretary" (LM agent) semantically searches a vector-indexed
+ tool registry (ChromaDB), selects modules and executes them with approval
+ gates. Python orchestrates; a C plugin gates Brain event dispatch; systemd
+ runs the system profile (Brain UDS at /run/daharness/brain.sock, state at
+ /var/lib/daharness, config at /etc/daharness/daharness.env).
+ .
+ Privileged lanes (raw sockets, low ports) degrade honestly and are
+ documented in daharness-safety(7).
+ .
+ NOTE: the vendored pair (chromadb, pydantic-ai-slim) ships after the
+ first-build mechanics prove out (ledger layer-2 decision); python3-mcp
+ and python3-pymetasploit3 ride the apt lane pending snapshot-compat
+ probes.

@@ -1,0 +1,33 @@
+#!/usr/bin/make -f
+
+TREE_DIRS := daharness utils auxiliaries payloads listeners encoders evasion owui-tools
+
+%:
+	dh $@
+
+# frameit.so is the Brain's C gate (unguarded module-level CDLL): sources
+# ship in git, the artifact is gitignored — the deb builds it right here.
+override_dh_auto_build:
+	gcc -shared -o listeners/plugins/frameit.so -fPIC listeners/plugins/frameit.c
+
+override_dh_auto_install:
+	mkdir -p debian/daharness/usr/share/daharness
+	for d in $(TREE_DIRS); do \
+	  cp -a $$d debian/daharness/usr/share/daharness/; \
+	done
+	cp -a -- *.py debian/daharness/usr/share/daharness/
+	install -D -m 0644 .env.example debian/daharness/usr/share/daharness/.env.example 2>/dev/null || true
+	# profile conffile: /etc/daharness/daharness.env (system profile knobs)
+	install -D -m 0644 packaging/etc/daharness.env debian/daharness/etc/daharness/daharness.env
+	# entrypoint wrappers (systemd ExecStart targets)
+	install -D -m 0755 packaging/bin/daharness debian/daharness/usr/bin/daharness
+	install -D -m 0755 packaging/bin/daharness-kernel debian/daharness/usr/bin/daharness-kernel
+	install -D -m 0755 packaging/bin/daharness-repl debian/daharness/usr/bin/daharness-repl
+	# user-profile units ship as documented examples (system units are the
+	# enabled ones via dh_installsystemd); verified on the VM smoke
+	mkdir -p debian/daharness/usr/share/doc/daharness/systemd-user
+	install -m 0644 packaging/systemd/user/*.service \
+	  debian/daharness/usr/share/doc/daharness/systemd-user/
+
+override_dh_installsystemd:
+	dh_installsystemd --no-start

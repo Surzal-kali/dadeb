@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+# Dedicated system identity (ledger decision: profiles, UMask 0007 group
+# sharing). StateDirectory= in the unit owns /var/lib/daharness at start.
+if ! getent passwd daharness >/dev/null; then
+    adduser --system --group --home /var/lib/daharness \
+        --shell /usr/sbin/nologin daharness
+fi
+
+#DEBHELPER#

@@ -1,0 +1,3 @@
+#!/bin/sh
+# daharness-kernel(1) — Jupyter tool kernel (ZMQ, shares /run/daharness/brain.sock).
+exec python3 /usr/share/daharness/tool_repl.py --kernel "$@"

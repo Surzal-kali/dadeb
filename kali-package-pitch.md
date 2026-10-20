@@ -221,12 +221,15 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
    replayable from this state without reinstalling.
 1. Interpreter gate: `python3 -V` — must be >= 3.12 (Kali current ships
    3.13; cp wheels all cover it — chromadb via abi3).
-2. Pre-install audit (before apt touches anything):
-   `dpkg-deb -c daharness_*.deb | grep frameit` → .so present;
-   `dpkg-deb -c daharness_*.deb | grep share/man` → six .gz pages;
-   `dpkg-deb -c daharness_*.deb | grep /etc/` → conffiles land under
-   /etc/daharness/; `file /usr/share/.../frameit.so` inside the deb via
-   extraction (ELF, x86-64) — the compiled-gate decision.
+2. Pre-install audit (before apt touches anything; deb file in hand):
+   DEB=./daharness_0.1.0_amd64.deb; mkdir -p /tmp/da-audit
+   `dpkg-deb -c $DEB | grep frameit` → compiled .so ships in-tree;
+   `dpkg-deb -c $DEB | grep share/man` → six .gz man pages;
+   `dpkg-deb -c $DEB | grep /etc/daharness/` → conffiles under /etc/.
+   `dpkg-deb -x $DEB /tmp/da-audit` extracts WITHOUT installing, then
+   `file /tmp/da-audit/usr/share/daharness/listeners/plugins/frameit.so`
+   proves ELF x86-64 (the compile-gate decision, byte-level).
+   `dpkg-deb -f $DEB Depends` / `-f $DEB Conffiles` → the control lane.
 3. `apt install ./daharness_*.deb` — apt must resolve the Depends lane
    (python3-impacket, python3-scapy, nmap, ...). Record which core pins
    ride apt here. apt-cache policy python3-impacket python3-mcp
@@ -263,6 +266,57 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
     /var/lib/daharness policy (leftover? documented?), snapshot-replay to
     reinstall cleanly. This validates the engagement one-purge design
     promise end-to-end.
+
+## Debian build lane (debian/ authored — first build runs on the VM)
+
+The layer-2 gate on the VM is GREEN (floor `bad: []` with system python
+after the frameit compile) — graduated to the build lane. Files authored:
+
+- `debian/source/format` = 3.0 (native): no orig tarball, tree-is-the-source.
+- `debian/changelog` → version **0.1.0+pkg1** (drives the artifact name).
+- `debian/control`: Build-Depends debhelper-compat (= 13) + gcc;
+  Rules-Requires-Root: no; depends lane = the 21 apt-mapped core names
+  (python3-bs4/cryptography/dnspython/dotenv/fastapi/httpx/impacket/mcp/
+  paramiko/prompt-toolkit/psutil/pyasn1/pydantic/pymetasploit3/pymysql/
+  requests/scapy/starlette/urllib3/uvicorn) + nmap;
+  Recommends metasploit-framework/owasp-zap/wordlists (heavy, honest
+  degrade); Suggests python3-pg8000 + python3-psycopg (the decided opt-in
+  postgres lane) + masscan (operator opt-in) + python3-pip (vendored-wheel
+  future lane).
+- `debian/rules`: override_dh_auto_build = the frameit gcc one-liner (the
+  layer-2 landmine, compiled INTO the deb); override_dh_auto_install =
+  ship-inventory allowlist copy into /usr/share/daharness (daharness utils
+  auxiliaries payloads listeners encoders evasion owui-tools + *.py +
+  .env.example), /etc conffile, three /usr/bin wrappers.
+  `dh_installsystemd --no-start` — services do NOT auto-start on install;
+  the operator enables (runbook step 7). Deliberate.
+- New unit entrypoints in `packaging/bin/`: daharness (bootstrap.py),
+  daharness-kernel (tool_repl.py --kernel), daharness-repl (tool_repl.py).
+- User-profile units ship as /usr/share/doc/daharness/systemd-user/
+  examples (not enabled) — profile choice is per-deployment (decided).
+- apt-lane notes: repo candidate python3-impacket now 0.13.0+git20251120
+  (repo moved since the layer-3 table snapshot — the VM installs the
+  candidate, the installed-tree floor arbitrates). python3-mcp 1.26.0 +
+  python3-pymetasploit3 1.0.3+git ride Depends with snapshot-compat
+  PROBES PENDING: if the installed-tree floor or the /mcp endpoint smoke
+  fails, they join the vendored set next build (honest, already decided).
+- debhelper is NOT on this dev box (candidate 14.5, compat 13 declared):
+  the build belongs to the rootful VM — `sudo apt install -y debhelper
+  dpkg-dev make gcc` then in the repo root `dpkg-buildpackage -us -uc -b`
+  → `../daharness_0.1.0+pkg1_amd64.deb`, then runbook step 2 becomes
+  runnable against a REAL artifact and steps 3-14 proceed.
+
+- [2026-11-30] VM floor graduated: frameit compiled on the VM, layer-2
+  driver reports `bad: []` (user-verified on system python). Gate
+  crossed — build lane unblocked.
+- [2026-11-30] debian/ build lane authored + executable: control/rules/
+  changelog/manpages/postinst/copyright + packaging/bin wrappers.
+  Parse checks green on this box (changelog, make -n); real build
+  deferred to the rootful VM (debhelper absent here).
+- [2026-11-30] Vendored-pair honesty pass: control Description corrected —
+  chromadb/pydantic-ai-slim are NOT in the first build's tree copy; they
+  ride the pip lane in /usr (their imports fail=OK at the installed-tree
+  floor until vendoring lands as a follow-up build).
 
 ## Progress log
 - [done 2026-10-20] man pages option B: six thin sources authored in
@@ -338,10 +392,16 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
   version.
 - [done] layer 2 on THIS box — see Progress log; the only leftover is the
   tool_repl one-shot which needs a deps-present env and rides the leg below.
-- [next, VM] fresh-Kali zero-state leg: RUNBOOK locked in above ("# Fresh-Kali
-  VM leg") — 14 ordered steps from snapshot to purge/reinstall round-trip;
-  includes the prediction that the pytest lane's 2 pip-only failures resolve
-  green on the deb runtime (apt pymetasploit3 + vendored chromadb).
+- [next, VM] BUILD on the rootful VM: `sudo apt install -y debhelper
+  dpkg-dev make gcc` → in repo root `dpkg-buildpackage -us -uc -b` →
+  `../daharness_0.1.0+pkg1_amd64.deb`. Then runbook — step 2 (dpkg-deb
+  audit) now runs against a real artifact, then `apt install ./…deb`,
+  then steps 3-14 (floor with DAHARNESS_TREE=/usr/share/daharness,
+  services, smoke, mcp/pymetasploit3 compat probes, pytest lane, purge
+  round-trip). Expect lazy misses for chromadb/pydantic-ai-slim at the
+  installed-tree floor — they are NOT in the first build's tree (pip
+  lane covers them; vendoring is the follow-up build once mechanics
+  prove out).
 - [next, dev-tree mirrors, three]: EMBED_MODEL knob port; dep-list hygiene
   mirror (urllib3>=2.0 + python-nmap drop); the three file-resolution deltas
   (unified .env load order in constants; writable-tree fallbacks in

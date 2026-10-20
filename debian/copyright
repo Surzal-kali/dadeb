@@ -1,0 +1,9 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: daharness
+Source: privately maintained research tree
+
+Files: *
+Copyright: 2026 daharness operators
+License: proprietary
+ Internal security-research harness; distribution limited to authorized
+ operator environments. No redistribution outside the engagement lane.

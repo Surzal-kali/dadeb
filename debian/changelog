@@ -1,0 +1,8 @@
+daharness (0.1.0+pkg1) kali; urgency=medium
+
+  * First packaged build: debhelper 13 lane; frameit.so compiled at build
+    time from tracked sources (unguarded module-level CDLL = build gate);
+    systemd system units (no-start; operator enables), /etc conffile,
+    six man pages, user-profile unit examples under /usr/share/doc.
+
+ -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 04:30:00 -0600

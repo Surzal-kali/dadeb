@@ -1,0 +1,4 @@
+#!/bin/sh
+# daharness(1) — daemon + services stack (Brain, ZAP, MSF MCP, API gateway).
+# Interactive chat loop with no args; --daemon for services only (systemd unit).
+exec python3 /usr/share/daharness/bootstrap.py "$@"
