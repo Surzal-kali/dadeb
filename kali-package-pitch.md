@@ -233,8 +233,8 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
    python3-pymetasploit3 python3-psycopg python3-pg8000 — capture versions.
 4. Import floor on the INSTALLED tree, system python, apt-supplied deps
    (the real deb-lane floor, unlike this box's bare-venv run):
-   run da-l2-floor.py session artifact edited: PY=/usr/bin/python3,
-   TREE=/usr/share/daharness — expect 105/105 ok (any "bad" = deb bug).
+  in-repo `packaging/l2_import_floor.py`: DAHARNESS_TREE=/usr/share/daharness
+  (floor PY defaults to the invoking interpreter) — expect 105/105 ok (any "bad" = deb bug).
 5. frameit gate on the installed path: python3 -c CDLL probe of
    /usr/share/daharness/listeners/plugins/frameit.so; grep .so mtime sane.
 6. Conffiles: dpkg-query -W -f='${Conffiles}\n' daharness; precedence test
@@ -305,7 +305,11 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
   frameit.so landmine found + compile-lane decision banked.
   [dev-tree: nothing to mirror — dev tree already carries frameit.so]
   Probe artifacts: /tmp/da-l2 venv kept for follow-up legs; floor report +
-  driver persisted in session files (da-l2-floor.json/.py).
+  driver persisted to session files, then moved IN-REPO:
+  packaging/l2_import_floor.py (env-parameterized: DAHARNESS_FLOOR_PY
+  interpreter, DAHARNESS_TREE tree root, DAHARNESS_FLOOR_REPORT path).
+  Both paths verified: clean checkout → exit 1 with the landmine + a
+  gcc hint; compiled plugin → exit 0 (14 ok / 91 lazy).
 - [done 2026-10-20] man roff compiled: six .md masters → `pandoc
   --standalone --from markdown-smart --to man` → roff .1/.5/.7 committed
   beside the masters; all six groff-clean + man-db render verified; caught
