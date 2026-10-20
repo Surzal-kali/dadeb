@@ -24,9 +24,14 @@ override_dh_auto_install:
 	# sitecustomize.py appends <tree>/vendor so apt packages win overlaps.
 	# Network needed here; ~100-250MB disk weight accepted in the ledger.
 	mkdir -p debian/daharness/usr/share/daharness/vendor
-	python3 -m pip install --no-compile --target \
+	python3 -m pip install --target \
 	  debian/daharness/usr/share/daharness/vendor \
 	  "chromadb==1.5.9" "pydantic-ai-slim[openai]==2.35.0"
+	# Bytecode the vendor closure: --no-compile saved build seconds but
+	# charged EVERY import (105-probe floor floor, daemon boots) the full
+	# source parse — vendor .pyc makes repeat imports ~3-6x faster.
+	python3 -m compileall -q -f \
+	  debian/daharness/usr/share/daharness/vendor
 	for d in $(TREE_DIRS); do \
 	  cp -a $$d debian/daharness/usr/share/daharness/; \
 	done

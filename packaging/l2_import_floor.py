@@ -38,7 +38,13 @@ ROOTS = {"auxiliaries", "payloads", "listeners", "utils", "encoders",
          "evasion", "owui-tools", "engagement", "daharness"}
 SKIP_DIRS = {"venv", ".venv", "__pycache__", ".git", "tests", "docs",
              "packaging", "dockered", "node_modules", "dist", "build",
-             "daharness.egg-info", "run", ".memory"}
+             "daharness.egg-info", "run", ".memory",
+             # vendored third-party closure (deb lane): pip's deps are not
+             # ship entries — auditing them explodes the run into hours
+             # (observed 2026-10-20: vendor.* modules enumerated and probed
+             # one-by-one at 15s cap each). The floor audits the harness
+             # tree's own imports, not pip's closure.
+             "vendor"}
 SKIP_FILES = {"conf.py", "setup.py"}  # build machinery, not shipped entries
 
 
@@ -89,7 +95,8 @@ def main():
         try:
             run = subprocess.run(cmd, cwd=str(TREE), capture_output=True,
                                  text=True, timeout=TIMEOUT_S,
-                                 env={"PYTHONDONTWRITEBYTECODE": "1"})
+                                 env={**os.environ,
+                                      "PYTHONDONTWRITEBYTECODE": "1"})
             ok = run.returncode == 0
             err = run.stderr.strip().splitlines()[-1] if run.stderr.strip() else ""
         except subprocess.TimeoutExpired:

@@ -321,10 +321,13 @@ after the frameit compile) — graduated to the build lane. Files authored:
   PROBES PENDING: if the installed-tree floor or the /mcp endpoint smoke
   fails, they join the vendored set next build (honest, already decided).
 - Vendored-wheel lane MECHANICS (decided 2026-10-20, after the daemon
-  exit-1 smoke fail): rules vendoring step runs `pip install --no-compile
-  --target <staging>/usr/share/daharness/vendor chromadb==1.5.9
-  pydantic-ai-slim==2.35.0` (PEP-668-clean: private dir, Build-Depends
-  python3-pip, network needed at build); the three bin wrappers export
+  exit-1 smoke fail): rules vendoring step runs `pip install --target
+  <staging>/usr/share/daharness/vendor chromadb==1.5.9
+  pydantic-ai-slim[openai]==2.35.0` + `compileall -q -f` bytecode pass
+  (--no-compile saved build seconds but charged every import the full
+  source parse; VM-proven 2026-10-20 floor blow-up), (PEP-668-clean:
+  private dir, Build-Depends python3-pip, network needed at build); the
+  three bin wrappers export
   `PYTHONPATH=/usr/share/daharness` so the tree-root `sitecustomize.py`
   arms at interpreter startup and PREPENDS <tree>/vendor — the exact-pinned
   closure WINS overlaps (order PROVEN empirically twice: script-dir
@@ -364,6 +367,16 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **Floor blow-up root-caused (MY bug), not VM weakness**: the
+  2-core timeout pattern persisted at 4 cores because the floor's
+  ship-module walk had no vendor exclusion — the deb tree's vendored
+  closure turned the audit into thousands of `vendor.*` `pip`-dep probes
+  (15s cap, sequential; floor children env-stripped too — env inherit
+  fixed). Floor now skips `vendor/` and inherits os.environ; vendor gain
+  a `compileall` bytecode pass (deb ~+0% source-parse charge removed).
+  STILL OPEN: dh_installsystemd enable hook landed deb-systemd-helper
+  logic in postinst but NO wants symlinks in the deb and units stay
+  disabled after install — investigate postinst run failure.
 - [2026-10-20] **FULL STACK GREEN on the VM** (direct SSH loop, no
   relay): health `{"status":"ok"}` on 0.0.0.0:5000, Brain socket ready at
   /run/daharness/brain.sock, vendored chroma serving at 9000 (systemd
