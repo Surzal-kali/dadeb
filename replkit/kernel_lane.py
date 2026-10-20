@@ -8,8 +8,8 @@ namespace: jupyter console --existing <file>, qtconsole, JupyterLab, VS
 Code, PyCharm. The frontend renders the UI; the kernel owns the
 namespace. The terminal-only sugar does not exist over ZMQ — that lane
 stays in the REPL. Keep frontends LOCAL: cells execute against live
-targets and tool output must not egress to third parties (same rule as
-SECRETARY_MODEL).
+targets and tool output must not egress to third parties (the framework's
+own data-locality rule).
 """
 
 import json
@@ -156,17 +156,17 @@ def _launch_kernel(kernel_argv: Optional[List[str]] = None) -> None:
     # silently skips tool roots that don't exist), not an empty framework.
     # Without this the kernel boots fine and every cell dies with NameError.
     if tool_count == 0:
-        from daharness.registry import ALLOWED_TOOL_ROOTS, WORKSPACE_ROOT as _root
+        from daharness.registry import ALLOWED_TOOL_ROOTS, FRAMEWORK_ROOT as _root
         missing = [str(p) for p in ALLOWED_TOOL_ROOTS if not p.exists()]
         print(
             "  ERROR: 0 tools discovered — the tool scan found nothing.\n"
-            f"    workspace root resolved to: {_root}\n"
+            f"    framework (code) root resolved to: {_root}\n"
             f"    tool roots missing: {missing or 'none (scan found files but minted no tools)'}\n"
-            "    Hint: a WORKSPACE_ROOT pinned to a path that doesn't exist in\n"
-            "    this lane (e.g. the HOST path from the shared .env inside a\n"
-            "    bind-mounted container) empties discovery. The resolver falls\n"
-            "    back to the code checkout, so this usually means the tree is\n"
-            "    missing or the scan is broken — inspect the roots above.",
+            "    Hint: discovery hangs off the CODE checkout (FRAMEWORK root),\n"
+            "    not the state root (WORKSPACE_ROOT: run/, ids.db, scope, ...).\n"
+            "    On the deb those split — code at /usr/share/daharness, state in\n"
+            "    /var/lib/daharness. Missing roots usually mean this lane can't\n"
+            "    see the tool tree — inspect the roots above.",
             flush=True,
         )
 

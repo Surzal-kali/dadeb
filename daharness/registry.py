@@ -24,7 +24,7 @@ import httpx
 from chromadb.utils import embedding_functions
 from pydantic import ValidationError
 
-from constants import TransportType, resolve_workspace_root
+from constants import TransportType, resolve_framework_root
 
 from ._param_docs import parse_param_docs, annotation_to_schema_type, annotation_to_schema_extras
 from .tool_tags import resolve_tags, tagged_doc
@@ -73,30 +73,37 @@ if "OLLAMA_BASE_URL" not in os.environ:
     )
 CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "9000"))
-# Lane-safe: $WORKSPACE_ROOT when it exists (host lane), else this checkout —
-# container lanes bind-mount the tree (and the shared .env) elsewhere, so a
-# .env-pinned HOST path must not win inside them (silently empties discovery).
-WORKSPACE_ROOT = resolve_workspace_root()
-# A non-thinking chat model reliably drives the tool loop; reasoning/thinking
-# variants tend to hallucinate tools/executions instead of actually calling
-# them.  Override via the SECRETARY_MODEL env var to swap in another model.
-SECRETARY_MODEL = os.getenv("SECRETARY_MODEL", "ornith-1.5:35b")
+# --- tool-discovery roots (code checkout, NOT the state root) ---------------
+# Discovery (index, REPL, kernel walker) hangs off the CODE checkout — the
+# deb system profile pins WORKSPACE_ROOT to the state dir (/var/lib/daharness)
+# where no tool code lives, which minted 0 tools (observed 2026-10-20, see
+# resolve_framework_root()). The Brain sidecar independently scans the same
+# tree via its own _FRAMEWORK_ROOT, so both walkers agree by construction.
+FRAMEWORK_ROOT = resolve_framework_root()
+ALLOWED_TOOL_ROOTS = [
+    (FRAMEWORK_ROOT / "auxiliaries").resolve(),
+    (FRAMEWORK_ROOT / "payloads").resolve(),
+    (FRAMEWORK_ROOT / "listeners").resolve(),
+    (FRAMEWORK_ROOT / "utils").resolve(),
+    (FRAMEWORK_ROOT / "encoders").resolve(),
+    (FRAMEWORK_ROOT / "evasion").resolve(),
+]
+
+# Semantic top_k ceiling — bound to the API/MCP search lanes (find_tools
+# clamps per-request top_k with this), NOT the secretary chat loop.
 SECRETARY_MAX_TOP_K = 10
 # Router abstention: with no human in the loop, the API dispatch path
 # refuses to run anything whose semantic match is not this close.
 # Distance is chromadb L2 on nomic-embed-text normalized vectors
 # (0 = identical). 1.1 calibrated live: good matches ~0.3-0.9.
 ROUTER_MAX_DISTANCE = float(os.getenv("ROUTER_MAX_DISTANCE", "1.1"))
-SECRETARY_MAX_APPROVAL_ROUNDS = int(os.getenv("SECRETARY_MAX_APPROVAL_ROUNDS", "5"))
-SECRETARY_TURN_TIMEOUT = float(os.getenv("SECRETARY_TURN_TIMEOUT", "600"))  # 10 min wall-clock
-ALLOWED_TOOL_ROOTS = [
-    (WORKSPACE_ROOT / "auxiliaries").resolve(),
-    (WORKSPACE_ROOT / "payloads").resolve(),
-    (WORKSPACE_ROOT / "listeners").resolve(),
-    (WORKSPACE_ROOT / "utils").resolve(),
-    (WORKSPACE_ROOT / "encoders").resolve(),
-    (WORKSPACE_ROOT / "evasion").resolve(),
-]
+# Turn wall-clock cap — MCP/semantic dispatch semantics.
+SECRETARY_TURN_TIMEOUT = float(os.getenv("SECRETARY_TURN_TIMEOUT", "600"))  # 10 min
+# NOTE: SECRETARY_MODEL and SECRETARY_MAX_APPROVAL_ROUNDS used to be module
+# knobs here and were removed — daemon-mode bootstrap cannot run the chat
+# loop at all, so there is no secretary model to read from env. The chat
+# lanes (dev REPL) carry their own in-code defaults where they still run.
+_SECRETARY_MODEL_DEFAULT = "ornith-1.5:35b"
 
 
 # --- Ollama Embedding Function ---
@@ -147,7 +154,7 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
             metadata={"hnsw:space": "cosine"},
             embedding_function=self.embedding_model,
         )
-        self.secretary_model = secretary_model or SECRETARY_MODEL
+        self.secretary_model = secretary_model or _SECRETARY_MODEL_DEFAULT
         # Human-in-the-loop gate for executions. Sync or async callables that
         # take a full-metadata summary dict and return a truthy value to approve.
         self.confirmer = confirmer or _cli_confirmer
@@ -184,7 +191,7 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
     def _resolve_script_path(script_path: Union[str, Path]) -> Path:
         candidate = Path(script_path)
         if not candidate.is_absolute():
-            candidate = (WORKSPACE_ROOT / candidate).resolve()
+            candidate = (FRAMEWORK_ROOT / candidate).resolve()
         candidate = candidate.resolve()
 
         allowed = any(
@@ -193,7 +200,7 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
         )
         if not allowed:
             raise ValueError(
-                f"Script path is outside the allowed workspace roots: {script_path}"
+                f"Script path is outside the allowed tool roots: {script_path}"
             )
         return candidate
 
@@ -444,7 +451,7 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
         1. Static analysis of argparse modules (LOCAL_FILE).
         2. Dynamic import of functions decorated with @framework_tool (BRAIN_DISPATCH).
         """
-        target_root = Path(root) if root is not None else WORKSPACE_ROOT
+        target_root = Path(root) if root is not None else FRAMEWORK_ROOT
         target_root = target_root.resolve()
 
         skip_dirs = {
@@ -486,7 +493,7 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
                 if not include_tests and "tests" in path.parts:
                     continue
 
-                rel_path = path.relative_to(WORKSPACE_ROOT)
+                rel_path = path.relative_to(FRAMEWORK_ROOT)
 
                 # --- PASS 1: Static Analysis (LOCAL_FILE) ---
                 profile = self.extract_module_profile(path)
@@ -530,8 +537,8 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
                 # --- PASS 2: Dynamic Analysis (BRAIN_DISPATCH) ---
                 try:
                     # Ensure root is in path for the import to work
-                    if str(WORKSPACE_ROOT) not in sys.path:
-                        sys.path.insert(0, str(WORKSPACE_ROOT))
+                    if str(FRAMEWORK_ROOT) not in sys.path:
+                        sys.path.insert(0, str(FRAMEWORK_ROOT))
 
                     module_name = rel_path.with_suffix("").as_posix().replace("/", ".")
                     mod = importlib.import_module(module_name)

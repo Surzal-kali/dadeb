@@ -17,6 +17,11 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+# Approval-loop brake — chat-lane knob (REPL/dev lanes; daemon-mode bootstrap
+# cannot run the chat loop, so it lives here rather than on the gateway-facing
+# registry).
+SECRETARY_MAX_APPROVAL_ROUNDS = int(os.getenv("SECRETARY_MAX_APPROVAL_ROUNDS", "5"))
+
 from pydantic_ai import (
     Agent,
     DeferredToolRequests,
@@ -1000,7 +1005,6 @@ class SecretaryMixin:
         previous `result.all_messages()` back in to continue a conversation.
         """
         from .registry import (  # lazy: avoid circular import
-            SECRETARY_MAX_APPROVAL_ROUNDS,
             SECRETARY_TURN_TIMEOUT,
         )
 

@@ -668,6 +668,31 @@ after the frameit compile) — graduated to the build lane. Files authored:
   boot tripwire printing the same remediation string per lane, then
   re-raises, so the unit still fails honestly with a journal hint instead
   of a bare traceback.
+- [fixed 2026-10-20] **indexer discovered 0 tools on the deb** — discovery
+  hung off WORKSPACE_ROOT, which the system profile pins to the state dir
+  (/var/lib/daharness exists as StateDirectory but holds no tool code; the
+  six ALLOWED_TOOL_ROOTS pointed into empty space, so `daharness-index`
+  minted nothing and every `find_best_tool`/MCP dispatch followed). Split
+  the roots declaratively: constants.resolve_framework_root() is the
+  __file__-derived CODE checkout (mirrors thebrain's _FRAMEWORK_ROOT; no
+  env knob — an override would recreate the phantom-root trap this fixes),
+  while resolve_workspace_root() keeps its documented state-only contract
+  untouched (run/, ids.db, scratch.db, scope, engagement, cookie_jar,
+  .pw-browsers). registry.py: ALLOWED_TOOL_ROOTS, the _resolve_script_path
+  allow-list base, the discovery walker's target/rel_path bases and the
+  dynamic-import sys.path insert all hang off FRAMEWORK_ROOT now (index,
+  REPL and kernel lanes share discover_local_tools, so one switch heals
+  all three); kernel 0-tool tripwire prints the code root + the split.
+  Sequel to the secretary trim above: SECRETARY_MODEL and
+  SECRETARY_MAX_APPROVAL_ROUNDS are no longer module/env knobs either —
+  daemon bootstrap cannot run the chat loop; the chat-lane default
+  (_SECRETARY_MODEL_DEFAULT) stays in-code and approval rounds moved to
+  daharness/agent.py. SECRETARY_MAX_TOP_K / ROUTER_MAX_DISTANCE /
+  SECRETARY_TURN_TIMEOUT stay on registry.py (API + MCP turn semantics).
+  Verified on the deb-shaped env: WORKSPACE_ROOT=<empty state dir> minted
+  184 manifests with every root present, manifests root-relative (no
+  state-dir path leak), allow-list resolves inside FRAMEWORK_ROOT and
+  refuses outside; system python bare import still lazy-degrades.
 - [decided] supply split (2026-10-20, repo-fact corrected):
   (a) VENDORED into the deb — core plumbing the Kali repo truly lacks:
       chromadb (tool-registry vector store) + pydantic-ai-slim (registry

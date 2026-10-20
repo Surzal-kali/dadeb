@@ -53,6 +53,10 @@ The two profile knobs MUST match across all participants (Brain, gateway,
 kernel, REPL) — choose at deployment, not per launch. Per-launch divergence
 splits session state across processes.
 
+WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
+(FRAMEWORK_ROOT — */usr/share/daharness* on the package), so
+*daharness-index* mints the shipped tools no matter where state is pinned.
+
 # KEY POLICY KNOBS
 
 **EMBED_MODEL**

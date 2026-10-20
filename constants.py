@@ -126,6 +126,31 @@ def resolve_workspace_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def resolve_framework_root() -> Path:
+    """Code-checkout root for tool discovery — deliberately NOT the state root.
+
+    The deb system profile pins ``WORKSPACE_ROOT`` to the STATE dir
+    (/var/lib/daharness: run/, ids.db, scratch.db, scope, engagement,
+    cookie_jar) while the read-only code ships at /usr/share/daharness.
+    Hanging discovery on the state root minted 0 tools (observed 2026-10-20:
+    ``daharness-index`` on the deb discovered nothing because the six
+    state-dir roots held no tool code). Same trap class brain_socket_path()
+    already dodged by deriving from the checkout — the bind-mounted thing in
+    every lane is always the tree. Deliberately env-free: an override knob
+    would recreate the phantom-root trap this fixes (the Brain sidecar's
+    ``_FRAMEWORK_ROOT`` is env-free for the same reason); tests and exotic
+    lanes redirect via monkeypatch on the constant.
+
+    Semantics split:
+      • CODE (this function): discovery roots — ``ALLOWED_TOOL_ROOTS``, the
+        registry's relative manifest/script-path base, the Brain's
+        ``BRAIN_SCAN_DIRS`` base, the REPL/kernel walker.
+      • STATE (``resolve_workspace_root``): run/, ids.db, scratch.db,
+        cookie_jar.db, .memory/, scope/, engagement/, findings, .pw-browsers.
+    """
+    return Path(__file__).resolve().parent
+
+
 # --- Brain sidecar socket path -----------------------------------------------
 # Single source of truth for the Brain's UDS path: the sidecar that BINDS it
 # and every lane that CONNECTS (secretary executor, tool REPL + daharness
