@@ -1,0 +1,11 @@
+# Opt the daharness units into auto-enable at package install.
+# Kali policy (/usr/lib/systemd/system-preset/99-default.preset) carries
+# "disable *.service" - services ship off by default on Kali. Preset files
+# merge in lexical order and the last matching rule wins, so this file
+# (name sorts after 99-default.preset) re-enables the daharness units
+# during deb-systemd-helper's first-install `systemctl preset` pass.
+# Operator opt-out on a box that must not auto-start the harness:
+#   ln -sf /dev/null /etc/systemd/system-preset/zz-daharness.preset
+enable daharness.service
+enable daharness-chroma.service
+enable daharness-kernel.service
