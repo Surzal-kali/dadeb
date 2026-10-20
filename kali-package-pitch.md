@@ -237,13 +237,15 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
 4. Import floor on the INSTALLED tree, system python, apt-supplied deps
    (the real deb-lane floor, unlike this box's bare-venv run):
   in-repo `packaging/l2_import_floor.py`: DAHARNESS_TREE=/usr/share/daharness
-  (floor PY defaults to the invoking interpreter) — expect 105/105 ok (any "bad" = deb bug).
-  VM-SIZE WARNING (2026-10-20 measured): >360s on 2 vCPU/2GB — it fans
-  out interpreter probes loading the vendored closure; needs 4 vCPU or
-  arbitrate it off the VM (static audit: `dpkg-deb -x` on the dev box,
-  same verdict). Its report is end-buffered: a timeout kill yields NO
-  partial output and the interpreter workers survive (root PIDs — kill
-  them by PID before re-running, or you stack floors and max the box).
+  (floor PY defaults to the invoking interpreter) — expect 89/89 zero-bad
+  (deb tree counts fewer than the dev-tree 105 because the deb ships the
+  TREE_DIRS allowlist only). VM-MEASURED (2026-10-20, 4 vCPU/4GB): 73 ok /
+  16 lazy / 0 bad in 63s at a 300s budget. The historic >360s timeouts
+  were a FLOOR BUG, not VM weakness — `vendor/` is in SKIP_DIRS so the
+  pip-closure probes never enumerate. Report is end-buffered: a timeout
+  kill yields NO partial output and the interpreter workers survive
+  (root PIDs — kill them by PID before re-running, or you stack floors
+  and max the box).
 5. frameit gate on the installed path: python3 -c CDLL probe of
    /usr/share/daharness/listeners/plugins/frameit.so; grep .so mtime sane.
 6. Conffiles: dpkg-query -W -f='${Conffiles}\n' daharness; precedence test
@@ -305,11 +307,24 @@ after the frameit compile) — graduated to the build lane. Files authored:
   .env.example), /etc conffile, three /usr/bin wrappers, AND the layer-2
   floor driver cherry-picked to /usr/share/daharness/packaging/ so the
   post-install audit (runbook step 4) runs without the git/zip tree.
-  `dh_installsystemd --no-start` — services are enabled but NOT started on
-  install (system + kernel units ship via the staging-tree install; the
-  operator starts them, runbook step 7: `systemctl start daharness` or
-  `enable --now`, which is idempotent on an already-enabled unit).
-  Deliberate.
+  `dh_installsystemd --no-start` — units are auto-ENABLED but NOT
+  started on install (system + kernel + chroma units ship via the
+  staging tree; KALI PRESET POLICY, 2026-10-20 decoded:
+  /usr/lib/systemd/system-preset/99-default.preset carries
+  `disable *.service` and preset rules are FIRST-match-wins in
+  ascending filename order — that is why Kali's whitelist is 95-kali
+  and the catch-all veto is 99). The shipped
+  `packaging/systemd/98-daharness.preset` slots between 95 and 99 and
+  re-enables all three units during deb-systemd-helper's first-install
+  `systemctl preset` pass (wants symlinks are helper-runtime state —
+  never staged in the deb, so `dpkg-deb -c | grep wants` is empty BY
+  DESIGN). Opt-out: `ln -sf /dev/null
+  /etc/systemd/system-preset/98-daharness.preset`. Units installed
+  BEFORE the preset fix carry helper state recording the veto no-op and
+  stay disabled — one-time `systemctl enable daharness
+  daharness-chroma daharness-kernel` un-sticks them; runbook step 7
+  (`systemctl start` / `enable --now`) starts them and is idempotent on
+  an already-enabled unit. Deliberate.
 - New unit entrypoints in `packaging/bin/`: daharness (bootstrap.py),
   daharness-kernel (tool_repl.py --kernel), daharness-repl (tool_repl.py).
 - User-profile units ship as /usr/share/doc/daharness/systemd-user/
@@ -367,6 +382,29 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **dh-enable gap ROOT-CAUSED + preset auto-enable shipped**
+  (commits `0ec74bd` + `0847b70`): postinst expansion was always correct
+  (dh_installsystemd/14.5); the veto is Kali policy —
+  `/usr/lib/systemd/system-preset/99-default.preset` = `disable
+  *.service`, and preset rules resolve FIRST-match in ascending filename
+  order (whitelist at 95, catch-all veto at 99; a `zz-*` name sorts
+  last and is never consulted — proven by "Preset files say disable
+  daharness.service" under SYSTEMD_LOG_LEVEL=debug). Fix:
+  `packaging/systemd/98-daharness.preset` slots between 95-kali and
+  99-default; deb-systemd-helper's first-install path
+  (`debian_installed()` = helper state file absent → `systemctl preset`
+  branch) then enables the units with zero operator steps. VM-validated:
+  `systemctl --preset-mode=enable-only preset daharness*` created all
+  three wants symlinks, `is-enabled` = enabled ×3. VMs installed before
+  this commit: one-shot `systemctl enable daharness daharness-chroma
+  daharness-kernel` (helper state recorded the veto permanently).
+  Also learned the hard way: `dpkg-deb -c | grep wants` is EMPTY BY
+  DESIGN — dh never stages wants links; deb-systemd-helper owns them.
+- [2026-10-20] **Floor GREEN on the VM post-vendor-skip** (`f6ef44a`):
+  89 modules — 73 ok / 16 lazy / **0 bad** — in **63s** (300s budget)
+  on the resized 4 vCPU/4GB box; report /tmp/da-l2-floor.json. The old
+  >360s double-timeout pattern (2 AND 4 cores) is fully explained by
+  the vendor-closure enumeration bug, not VM sizing.
 - [2026-10-20] **Floor blow-up root-caused (MY bug), not VM weakness**: the
   2-core timeout pattern persisted at 4 cores because the floor's
   ship-module walk had no vendor exclusion — the deb tree's vendored
@@ -374,9 +412,11 @@ after the frameit compile) — graduated to the build lane. Files authored:
   (15s cap, sequential; floor children env-stripped too — env inherit
   fixed). Floor now skips `vendor/` and inherits os.environ; vendor gain
   a `compileall` bytecode pass (deb ~+0% source-parse charge removed).
-  STILL OPEN: dh_installsystemd enable hook landed deb-systemd-helper
-  logic in postinst but NO wants symlinks in the deb and units stay
-  disabled after install — investigate postinst run failure.
+  STILL OPEN→SOLVED: the "dh enable gap" was never a dh bug.
+  dh_installsystemd enable hook landed deb-systemd-helper logic in
+  postinst correctly, but Kali's preset policy vetoed enablement
+  (see the dh-enable entry below in this log; fixed via
+  packaging/systemd/98-daharness.preset, validated on the VM).
 - [2026-10-20] **FULL STACK GREEN on the VM** (direct SSH loop, no
   relay): health `{"status":"ok"}` on 0.0.0.0:5000, Brain socket ready at
   /run/daharness/brain.sock, vendored chroma serving at 9000 (systemd
