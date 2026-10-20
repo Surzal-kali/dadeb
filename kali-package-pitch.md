@@ -317,6 +317,12 @@ after the frameit compile) — graduated to the build lane. Files authored:
   lands after dist-packages). Inert when vendor/ is absent (dev trees
   stay pristine). Floor arbitrates any version skew (apt pydantic vs
   vendor-closure minimums) — post-install floor is the judge.
+  ORDERING GOTCHA (proven on VM 2026-10-20): the vendoring step MUST live
+  in override_dh_auto_install, NOT override_dh_auto_build — dh's implied
+  sequence runs dh_prep BETWEEN the two overrides and dh_prep `rm -rf`s
+  debian/daharness wholesale; wheels installed in the build override are
+  wiped before dh_auto_install re-created the staging tree (symptom:
+  deb byte-identical with and without vendoring).
 - debhelper is NOT on this dev box (candidate 14.5, compat 13 declared):
   the build belongs to the rootful VM — `sudo apt install -y debhelper
   dpkg-dev make gcc` then in the repo root `dpkg-buildpackage --no-sign
@@ -337,6 +343,13 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **Vendor step wiped by dh_prep — fixed, direct SSH loop up**:
+  paramiko runner to the VM landed; tree already at 5372bb9 (user pushed).
+  Rebuild #1 green but the deb was byte-identical to the pre-vendor build —
+  the wheels never rode. Root cause: pip --target ran in
+  override_dh_auto_build and dh's implied dh_prep rm -rf'd the staging tree
+  before dh_auto_install. Moved the vendoring step into
+  override_dh_auto_install; direct SSH rebuild now the loop (no relay).
 - [2026-10-20] **Daemon smoke exit 1 diagnosed at code level**: the deb
   tree imports chromadb at TOP level (daharness/registry.py:22) and the
   daemon boot imports the registry (bootstrap.py:24/154/914) — on build 1
