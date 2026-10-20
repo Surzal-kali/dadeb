@@ -320,6 +320,15 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **FIRST BUILD GREEN on the VM**: clean-zip extract (previous
+  extraction residue — the suspected empty `debian/compat` ghost — died with
+  the rm -rf; unzip-over-the-top had been preserving it) →
+  dpkg-checkbuilddeps silent + dpkg-buildpackage green →
+  `../daharness_0.1.0+pkg1_*.deb`. Runbook step 2 (dpkg-deb audit) is now
+  runnable for real. VM workflow: zip-per-commit until `gh auth login`
+  (device flow) replaces it. Rebuild note: if artifacts/staging ended up
+  root-owned from a sudo run, `sudo rm -rf debian/daharness debian/.debhelper`
+  before the next non-sudo build.
 - [done 2026-10-20] man pages option B: six thin sources authored in
   packaging/man/ (three man1 wrappers, one man5, two man7).
 - [done 2026-10-20] EMBED_MODEL single knob: registry.py module _EMBED_MODEL +
