@@ -238,6 +238,12 @@ has just python3.14; cp312/313 coverage comes from PyPI ABI tags below):
    (the real deb-lane floor, unlike this box's bare-venv run):
   in-repo `packaging/l2_import_floor.py`: DAHARNESS_TREE=/usr/share/daharness
   (floor PY defaults to the invoking interpreter) — expect 105/105 ok (any "bad" = deb bug).
+  VM-SIZE WARNING (2026-10-20 measured): >360s on 2 vCPU/2GB — it fans
+  out interpreter probes loading the vendored closure; needs 4 vCPU or
+  arbitrate it off the VM (static audit: `dpkg-deb -x` on the dev box,
+  same verdict). Its report is end-buffered: a timeout kill yields NO
+  partial output and the interpreter workers survive (root PIDs — kill
+  them by PID before re-running, or you stack floors and max the box).
 5. frameit gate on the installed path: python3 -c CDLL probe of
    /usr/share/daharness/listeners/plugins/frameit.so; grep .so mtime sane.
 6. Conffiles: dpkg-query -W -f='${Conffiles}\n' daharness; precedence test
@@ -358,6 +364,24 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **FULL STACK GREEN on the VM** (direct SSH loop, no
+  relay): health `{"status":"ok"}` on 0.0.0.0:5000, Brain socket ready at
+  /run/daharness/brain.sock, vendored chroma serving at 9000 (systemd
+  unit active), MSF RPC indexed, frameit CDLL gate ok, openai-3.35.1
+  resolved by extra-group pin. openai missing surfaced as gateway death
+  at _init_secretary_agent — vendor pin changed to
+  `pydantic-ai-slim[openai]==2.35.0`.
+- [2026-10-20] **VM sizing verdict (measured)**: 2 vCPU / 2GB RAM does
+  NOT carry the stack + validation lane. Measured RSS: daemon 272MB +
+  Brain 240MB + chroma 140MB (+ msfrpcd Ruby) ≈ 1.1GB steady before any
+  tool call; kswapd0 banked 12s CPU (swap churn). The import floor
+  fans out interpreter-per-module probes loading onnxruntime/tokenizers/
+  grpc — floor exceeded 360s twice (rc=124; report is end-buffered so no
+  progress fraction; timeout-killed workers SURVIVE as root PIDs — kill
+  them explicitly). Stacked floor runs maxed both cores. Recommendation:
+  4 vCPU / 4-6GB, OR arbitrate the floor off the VM (static audit runs
+  on the dev box against `dpkg-deb -x` of the artifact — same verdict,
+  zero VM tax).
 - [2026-10-20] **Daemon boots past chromadb; Brain socket + chroma server
   wired**: journal showed the daemon ACTIVE with a functional vendored
   chromadb (registry dials HttpClient), then two lane gaps: Brain bind
