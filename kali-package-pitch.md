@@ -305,6 +305,16 @@ after the frameit compile) — graduated to the build lane. Files authored:
   python3-pymetasploit3 1.0.3+git ride Depends with snapshot-compat
   PROBES PENDING: if the installed-tree floor or the /mcp endpoint smoke
   fails, they join the vendored set next build (honest, already decided).
+- Vendored-wheel lane MECHANICS (decided 2026-10-20, after the daemon
+  exit-1 smoke fail): rules vendoring step runs `pip install --no-compile
+  --target <staging>/usr/share/daharness/vendor chromadb==1.5.9
+  pydantic-ai-slim==2.35.0` (PEP-668-clean: private dir, Build-Depends
+  python3-pip, network needed at build); a committed `sitecustomize.py` at
+  the tree root APPENDS <tree>/vendor at interpreter startup for every
+  packaged lane (it sits sys.path[0] for script-exec), so apt packages win
+  overlaps and vendor fills only apt's gaps. Inert when vendor/ is absent
+  (dev trees stay pristine). Floor arbitrates any version skew (apt
+  pydantic vs vendor-closure minimums) — post-install floor is the judge.
 - debhelper is NOT on this dev box (candidate 14.5, compat 13 declared):
   the build belongs to the rootful VM — `sudo apt install -y debhelper
   dpkg-dev make gcc` then in the repo root `dpkg-buildpackage --no-sign
@@ -325,6 +335,14 @@ after the frameit compile) — graduated to the build lane. Files authored:
   floor until vendoring lands as a follow-up build).
 
 ## Progress log
+- [2026-10-20] **Daemon smoke exit 1 diagnosed at code level**: the deb
+  tree imports chromadb at TOP level (daharness/registry.py:22) and the
+  daemon boot imports the registry (bootstrap.py:24/154/914) — on build 1
+  (no vendoring) that is an uncaught ModuleNotFoundError → exit 1. Fix
+  shipped same day: rules now VENDORS chromadb/pydantic-ai-slim wheels via
+  pip --target (PEP-668-clean probe validated) and a committed
+  sitecustomize.py appends <tree>/vendor (apt wins overlaps, vendor fills
+  gaps; inert absent vendor/). Rebuild needed; floor re-arbitrates.
 - [2026-10-20] **FIRST BUILD GREEN on the VM**: clean-zip extract (previous
   extraction residue — the suspected empty `debian/compat` ghost — died with
   the rm -rf; unzip-over-the-top had been preserving it) →
@@ -414,10 +432,9 @@ after the frameit compile) — graduated to the build lane. Files authored:
   audit) now runs against a real artifact, then `apt install ./…deb`,
   then steps 3-14 (floor with DAHARNESS_TREE=/usr/share/daharness,
   services, smoke, mcp/pymetasploit3 compat probes, pytest lane, purge
-  round-trip). Expect lazy misses for chromadb/pydantic-ai-slim at the
-  installed-tree floor — they are NOT in the first build's tree (pip
-  lane covers them; vendoring is the follow-up build once mechanics
-  prove out).
+  round-trip). Build 2+ VENDORS chromadb/pydantic-ai-slim into the tree
+  (rules pip --target + sitecustomize append) — the installed-tree floor
+  should show them importable; the lazy-miss window was build 1 only.
 - [next, dev-tree mirrors, three]: EMBED_MODEL knob port; dep-list hygiene
   mirror (urllib3>=2.0 + python-nmap drop); the three file-resolution deltas
   (unified .env load order in constants; writable-tree fallbacks in

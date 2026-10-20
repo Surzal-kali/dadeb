@@ -9,6 +9,16 @@ TREE_DIRS := daharness utils auxiliaries payloads listeners encoders evasion owu
 # ship in git, the artifact is gitignored — the deb builds it right here.
 override_dh_auto_build:
 	gcc -shared -o listeners/plugins/frameit.so -fPIC listeners/plugins/frameit.c
+	# Vendored-wheel lane (decided 2026-10-20): chromadb + pydantic-ai-slim
+	# ship IN the deb — the daemon boot path imports both at top level
+	# (daharness/registry.py:22; uncaught ImportError = systemctl exit 1).
+	# pip --target is PEP-668-clean (private dir, no system munging);
+	# sitecustomize.py appends <tree>/vendor so apt packages win overlaps.
+	# Network needed here; ~100-250MB disk weight accepted in the ledger.
+	mkdir -p debian/daharness/usr/share/daharness/vendor
+	python3 -m pip install --no-compile --target \
+	  debian/daharness/usr/share/daharness/vendor \
+	  "chromadb==1.5.9" "pydantic-ai-slim==2.35.0"
 
 override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness

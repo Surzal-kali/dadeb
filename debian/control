@@ -2,7 +2,7 @@ Source: daharness
 Section: utils
 Priority: optional
 Maintainer: daharness packaging <operator@localhost>
-Build-Depends: debhelper-compat (= 13), gcc
+Build-Depends: debhelper-compat (= 13), gcc, python3-pip
 Rules-Requires-Root: no
 Standards-Version: 4.7.0
 
