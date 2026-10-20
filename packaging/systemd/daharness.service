@@ -1,0 +1,37 @@
+# Sketch — system profile, daharness daemon (Brain + ZAP + MSF MCP + API gateway)
+# Carries over scripts/daharness.service semantics; retargeted for the package
+# layout. Hand to dh_installsystemd; final paths verified on the VM smoke.
+[Unit]
+Description=daharness security framework services (Brain, ZAP, MSF MCP, API gateway)
+Documentation=file:///usr/share/doc/daharness/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=daharness
+Group=daharness
+UMask=0007
+# /run/daharness (tmpfs) — brain.sock home; group-shareable to operator CLIs
+RuntimeDirectory=daharness
+RuntimeDirectoryMode=0770
+# /var/lib/daharness — WORKSPACE_ROOT for the system profile
+StateDirectory=daharness
+StateDirectoryMode=0750
+Environment=DAHARNESS_ENV=/etc/daharness/daharness.env
+WorkingDirectory=/var/lib/daharness
+ExecStart=/usr/bin/daharness --daemon
+# bootstrap handles SIGTERM and reaps its sidecars; don't kill the children first
+KillMode=process
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# Privileged lanes stay OFF the baseline (root/capability profiles are operator
+# opt-ins). Drop-in override shape, documented not shipped:
+#   /etc/systemd/system/daharness.service.d/privileged.conf
+#     [Service]
+#     AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
+#     CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

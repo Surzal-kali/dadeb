@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daharness"
+version = "0.1.0"
+description = "Headless, MCP-capable orchestration harness for authorized security research: a local LLM secretary searches a vector-indexed tool registry and executes tools with human-in-the-loop approval."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "daharness maintainers" }]
+keywords = [
+    "security", "pentesting", "bug-bounty", "ollama", "llm",
+    "mcp", "chromadb", "offensive-security", "authorized-testing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Information Technology",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+dependencies = [
+    # Core runtime — derived from actual framework imports (see CONTRIBUTING.md).
+    # The full dev venv export remains in requirements-dev.txt; do not add
+    # framework deps there. Keep pins aligned with requirements.txt.
+    "chromadb==1.5.9",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "pydantic-ai-slim==2.35.0",
+    "fastapi==0.141.1",
+    "starlette==1.6.0",
+    "uvicorn==0.52.3",
+    "mcp==1.29.0",
+    "python-dotenv==1.2.3",
+    "requests==2.34.2",
+    "paramiko==5.0.0",
+    "scapy==2.7.0",
+    "impacket==0.13.1",
+    "pyasn1==0.6.4",
+    "pymysql>=1.1",
+    "pg8000>=1.13",
+    "python-nmap==0.7.1",
+    "dnspython==2.8.0",
+    "cryptography==50.0.0",
+    "beautifulsoup4==4.14.3",
+    "psutil==7.2.2",
+    "prompt_toolkit==3.0.53",
+    "pymetasploit3==1.0.6",
+]
+
+[project.optional-dependencies]
+# Optional lanes — install only what you use.
+web = ["playwright==1.63.0", "curl_cffi==0.16.3"]  # rendered-DOM recon sidecar (needs: playwright install chromium) + web-session TLS/header impersonation (curl-impersonate)
+jupyter = ["ipython==9.7.0", "ipykernel==6.29.5", "jupyter_client==7.4.9"]  # notebook kernel lane
+db = ["psycopg[binary]==3.2.12"]  # engagement/journal lane: Postgres writer roles, engagement.purge, GIN what_touched (lane degrades silently to sqlite-mirror-only without it)
+dev = [
+    "pytest>=8.0",
+    "black==26.5.1",
+    # The complete pinned dev-venv export (361 pins, includes everything above):
+    # install via `pip install -r requirements-dev.txt`. The `-r` reference
+    # form is not valid PEP 508 inside extras, so it lives in README instructions.
+]
+
+[project.urls]
+Homepage = "https://github.com/Surzal-kali/daharness"
+Documentation = "https://github.com/Surzal-kali/daharness#readme"
+Issues = "https://github.com/Surzal-kali/daharness/issues"
+
+[tool.setuptools]
+# The framework runs from its checkout (bootstrap.py / tool_repl.py / systemd)
+# and imports top-level helper modules by design (constants, memories, ...);
+# packages below cover the importable core for pip-installed consumers.
+packages = ["daharness", "utils", "auxiliaries", "payloads", "listeners", "encoders"]
+
+[tool.pytest.ini_options]
+# Discovery mirrors the doc'd workflow (pytest tests/): `tests/` only — the
+# argparse-CLI siblings there (repl_recon, tests_ffuf_hydra, …) are NOT pytest
+# modules; keeping python_files explicit makes that survive a stray
+# python_files override. pythonpath pins CWD-independent imports for runners
+# that exec the console-script pytest (which does not insert CWD on sys.path).
+# The cache lives under run/ (gitignored) instead of littering a .pytest_cache
+# at the tree root.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+cache_dir = "run/pytest-cache"
+# No @pytest.mark usage in this suite today — fail loudly if one appears
+# unregistered (typo'd marks collect silently and then never run).
+addopts = "--strict-markers --strict-config -W error::pytest.PytestUnknownMarkWarning"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

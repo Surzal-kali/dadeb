@@ -1,0 +1,32 @@
+# Sketch — user profile, daemon + kernel (systemctl --user; optional alternative
+# to the system profile). Ships under /usr/lib/systemd/user/ when installed.
+# Differences from the system profile: no User=/Group= (runs as the invoking
+# user), RuntimeDirectory lands under $XDG_RUNTIME_DIR, StateDirectory under
+# $XDG_STATE_HOME (VM smoke verifies both on Kali's systemd version).
+#
+# Nothing here binds privileged ports: the OOB collaborator retune
+# (COLLAB_HTTP_PORT=8080 etc.) lives in the operator's env, and raw-socket
+# lanes degrade honestly per framework_doctor.
+#
+# NOTE: single placeholder file — whether daemon/kernel split into separate
+# user units and whether they instantiate per-user (daharness@<user>.service)
+# is a dh_installsystemd decision at packaging time (kali-package-pitch.txt
+# "Profiles"). ExecStart shows the daemon; the kernel variant swaps in
+# /usr/bin/daharness-kernel and drops KillMode (ipykernel SIGTERM path).
+
+[Unit]
+Description=daharness tool framework (user profile)
+
+[Service]
+Type=simple
+UMask=0007
+RuntimeDirectory=daharness
+StateDirectory=daharness
+Environment=DAHARNESS_ENV=%h/.config/daharness/daharness.env
+ExecStart=/usr/bin/daharness --daemon
+KillMode=process
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,98 @@
+# --- bytecode / build artifacts ---
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.exe
+
+# --- runtime state / local data (deliberately untracked) ---
+ids.db
+*.sqlite3
+*.memory/
+chroma-data/
+# --- Brain sidecar socket + lock dir (shared across container lanes via the
+# bind-mounted tree; see constants.brain_socket_path) ---
+/run/
+.zap_home/
+.pw-browsers/
+findings_md/
+scope/
+*.scope
+/binaries/*
+!/binaries/.gitkeep
+!/binaries/README.md
+/apk/*
+!/apk/.gitkeep
+!/apk/README.md
+# --- payload dropbox (generated munitions; msfvenom output root) ---
+/dropbox/*
+!/dropbox/.gitkeep
+!/dropbox/README.md
+# --- packet captures (scapy wrpcap output; forensic evidence) ---
+/pcaps/*
+!/pcaps/.gitkeep
+!/pcaps/README.md
+bugcheck_ledger.md
+ledger_archive/*
+briefs/*
+docs/*
+
+# --- secrets / env ---
+.env
+framework.env
+*.pem
+dockered/.webui_secret_key
+
+# --- notebook-intelligence container state (encrypted GH token, per-user config) ---
+dockered/jupyter-nbi/*
+!dockered/jupyter-nbi/rules/
+dockered/jupyter-nbi/rules/__pycache__/
+
+# --- local scratch ---
+WIP_*.*
+
+# --- editor droppings ---
+*.swp
+.*.swp
+
+# --- dependency lockfiles ---
+# requirements.txt is the tracked canonical pinned dependency freeze.
+# requirements-dev.txt is the full dev-venv export (see pyproject.toml extras).
+# The exception un-ignores them so they stay version-controlled.
+*.txt
+!requirements.txt
+!requirements-dev.txt
+todo.md
+dockered/.env.save
+.vscode/*
+hydra.restore
+scratch.*
+cookie_jar.db*
+scratch-data/*
+
+# --- Jupyter auto-recovery saves (dabooks is the tracked work dir) ---
+.ipynb_checkpoints/
+text.txt.save
+### add lint options in vscode for version tracking
+!.vscode/settings.json
+
+# --- dabooks whitelist: ignore everything, re-include only tracked lanes ---
+# NOTE (git semantics): when a whole DIRECTORY is ignored, later negations
+# CANNOT revive files inside it — the directory itself must be re-included
+# first. So `dabooks/*` is paired with directory negations placed BEFORE the
+# child negations (`!dabooks/primitives/**`), otherwise the whitelist is dead.
+dabooks/*
+!dabooks/README.md
+!dabooks/primitives/
+!dabooks/primitives/**
+# kernel-lane build artifacts — re-ignored AFTER the primitives negation
+# (later rules win; the negation above would otherwise revive __pycache__/)
+dabooks/primitives/__pycache__/
+# papermill staging dir: README only. Dir re-included, children re-ignored,
+# README revived — pattern works for NEW non-README files too.
+!dabooks/damill/
+dabooks/damill/*
+!dabooks/damill/README.md
+# Docker CLI config dir from the code-server docker lane (DOCKER_HOME pins it to the tree root)
+/.docker/
+*.db

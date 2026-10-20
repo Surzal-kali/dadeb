@@ -1,0 +1,33 @@
+# Sketch — system profile, Jupyter tool kernel (tool_repl.py --kernel)
+# Carries over scripts/daharness-kernel.service semantics; retargeted for the
+# package layout. Shares /run/daharness/brain.sock with the daemon unit.
+[Unit]
+Description=daharness tool kernel (tool_repl.py --kernel)
+Documentation=file:///usr/share/doc/daharness/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=daharness
+Group=daharness
+UMask=0007
+RuntimeDirectory=daharness
+RuntimeDirectoryMode=0770
+StateDirectory=daharness
+StateDirectoryMode=0750
+Environment=DAHARNESS_ENV=/etc/daharness/daharness.env
+WorkingDirectory=/var/lib/daharness
+# Kernel connection file + JUPYTER_RUNTIME_DIR artifacts are chowned to the
+# attaching operator by tool_repl.py (see _kernel_owner()); this receives the
+# uid/name. Multi-operator: the group share is the fallback.
+Environment=DAHARNESS_KERNEL_OWNER=""
+ExecStart=/usr/bin/daharness-kernel
+# No tty: the kernel arms the SIGTERM/shutdown_request exit path
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
