@@ -1,3 +1,23 @@
+daharness (0.1.0+pkg4) kali; urgency=high
+
+  * Selftest suite lands in the tree and SHIPS: the `selftest` REPL macro
+    (pytest tests/) finally has a suite to drive — brain socket lane
+    shaping (unit + real bind/cleanup cycle), findings-db probe truth
+    (exception text surfacing + lane-block reporting), and the tool-author
+    contract (argparse LOCAL_FILE mint + real subprocess run,
+    _NO_LOCAL_TOOL opt-out, decorated function/method BRAIN_DISPATCH mint
+    + in-process exec). tests/ installs under the framework root so the
+    macro works on-box; pytest==9.1.1 rides the vendor pip line.
+  * findings_db NAMEERROR fix carried by pkg3: its detail branch read
+    `exc` from a bare `except Exception:` clause, so in the exact lane
+    the pkg3 pass fixed to describe, framework_health would have crashed
+    with a NameError instead of reporting. Now bound and regression-
+    tested (tests/test_framework_health.py).
+  * REPL selftest macro: honest EX_NOINPUT when a tree has no tests/
+    directory, instead of pytest exit-4 usage noise.
+
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 16:36:00 -0600
+
 daharness (0.1.0+pkg3) kali; urgency=high
 
   * Shared-state permissions actually REACH the running units now: the

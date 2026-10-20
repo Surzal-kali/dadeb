@@ -3,7 +3,7 @@
 # replkit joins the copy: tool_repl.py (daharness-repl + the kernel unit)
 # imports it top-level — omitted from the first cut, so the deb's REPL died
 # instantly with "No module named replkit" (observed on VM 2026-10-20).
-TREE_DIRS := daharness utils auxiliaries payloads listeners encoders evasion owui-tools replkit
+TREE_DIRS := daharness utils auxiliaries payloads listeners encoders evasion owui-tools replkit tests
 
 %:
 	dh $@
@@ -29,7 +29,7 @@ override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness/vendor
 	python3 -m pip install --target \
 	  debian/daharness/usr/share/daharness/vendor \
-	  "chromadb==1.5.9" "pydantic-ai-slim[openai]==2.35.0"
+	  "chromadb==1.5.9" "pydantic-ai-slim[openai]==2.35.0" "pytest==9.1.1"
 	# Bytecode the vendor closure: --no-compile saved build seconds but
 	# charged EVERY import (105-probe floor floor, daemon boots) the full
 	# source parse — vendor .pyc makes repeat imports ~3-6x faster.

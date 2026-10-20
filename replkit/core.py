@@ -314,6 +314,13 @@ def run_selftest(extra_args: Optional[List[str]] = None) -> int:
     meaning in the pytest lane.
     """
     argv = _selftest_argv(extra_args)
+    if not (_REPO_ROOT / "tests").is_dir():
+        # Suite ships in the tree (2026-10-20), but a tree without tests/
+        # (staged/partial install) must degrade honestly — a missing-dir
+        # spawn surfaces as pytest exit 4 usage noise instead of the answer.
+        print(f"  [selftest] no tests/ under {_REPO_ROOT} — this install "
+              "carries no selftest suite; pull the repo tree to macro tests")
+        return 66  # EX_NOINPUT
     print(f"  [selftest] {' '.join(argv)}")
     try:
         return subprocess.run(argv, cwd=str(_REPO_ROOT)).returncode
