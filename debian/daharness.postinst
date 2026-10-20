@@ -8,6 +8,28 @@ if ! getent passwd daharness >/dev/null; then
         --shell /usr/sbin/nologin daharness
 fi
 
+# Shared-state access provisioning: the state root and brain socket are
+# group-shared by design (UMask 0007, RuntimeDirectoryMode=0770), and the
+# group has no members unless we grant them — a fresh install where the
+# operator's own account cannot see the shared state leaves half the
+# shared-state pitch dead on arrival. sudo-group members are already
+# root-equivalent, so granting them the daharness group adds no privilege;
+# other operators opt in with `sudo usermod -aG daharness <user>`.
+if getent group daharness >/dev/null; then
+    GRANTED=""
+    for _U in $(getent group sudo | cut -d: -f4 | tr ',' ' '); do
+        [ -n "$_U" ] || continue
+        id -nG "$_U" 2>/dev/null | grep -qw daharness && continue
+        if usermod -aG daharness "$_U" >/dev/null 2>&1; then
+            GRANTED="$GRANTED $_U"
+        fi
+    done
+    if [ -n "$GRANTED" ]; then
+        echo "daharness: granted the daharness group (state + brain socket access) to sudo member(s):$GRANTED"
+        echo "  group membership applies on next login or \`newgrp daharness\`"
+    fi
+fi
+
 # Gateway API key: generate once when the conffile placeholder is still
 # empty, so a stock deb never boots an unauthenticated gateway. The
 # in-place conffile edit triggers the upgrade prompt ("keep current" — the

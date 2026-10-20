@@ -29,9 +29,15 @@ a second loader:
    (*bootstrap.py*, *api_gateway.py*, *tool_repl.py* load it with
    `override=True` for their authoritative-config semantics).
 
-Note the packaged tree carries no *env* file next to the tree — only the
-units read the conffile; operator shells should export a delta (e.g. the
-user-profile WORKSPACE_ROOT below) or run the user units.
+Note the packaged tree carries no *env* file next to the tree — the units
+read the conffile; operator shells get the system-profile WORKSPACE_ROOT
+and BRAIN_SOCKET from **/etc/profile.d/daharness.sh**, which fills exactly
+those two knobs when the shell does not already carry them (the wrapper
+scripts source it for non-login invocations). A user-profile lane simply
+exports its own values — they win. Seeing the service lane's state further
+requires the *daharness* group: the deb grants it to *sudo*-group members
+at install (re-login or `newgrp daharness` applies; other users opt in
+with `sudo usermod -aG daharness <user>`).
 Previously documented `$DAHARNESS_ENV` / *Python-level conffile loading*
 was never implemented and is retired — the old unit line
 `Environment=DAHARNESS_ENV=...` was inert.

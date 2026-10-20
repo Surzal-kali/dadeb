@@ -40,6 +40,20 @@ GATEWAY_HOST, GATEWAY_PORT, GATEWAY_API_KEY); operator shells use the
 tree's *.env* (*bootstrap.py*, *api_gateway.py* and *tool_repl.py* load
 it with *override=True*). See **daharness.env(5)**.
 
+# OPERATOR ONBOARDING (system profile)
+
+A fresh install provisions operator access instead of leaving it to code
+archaeology: **/etc/profile.d/daharness.sh** exports the system-profile
+WORKSPACE_ROOT and BRAIN_SOCKET into shells that lack them (wrappers
+source it for non-login runs), and *postinst* grants the *daharness*
+group to *sudo*-group members — that group owns the state root and the
+brain UDS (UMask 0007), so a sudo operator's shell shares cookie jar,
+scratch, findings, and the socket with the service lane after re-login
+(or `newgrp daharness`). Non-sudo operators: `sudo usermod -aG daharness
+<user>`. An operator outside the group who probes the system-profile
+state sees an honest `lane_blocked: true` permission report from
+*framework_health*, never a phantom "down".
+
 Privileged lanes (raw-socket scanning, low-port OOB) are not part of this
 baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 
@@ -48,6 +62,8 @@ baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 */run/daharness/brain.sock* — Brain UDS (system profile)
 */var/lib/daharness/* — engagement state root (system profile)
 */etc/daharness/daharness.env* — configuration
+*/etc/profile.d/daharness.sh* — operator-shell plumbing (system-profile
+WORKSPACE_ROOT + BRAIN_SOCKET for shells that lack them)
 
 # SEE ALSO
 

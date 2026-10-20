@@ -42,6 +42,11 @@ override_dh_auto_install:
 	install -D -m 0644 .env.example debian/daharness/usr/share/daharness/.env.example 2>/dev/null || true
 	# profile conffile: /etc/daharness/daharness.env (system profile knobs)
 	install -D -m 0644 packaging/etc/daharness.env debian/daharness/etc/daharness/daharness.env
+	# operator-shell plumbing: login shells source /etc/profile.d (the units'
+	# EnvironmentFile never reaches a human shell), so the system-profile
+	# roots resolve without code archaeology. Wrappers source it too for
+	# non-login invocations (ssh host cmd, CI).
+	install -D -m 0644 packaging/profile/daharness.sh debian/daharness/etc/profile.d/daharness.sh
 	# entrypoint wrappers (systemd ExecStart targets)
 	install -D -m 0755 packaging/bin/daharness debian/daharness/usr/bin/daharness
 	install -D -m 0755 packaging/bin/daharness-kernel debian/daharness/usr/bin/daharness-kernel

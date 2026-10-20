@@ -5,4 +5,9 @@
 # so the exact-pinned vendored closure wins overlaps (VM-proven: apt's
 # partial python3-opentelemetry-api broke chromadb under append order).
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
+# Login shells get the profile.d plumbing already; source it here too so
+# non-login invocations (ssh host cmd, CI) still resolve the system-profile
+# state roots instead of the constants fallbacks. Guarded, so dev trees and
+# shells carrying their own user-profile exports are untouched.
+[ -r /etc/profile.d/daharness.sh ] && . /etc/profile.d/daharness.sh
 exec python3 /usr/share/daharness/tool_repl.py --kernel "$@"

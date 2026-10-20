@@ -5,7 +5,7 @@
 daharness \(em daharness security framework services (Brain, ZAP, MSF
 MCP, API gateway)
 .SH SYNOPSIS
-\f[B]daharness\f[R] [\f[I]\-\-daemon\f[R]]
+\f[B]daharness\f[R] [\f[I]\(endaemon\f[R]]
 .SH DESCRIPTION
 Runs the daharness service stack for authorized security research:
 .IP \(bu 2
@@ -28,7 +28,7 @@ browser proxy binds \f[I]$ZAP_PROXY_BIND\f[R] (default 0.0.0.0).
 serving.
 .SH OPTIONS
 .TP
-\f[B]\-\-daemon\f[R]
+\f[B]\(endaemon\f[R]
 Foregrounds the services stack.
 Passing it is optional \(em the interactive secretary chat loop was
 trimmed from the packaged build, so bare \f[CR]daharness\f[R] behaves
@@ -38,10 +38,24 @@ registry re\-index: \f[B]daharness\-index\f[R](1)).
 The systemd units load \f[B]/etc/daharness/daharness.env\f[R] via
 \f[I]EnvironmentFile=\f[R] (system profile: WORKSPACE_ROOT,
 BRAIN_SOCKET, GATEWAY_HOST, GATEWAY_PORT, GATEWAY_API_KEY); operator
-shells use the tree\(aqs \f[I].env\f[R] (\f[I]bootstrap.py\f[R],
+shells use the tree\(cqs \f[I].env\f[R] (\f[I]bootstrap.py\f[R],
 \f[I]api_gateway.py\f[R] and \f[I]tool_repl.py\f[R] load it with
 \f[I]override=True\f[R]).
 See \f[B]daharness.env(5)\f[R].
+.SH OPERATOR ONBOARDING (system profile)
+A fresh install provisions operator access instead of leaving it to code
+archaeology: \f[B]/etc/profile.d/daharness.sh\f[R] exports the
+system\-profile WORKSPACE_ROOT and BRAIN_SOCKET into shells that lack
+them (wrappers source it for non\-login runs), and \f[I]postinst\f[R]
+grants the \f[I]daharness\f[R] group to \f[I]sudo\f[R]\-group members
+\(em that group owns the state root and the brain UDS (UMask 0007), so a
+sudo operator\(cqs shell shares cookie jar, scratch, findings, and the
+socket with the service lane after re\-login (or
+\f[CR]newgrp daharness\f[R]).
+Non\-sudo operators: \f[CR]sudo usermod \-aG daharness <user>\f[R].
+An operator outside the group who probes the system\-profile state sees
+an honest \f[CR]lane_blocked: true\f[R] permission report from
+\f[I]framework_health\f[R], never a phantom \(lqdown\(rq.
 .PP
 Privileged lanes (raw\-socket scanning, low\-port OOB) are not part of
 this baseline; they degrade honestly and are documented in
@@ -50,6 +64,9 @@ this baseline; they degrade honestly and are documented in
 \f[I]/run/daharness/brain.sock\f[R] \(em Brain UDS (system profile)
 \f[I]/var/lib/daharness/\f[R] \(em engagement state root (system
 profile) \f[I]/etc/daharness/daharness.env\f[R] \(em configuration
+\f[I]/etc/profile.d/daharness.sh\f[R] \(em operator\-shell plumbing
+(system\-profile WORKSPACE_ROOT + BRAIN_SOCKET for shells that lack
+them)
 .SH SEE ALSO
 \f[B]daharness\-repl(1)\f[R], \f[B]daharness\-kernel(1)\f[R],
 \f[B]daharness\-pg(1)\f[R], \f[B]daharness\-index(1)\f[R],

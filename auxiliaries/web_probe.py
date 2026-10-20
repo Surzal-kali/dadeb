@@ -159,6 +159,17 @@ def _fetch_one(
     except requests.exceptions.ReadTimeout:
         return None, "read-timeout"
     except requests.exceptions.ConnectionError as e:
+        # urllib3 2.x chains resolution failures into the same bucket —
+        # ConnectionError.args[0] is a MaxRetryError whose .reason is
+        # NameResolutionError, i.e. the classic "forgot the /etc/hosts
+        # entry" lab case. Distinguish it from a real refusal (name
+        # resolves, nothing listens) instead of tagging both with the same
+        # conn-refused/ prefix; the getattr guard degrades to the generic
+        # bucket on urllib3 1.x (class absent).
+        _reason = getattr((getattr(e, "args", ()) or (None,))[0], "reason", None)
+        _nre = getattr(urllib3.exceptions, "NameResolutionError", type(None))
+        if isinstance(_reason, _nre):
+            return None, "dns-unresolved: name does not resolve (no DNS record / no /etc/hosts entry)"
         return None, f"conn-refused/{type(e).__name__}"
     except Exception as e:  # noqa: BLE001 - probe must never crash the run
         return None, f"error:{type(e).__name__}:{e}"

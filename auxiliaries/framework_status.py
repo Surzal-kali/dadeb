@@ -37,21 +37,33 @@ def _check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def _check_unix_socket(path: str) -> bool:
-    """Unix domain socket probe — True only if something is actually LISTENING.
+def _check_unix_socket(path: str) -> tuple:
+    """Unix domain socket probe — ``(up, note)``.
 
     ``Path.is_socket()`` is a lie for stale sockets: the kernel does not unlink
     a socket file when its owner dies, so a killed sidecar leaves a file that
     passes ``is_socket()`` while every ``connect()`` bounces off it.  Probe with
     a real connection instead — mirrors bootstrap's ``_brain_ready()``.
+
+    ``note`` explains a ``False`` result so the caller can tell an actual
+    outage from a lane that merely lacks permission to see the socket
+    (operator lane vs. system-profile service user).
     """
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(2.0)
             s.connect(path)
-            return True
-    except (FileNotFoundError, ConnectionRefusedError, socket.timeout, OSError):
-        return False
+            return True, None
+    except PermissionError:
+        # Socket/directory exists but this lane lacks search or connect
+        # rights — the operator-lane view of a service-user-owned state root.
+        return False, "permission-denied"
+    except FileNotFoundError:
+        return False, "not-found"
+    except (ConnectionRefusedError, socket.timeout):
+        return False, "stale"
+    except OSError as exc:
+        return False, f"error:{exc.errno or type(exc).__name__}"
 
 
 @framework_tool(
@@ -74,7 +86,10 @@ def framework_health() -> Dict[str, Any]:
 
     Returns a dict with ``overall`` (``"ok"`` / ``"degraded"``), a
     ``subsystems`` map of name -> {``up``: bool, ``detail``: str}, and
-    ``tool_count`` if ChromaDB is reachable.
+    ``tool_count`` if ChromaDB is reachable.  Subsystems that failed only
+    because this lane lacks permission to see them (operator lane looking at
+    a service-user-owned state root) carry ``lane_blocked: true`` — a
+    permission mismatch reported honestly, not an outage claim.
     """
     ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     # Strip /v1 for the raw API probe.
@@ -102,11 +117,28 @@ def framework_health() -> Dict[str, Any]:
 
     # Brain sidecar
     brain_sock = str(brain_socket_path())
-    brain_up = _check_unix_socket(brain_sock)
-    subsystems["brain_sidecar"] = {
-        "up": brain_up,
-        "detail": f"{brain_sock} reachable" if brain_up else "socket not found — sidecar is down",
-    }
+    brain_up, brain_note = _check_unix_socket(brain_sock)
+    if brain_up:
+        brain_detail, brain_blocked = f"{brain_sock} reachable", False
+    elif brain_note == "permission-denied":
+        brain_blocked = True
+        brain_detail = (
+            f"{brain_sock} exists but this lane lacks permission to reach it — "
+            "socket/directory owned by another user (system profile runs the state "
+            "root as the service user). Probe via the gateway/MCP lane or as that "
+            "user; this is a lane-permission mismatch, not an outage."
+        )
+    elif brain_note == "not-found":
+        brain_detail, brain_blocked = "socket not found — sidecar is down", False
+    else:
+        brain_detail, brain_blocked = (
+            f"{brain_sock} not accepting connections — sidecar is down or socket is stale",
+            False,
+        )
+    brain_entry = {"up": brain_up, "detail": brain_detail}
+    if brain_blocked:
+        brain_entry["lane_blocked"] = True
+    subsystems["brain_sidecar"] = brain_entry
 
     # Ollama
     ollama_up = _check_tcp(ollama_host, ollama_port)
@@ -155,6 +187,24 @@ def framework_health() -> Dict[str, Any]:
         db_exists = True
     except Exception:
         db_exists = False
+        wk_readable = os.access(str(workspace), os.R_OK) and os.access(str(workspace), os.X_OK)
+        db_readable = os.path.exists(str(db_path)) and os.access(str(db_path), os.R_OK)
+        if not wk_readable or (os.path.exists(str(db_path)) and not db_readable):
+            # This lane can't even search the state root — the classic
+            # operator-vs-service-user mismatch on the system profile, not an
+            # outage. Report the permission truth instead of "could not open".
+            subsystems["findings_db"] = {
+                "up": False,
+                "lane_blocked": True,
+                "detail": (
+                    f"{db_path} not readable from this lane (permission denied — state root "
+                    "owned by another user, e.g. the system-profile service user). Probe via "
+                    "the gateway/MCP lane or run as that user; this is a lane-permission "
+                    "mismatch, not an outage."
+                ),
+            }
+        else:
+            subsystems["findings_db"] = {"up": False, "detail": f"could not create/open {db_path}"}
     db_up = db_exists
     if db_exists:
         try:
@@ -164,7 +214,17 @@ def framework_health() -> Dict[str, Any]:
             conn.close()
         except Exception as exc:
             db_up = False
-            subsystems["findings_db"] = {"up": False, "detail": f"exists but error: {exc}"}
+            if not os.access(str(db_path), os.R_OK):
+                subsystems["findings_db"] = {
+                    "up": False,
+                    "lane_blocked": True,
+                    "detail": (
+                        f"{db_path} exists but is unreadable from this lane (permission denied — "
+                        "owned by another user); probe via the gateway/MCP lane or as that user."
+                    ),
+                }
+            else:
+                subsystems["findings_db"] = {"up": False, "detail": f"exists but error: {exc}"}
     subsystems.setdefault("findings_db", {
         "up": db_up,
         "detail": str(db_path) if db_up else f"could not create/open {db_path}",
