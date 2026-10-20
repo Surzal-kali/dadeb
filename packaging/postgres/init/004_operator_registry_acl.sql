@@ -1,4 +1,4 @@
-# Harness Postgres: operator authority on the engagement registry.
+-- Harness Postgres: operator authority on the engagement registry.
 
 -- 004: close_and_purge() stamps closed_at on engagement.engagements as
 -- harness_operator BEFORE calling engagement.purge(). 002 granted SELECT

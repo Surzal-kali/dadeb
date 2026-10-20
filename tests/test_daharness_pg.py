@@ -75,6 +75,17 @@ def test_bundle_has_no_hardcoded_port():
     assert "-p " not in text   # container lane relies on POSTGRES_* env
 
 
+def test_sql_bundle_has_no_shell_style_comments():
+    """Live on the guinea pig: 004 opened with a '#' header and psql
+    (ON_ERROR_STOP=1) died 'syntax error at or near "#"'. SQL comments
+    are '--'; '#' is only legal in 001_roles.sh (bash)."""
+    for sql in (REPO_ROOT / "packaging" / "postgres" / "init").glob("*.sql"):
+        lines = sql.read_text().splitlines()
+        offenders = [(n, l) for n, l in enumerate(lines, 1)
+                     if l.lstrip().startswith("#")]
+        assert not offenders, f"{sql.name}: shell-style comment(s) {offenders}"
+
+
 def test_client_probe_footer_uses_lane_port():
     text = _text()
     assert "-h 127.0.0.1 -p ${PORT}" in text   # passworded TCP probe

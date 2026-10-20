@@ -64,6 +64,14 @@ daharness (0.1.0+pkg4) kali; urgency=high
     and falling into createdb against the same broken target.
     tests/test_daharness_pg.py pins the lane-address contract statically
     (suite: 68 passed).
+  * pg init bundle: 004_operator_registry_acl.sql opened with a '#'
+    header — a shell comment, not SQL — so the bundle's last step died
+    under psql ON_ERROR_STOP=1 ("syntax error at or near '#'", observed
+    live during the guinea-pig reinstall; roles mintered, schemas up,
+    pg.env never written). Header is '--' now, and
+    tests/test_daharness_pg.py forbids shell-style '#' lines in every
+    init-bundle *.sql so a future header cannot re-kill the bundle's
+    tail (suite: 69 passed).
   * framework_doctor gained a `postgres` provider: answers "can I use the
     engagement-cobweb Postgres lane" with one fixable story per state —
     tooling absent (apt + daharness-pg init / dev-lane dockered), init
