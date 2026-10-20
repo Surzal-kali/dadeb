@@ -72,7 +72,8 @@ run_roles_script() {
 }
 
 run_sql() {
-	runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 --dbname="$DBNAME" -f "$1"
+	runuser -u postgres -- psql -q -p "$PORT" -v ON_ERROR_STOP=1 \
+		--dbname="$DBNAME" -f "$1"
 }
 
 cmd_init() {
@@ -85,6 +86,13 @@ cmd_init() {
 	done
 	[ -d "$INIT_DIR" ] || die "init bundle missing: $INIT_DIR (daharness package upgrade needed)"
 
+	# EVERY libpq call below must land on THIS cluster, not whatever the
+	# default port answers (pg.env not written yet; observed live
+	# 2026-10-20: with msfdb's 'main' down, default-port psql/createdb
+	# died "connection to server on socket ... .s.PGSQL.5432"; with main
+	# UP they would have silently built the harness db inside the WRONG
+	# cluster. PGPORT pins the socket name .s.PGSQL.$PORT — peer auth for
+	# the postgres superuser keeps working, so no -h TCP + password trap).
 	MAJOR=$(cluster_major)
 	if [ -z "$MAJOR" ]; then
 		MAJOR=$(psql --version | sed -n 's/^psql (PostgreSQL) \([0-9]*\).*/\1/p')
@@ -96,6 +104,7 @@ cmd_init() {
 		echo "cluster ${MAJOR}/${CLUSTER} exists; ensuring it is running ..."
 		pg_ctlcluster "$MAJOR" "$CLUSTER" start 2>/dev/null || true
 	fi
+	export PGPORT="$PORT"
 
 	# pg_createcluster --start usually races its own readiness; wait briefly.
 	i=0
@@ -105,8 +114,13 @@ cmd_init() {
 	done
 
 	# Database before the bundle (001's GRANT CONNECT references it).
-	if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DBNAME}'" | grep -q 1; then
-		runuser -u postgres -- createdb "$DBNAME" \
+	# A CONNECT failure must die, not masquerade as "database missing"
+	# (that sends the run into createdb against the same broken target).
+	DB_PRESENT=$(runuser -u postgres -- psql -p "$PORT" -tAc \
+		"SELECT 1 FROM pg_database WHERE datname='${DBNAME}'" 2>&1) \
+		|| die "cannot query pg_database on ${MAJOR}/${CLUSTER} (:${PORT}): ${DB_PRESENT}"
+	if ! printf '%s' "$DB_PRESENT" | grep -q 1; then
+		runuser -u postgres -- createdb -p "$PORT" "$DBNAME" \
 			|| die "createdb ${DBNAME} failed"
 		echo "created database '${DBNAME}'"
 	fi

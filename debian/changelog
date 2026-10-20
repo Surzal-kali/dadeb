@@ -48,6 +48,22 @@ daharness (0.1.0+pkg4) kali; urgency=high
     file does not stop a running unit — it would keep holding :9000 for
     the sidecar's reuse-probe to adopt while systemd no longer supervises
     it).
+  * daharness-pg init could NOT create the lane it promises (observed
+    live on the guinea pig): every libpq call — the pg_database probe,
+    createdb, run_sql, and the 001_roles.sh bundle's own psql — used
+    libpq DEFAULT connection targets (:5432 + .s.PGSQL.5432, msfdb's
+    'main' cluster) instead of the dedicated :5433 lane. With main down
+    init died mid-way ("psql: error: connection to server on socket
+    /var/run/postgresql/.s.PGSQL.5432 failed"); with main UP it would
+    have silently built the harness db + lane roles inside the WRONG
+    cluster. cmd_init now exports PGPORT="$PORT" before any libpq step
+    (socket-name pinning keeps peer auth for the postgres superuser —
+    no TCP + password trap), direct psql/createdb carry explicit
+    -p "$PORT", and a failed pg_database probe DIES with the cluster
+    name in the message instead of masquerading as "database missing"
+    and falling into createdb against the same broken target.
+    tests/test_daharness_pg.py pins the lane-address contract statically
+    (suite: 68 passed).
   * framework_doctor gained a `postgres` provider: answers "can I use the
     engagement-cobweb Postgres lane" with one fixable story per state —
     tooling absent (apt + daharness-pg init / dev-lane dockered), init
