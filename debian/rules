@@ -63,10 +63,12 @@ override_dh_auto_install:
 	install -D -m 0644 packaging/systemd/daharness-chroma.service \
 	  debian/daharness/lib/systemd/system/daharness-chroma.service
 	# Auto-enable lane: Kali's 99-default.preset vetoes every *.service in
-	# the first-install `systemctl preset` pass; this file sorts after it and
-	# re-enables ours (ledger mechanics: KALI PRESET POLICY).
-	install -D -m 0644 packaging/systemd/zz-daharness.preset \
-	  debian/daharness/usr/lib/systemd/system-preset/zz-daharness.preset
+	# the first-install `systemctl preset` pass; preset rules are first-match
+	# by ascending filename, so this file slots between Kali's 95-kali
+	# whitelist and the 99-default catch-all and re-enables ours (ledger
+	# mechanics: KALI PRESET POLICY).
+	install -D -m 0644 packaging/systemd/98-daharness.preset \
+	  debian/daharness/usr/lib/systemd/system-preset/98-daharness.preset
 	# user-profile units ship as documented examples (system units are the
 	# enabled ones via dh_installsystemd); verified on the VM smoke
 	mkdir -p debian/daharness/usr/share/doc/daharness/systemd-user
