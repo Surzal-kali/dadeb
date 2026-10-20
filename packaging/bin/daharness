@@ -13,4 +13,8 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # state roots instead of the constants fallbacks. Guarded, so dev trees and
 # shells carrying their own user-profile exports are untouched.
 [ -r /etc/profile.d/daharness.sh ] && . /etc/profile.d/daharness.sh
+# Group-share writes: files this lane creates take g=rw (0007) and — inside
+# the setgid state root (postinst/units shape it 2770) — the daharness
+# group. That bit cascade is what makes the shared state actually mutual.
+umask 0007
 exec python3 /usr/share/daharness/bootstrap.py "$@"

@@ -12,4 +12,9 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # lane shares the service lane's state (cookie jar, scratch, brain socket)
 # only when the invoking user is in the daharness group.
 [ -r /etc/profile.d/daharness.sh ] && . /etc/profile.d/daharness.sh
+# Group-share writes: files this lane creates take g=rw (0007) and — inside
+# the setgid state root (postinst/units shape it 2770) — the daharness
+# group, so the service lanes see REPL-authored state (ids.db, cookie jar,
+# scratch) instead of kali:kali strays.
+umask 0007
 exec python3 /usr/share/daharness/tool_repl.py "$@"

@@ -15,9 +15,13 @@ UMask=0007
 # /run/daharness (tmpfs) — brain.sock home; group-shareable to operator CLIs
 RuntimeDirectory=daharness
 RuntimeDirectoryMode=0770
-# /var/lib/daharness — WORKSPACE_ROOT for the system profile
+# /var/lib/daharness — WORKSPACE_ROOT for the system profile. 2770:
+# group-write + SETGID so files the operator shell creates at the root
+# (ids.db, cookie_jar.db) inherit the daharness group — a plain r-x mode
+# like 0750 ships a read-only-for-operators state root and the setgid
+# cascade never starts (postinst lays the same shape down on install).
 StateDirectory=daharness
-StateDirectoryMode=0750
+StateDirectoryMode=2770
 # Conffile wires the profile knobs (WORKSPACE_ROOT, BRAIN_SOCKET,
 # GATEWAY_*, CHROMA_PORT) into the unit environment — the earlier
 # Environment=DAHARNESS_ENV form was inert (no code reads that var; only

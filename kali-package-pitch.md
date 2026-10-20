@@ -708,6 +708,25 @@ after the frameit compile) — graduated to the build lane. Files authored:
   fill-where-the-lane-runs + chmod 0600 advice), the conffile carries
   commented rows, .env.example gained the two missing vars + a
   deb-vs-devtree channel note; roff regenerated.
+- [fixed 2026-10-20, provisioning] the group-share pitch shipped HALF of
+  its permission fix: postinst granted MEMBERSHIP only, while the state
+  root itself came up `daharness:daharness 0755` (adduser SYS_DIR_MODE) or
+  `0750` (the units' StateDirectoryMode) with NO setgid anywhere — root-
+  level operator writes (ids.db, cookie_jar.db) failed, and every file an
+  operator's shell created landed kali:kali, invisible to the service
+  lanes. The honest lane_blocked errors were right; the install never
+  made the pitch true. Now: postinst shapes the state root to
+  daharness:daharness 2770 (group-write + setgid, reconciles legacy
+  root-owned trees on upgrade, creates the root itself so the scope seed
+  applies on a TRUE first install — it previously skipped because the
+  StateDirectory did not exist during dpkg configure), the three system
+  units carry StateDirectoryMode=2770 (setgid re-asserted at start; a
+  plain r-x mode would strip the bit), scope/ seeds at 2770, and the
+  operator wrappers run umask 0007. Mechanism proven live: a setgid dir
+  re-groups files created by a process whose egid is a different group
+  (dir gid=adm, process egid=kali → new file gid=adm). framework_status
+  permission notes now carry the shape check as repair (`ls -ld`,
+  `id -nG`); daharness(1) onboarding rewritten to the true semantics.
 - [fixed 2026-10-20, hygiene] .gitignore's bare `scope/` pattern silently
   ignored packaging/examples/scope/ — the shipped template could never
   enter git and a fresh-clone deb build would ship nothing. Negation

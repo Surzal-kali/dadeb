@@ -14,7 +14,9 @@ UMask=0007
 RuntimeDirectory=daharness
 RuntimeDirectoryMode=0770
 StateDirectory=daharness
-StateDirectoryMode=0750
+# 2770 = group-write + setgid: group-share inheritance for operator-written
+# state (see the daemon unit's comment; 0750 left the group read-only).
+StateDirectoryMode=2770
 # Kernel connection file + JUPYTER_RUNTIME_DIR artifacts are chowned to the
 # attaching operator by tool_repl.py (see _kernel_owner()); this receives the
 # uid/name. Multi-operator: the group share is the fallback.

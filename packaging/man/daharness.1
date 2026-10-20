@@ -48,14 +48,21 @@ archaeology: \f[B]/etc/profile.d/daharness.sh\f[R] exports the
 system\-profile WORKSPACE_ROOT and BRAIN_SOCKET into shells that lack
 them (wrappers source it for non\-login runs), and \f[I]postinst\f[R]
 grants the \f[I]daharness\f[R] group to \f[I]sudo\f[R]\-group members
-\(em that group owns the state root and the brain UDS (UMask 0007), so a
-sudo operator\(cqs shell shares cookie jar, scratch, findings, and the
-socket with the service lane after re\-login (or
+and shapes the state root to \f[I]daharness:daharness, mode 2770\f[R]
+(group\-write + setgid \(em the setgid bit is what makes files created
+from either lane inherit the shared group; member\-only grants left
+operator writes as \f[I]kali:kali\f[R] strays the service lanes could
+not see).
+The wrappers run \f[CR]umask 0007\f[R], so operator\-written files carry
+group\-write through hardened umasks too.
+A sudo operator\(cqs shell therefore shares cookie jar, scratch,
+findings, and the socket with the service lane after re\-login (or
 \f[CR]newgrp daharness\f[R]).
 Non\-sudo operators: \f[CR]sudo usermod \-aG daharness <user>\f[R].
 An operator outside the group who probes the system\-profile state sees
 an honest \f[CR]lane_blocked: true\f[R] permission report from
-\f[I]framework_health\f[R], never a phantom \(lqdown\(rq.
+\f[I]framework_health\f[R] \(em with the shape check in its repair hint
+\(em never a phantom \(lqdown\(rq.
 .PP
 Scope manifests get the same treatment: \f[I]postinst\f[R] seeds the
 editable lab template into

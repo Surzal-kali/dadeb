@@ -46,13 +46,19 @@ A fresh install provisions operator access instead of leaving it to code
 archaeology: **/etc/profile.d/daharness.sh** exports the system-profile
 WORKSPACE_ROOT and BRAIN_SOCKET into shells that lack them (wrappers
 source it for non-login runs), and *postinst* grants the *daharness*
-group to *sudo*-group members — that group owns the state root and the
-brain UDS (UMask 0007), so a sudo operator's shell shares cookie jar,
-scratch, findings, and the socket with the service lane after re-login
-(or `newgrp daharness`). Non-sudo operators: `sudo usermod -aG daharness
-<user>`. An operator outside the group who probes the system-profile
-state sees an honest `lane_blocked: true` permission report from
-*framework_health*, never a phantom "down".
+group to *sudo*-group members and shapes the state root to
+*daharness:daharness, mode 2770* (group-write + setgid — the setgid bit
+is what makes files created from either lane inherit the shared group;
+member-only grants left operator writes as *kali:kali* strays the
+service lanes could not see). The wrappers run `umask 0007`, so
+operator-written files carry group-write through hardened umasks too.
+A sudo operator's shell therefore shares cookie jar, scratch, findings,
+and the socket with the service lane after re-login (or `newgrp
+daharness`). Non-sudo operators: `sudo usermod -aG daharness <user>`.
+An operator outside the group who probes the system-profile state sees
+an honest `lane_blocked: true` permission report from
+*framework_health* — with the shape check in its repair hint — never a
+phantom "down".
 
 Scope manifests get the same treatment: *postinst* seeds the editable
 lab template into */var/lib/daharness/scope/lab_local-lab.json* (never

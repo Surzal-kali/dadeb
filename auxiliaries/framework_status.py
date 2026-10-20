@@ -126,7 +126,9 @@ def framework_health() -> Dict[str, Any]:
             f"{brain_sock} exists but this lane lacks permission to reach it — "
             "socket/directory owned by another user (system profile runs the state "
             "root as the service user). Probe via the gateway/MCP lane or as that "
-            "user; this is a lane-permission mismatch, not an outage."
+            "user; this is a lane-permission mismatch, not an outage. System-profile "
+            "repair: `id -nG | grep daharness` (re-login after a postinst grant) and "
+            "`ls -ld /run/daharness` (expect daharness:daharness, mode 0770)."
         )
     elif brain_note == "not-found":
         brain_detail, brain_blocked = "socket not found — sidecar is down", False
@@ -200,7 +202,9 @@ def framework_health() -> Dict[str, Any]:
                     f"{db_path} not readable from this lane (permission denied — state root "
                     "owned by another user, e.g. the system-profile service user). Probe via "
                     "the gateway/MCP lane or run as that user; this is a lane-permission "
-                    "mismatch, not an outage."
+                    "mismatch, not an outage. Repair: the deb shapes the state root "
+                    "daharness:daharness 2770 (setgid) — verify with `ls -ld "
+                    "/var/lib/daharness` and re-run provisioning if the shape differs."
                 ),
             }
         else:
@@ -220,7 +224,9 @@ def framework_health() -> Dict[str, Any]:
                     "lane_blocked": True,
                     "detail": (
                         f"{db_path} exists but is unreadable from this lane (permission denied — "
-                        "owned by another user); probe via the gateway/MCP lane or as that user."
+                        "owned by another user); probe via the gateway/MCP lane or as that user. "
+                        "Repair: verify group membership (`id -nG`) and the state-root shape "
+                        "(`ls -ld /var/lib/daharness` — expect daharness:daharness 2770 setgid)."
                     ),
                 }
             else:

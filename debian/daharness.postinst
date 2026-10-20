@@ -8,6 +8,29 @@ if ! getent passwd daharness >/dev/null; then
         --shell /usr/sbin/nologin daharness
 fi
 
+# Shared-state PERMISSIONS: a group-membership grant alone does not make
+# the state shareable — adduser's own SYS_DIR_MODE (0755) ships the root
+# without group write, and without setgid (2770) every file an operator's
+# shell creates lands operator-owner:operator-group (kali:kali), invisible
+# to the service lanes. Shaping happens HERE (also on upgrades, for legacy
+# trees) and in the units' StateDirectoryMode=2770 (re-asserted on every
+# start; a plain 0750 there would strip the setgid). Dirs under a setgid
+# root inherit the bit, so the tree stays group-shared as both lanes
+# create things — proven live (setgid dir gid inheritance, 2026-10-20).
+STATE_ROOT=/var/lib/daharness
+if [ -d "$STATE_ROOT" ]; then
+    if [ "$(stat -c %U "$STATE_ROOT" 2>/dev/null)" != "daharness" ]; then
+        chown -R daharness:daharness "$STATE_ROOT"
+        echo "daharness: reconciled $STATE_ROOT ownership to daharness:daharness (legacy tree)"
+    fi
+else
+    mkdir -p "$STATE_ROOT"
+    chown daharness:daharness "$STATE_ROOT"
+    echo "daharness: created $STATE_ROOT (first install — scope seeding below now applies)"
+fi
+chown daharness:daharness "$STATE_ROOT"
+chmod 2770 "$STATE_ROOT"
+
 # Shared-state access provisioning: the state root and brain socket are
 # group-shared by design (UMask 0007, RuntimeDirectoryMode=0770), and the
 # group has no members unless we grant them — a fresh install where the
@@ -32,12 +55,18 @@ fi
 
 # Scope-manifest provisioning: a temp local-lab scope should be editable-off-
 # rip, not reconstructed from code knowledge. Seed the lab template into the
-# state root's scope/ dir (pre-created daharness-owned 0770 so the service
-# lane and group-member operators share it). Strictly guarded: an existing
+# state root's scope/ dir (daharness-owned 2770 setgid so the service lane
+# and group-member operators share it; setgid re-groups files created by
+# whichever lane writes first). Strictly guarded: an existing
 # manifest — operator-customized or re-run — is never stomped.
 _TEMPLATE=/usr/share/daharness/examples/scope/lab_local-lab.json
-if [ -d /var/lib/daharness ] && [ -r "$_TEMPLATE" ]; then
-    if install -d -m 0770 -o daharness -g daharness /var/lib/daharness/scope 2>/dev/null; then
+if [ -r "$_TEMPLATE" ]; then
+    if mkdir -p /var/lib/daharness/scope; then
+        chown daharness:daharness /var/lib/daharness/scope
+        # Setgid (2770): operator-authored manifests inherit the daharness
+        # group, so the service lane can read them (a 0770 without the bit
+        # would strand kali:kali files again).
+        chmod 2770 /var/lib/daharness/scope
         if [ ! -e /var/lib/daharness/scope/lab_local-lab.json ]; then
             if install -m 0660 -o daharness -g daharness \
                 "$_TEMPLATE" /var/lib/daharness/scope/lab_local-lab.json; then

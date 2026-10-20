@@ -10,4 +10,8 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # state roots instead of the constants fallbacks. Guarded, so dev trees and
 # shells carrying their own user-profile exports are untouched.
 [ -r /etc/profile.d/daharness.sh ] && . /etc/profile.d/daharness.sh
+# Group-share writes: operator-side kernel artifacts take g=rw (0007) and,
+# under the setgid state root, the daharness group (service-lane parity —
+# connection files are later chowned to the attaching operator).
+umask 0007
 exec python3 /usr/share/daharness/tool_repl.py --kernel "$@"

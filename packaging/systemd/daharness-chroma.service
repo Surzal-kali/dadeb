@@ -17,7 +17,9 @@ UMask=0007
 # Shared StateDirectory with the daemon unit (same identity) — the
 # persistence path is /var/lib/daharness/chroma.
 StateDirectory=daharness
-StateDirectoryMode=0750
+# 2770 = group-write + setgid, matching the daemon unit (setgid is the
+# group-share inheritance point; 0750 left the group read-only).
+StateDirectoryMode=2770
 EnvironmentFile=/etc/daharness/daharness.env
 ExecStart=/usr/bin/daharness-chroma
 Restart=on-failure
