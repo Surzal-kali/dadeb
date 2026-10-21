@@ -16,7 +16,7 @@ as `README.md` files.
 ## What it is
 
 One engine — a vector-indexed registry of `@framework_tool` callables and
-gate-checked execution — surfaced through four lanes. Pick whichever fits the
+gate-checked execution — surfaced through three lanes. Pick whichever fits the
 moment:
 
 - **API gateway + MCP** — `POST /tools/execute` and a streamable-HTTP MCP
