@@ -1,3 +1,26 @@
+daharness (0.1.0+pkg5) kali; urgency=high
+
+  * doctor hard gate: `daharness doctor` (and the framework_doctor tool)
+    now REFUSES lanes that do not share the framework state root — root,
+    the root's owner, or a member of its group only (rc 77, message names
+    the group and the fix). Same operator-lane command reported false
+    downs across shared state (snapshot_cache etc.) while
+    `sudo daharness doctor` was all green — a non-privileged lane probes
+    blind, so it now gets the refusal instead of a lying report.
+    (VM 2026-10-20)
+  * doctor: the jadx apk drop-dir probe demanded the READ-ONLY package
+    tree (/usr/share/daharness/apk via __file__ math) while postinst
+    creates the state-root lane — on the deb this read jadx down no matter
+    what the operator did. It now imports APK_TARGETS_ROOT from
+    auxiliaries.jadx (the same WORKSPACE_ROOT-resolved lane the tool
+    itself uses), mirroring _check_r2's BINARY_TARGETS_ROOT treatment;
+    the remediation names JADX_APK_TARGETS_ROOT. (VM 2026-10-20)
+  * -h: dropped the stale daharness-chroma epilog line ("manual/dev lane")
+    — chroma is the daemon's first-class supervised sidecar now; the
+    wrapper still ships as the unadvertised dev escape hatch.
+
+ -- daharness maintainers <daharness@localhost>  Mon, 20 Oct 2026 18:55:00 -0600
+
 daharness (0.1.0+pkg4) kali; urgency=high
 
   * selftest on the deb lane (VM 2026-10-20): a flag-only passthrough arg

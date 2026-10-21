@@ -1171,15 +1171,21 @@ def _print_doctor(provider: str = "") -> int:
     try:
         report = framework_doctor(provider=provider)
     except PermissionError as exc:
-        # Belt-and-braces: the probes degrade on an inaccessible state root
-        # themselves; this catches an unanticipated permission failure in a
-        # future provider so the doctor lane never shows a raw traceback.
-        path = getattr(exc, "filename", None) or "the framework state dir"
-        print(f"daharness: {path} is not accessible by this user "
-              f"(permission denied).")
-        print("  run: sudo daharness doctor")
-        print("  (operator shared-state alternative: "
-              "sudo usermod -aG daharness <user>, then re-login)")
+        # Belt-and-braces: the doctor's lane gate refuses with an actionable
+        # message; only a bare PermissionError from a future provider falls
+        # back to the generic body, so the doctor lane never shows a raw
+        # traceback.
+        detail = ""
+        if getattr(exc, "filename", None):
+            detail = (f"{exc.filename} is not accessible by this user "
+                      f"({exc.strerror or 'permission denied'}).\n"
+                      "  run: sudo daharness doctor")
+        if not detail:
+            detail = (str(exc) or "").strip()
+        print(f"daharness: {detail}")
+        if "usermod" not in detail:
+            print("  (operator shared-state alternative: "
+                  "sudo usermod -aG daharness <user>, then re-login)")
         return 77  # EACCES — scriptable "needs elevated access"
     print(f"framework doctor — {report.get('overall')} "
           f"({report.get('available')} providers up)")

@@ -404,3 +404,48 @@ def test_print_doctor_sudo_hint_on_permission_error(monkeypatch, capsys):
     assert rc == 77
     assert "sudo daharness doctor" in out
     assert "Traceback" not in out
+
+
+def test_doctor_gate_refuses_foreign_lane(monkeypatch, tmp_path):
+    """A lane outside the state root's owner/group gets a refusal, not a
+    blind sweep of shared state that would grade false downs."""
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(ws))
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 424242)
+    monkeypatch.setattr(os_mod, "getgroups", lambda: [4242])
+    with pytest.raises(PermissionError, match="sudo daharness doctor"):
+        fstat.framework_doctor()
+
+
+def test_doctor_gate_allows_root(monkeypatch, tmp_path):
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(ws))
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 0)
+    monkeypatch.setattr(os_mod, "getgroups", lambda: [4242])
+    report = fstat.framework_doctor()
+    assert "providers" in report
+
+
+def test_doctor_gate_allows_state_root_owner_group(monkeypatch, tmp_path):
+    """Group membership is the designed operator share: the deb's state
+    root is daharness:daharness 2770, and a re-logged group member runs
+    the doctor unprivileged."""
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(ws))
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 424242)
+    monkeypatch.setattr(os_mod, "getgroups",
+                        lambda: [os_mod.stat(ws).st_gid])
+    report = fstat.framework_doctor()
+    assert "providers" in report

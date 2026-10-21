@@ -485,6 +485,40 @@ PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
                  "snapshot_cache", "postgres", "chroma")
 
 
+def _doctor_gate_error() -> str:
+    """Refusal message when this lane can't honestly grade the state, else ''.
+
+    The doctor's verdicts assume this lane sees what the service lane sees
+    (the deb's /var/lib/daharness is the daharness service user's 2770
+    state root). An operator lane outside the owner/group probes blind
+    (dirs unreadable, stores unopenable) and reports false downs while
+    ``sudo daharness doctor`` is all green — so instead of grading blind,
+    the doctor refuses and names the fix. Root, the state-root owner, and
+    owner-group members pass; a missing root is also allowed (the probes
+    will report absence honestly instead of lying).
+    """
+    try:
+        root = resolve_workspace_root()
+        st = root.stat()
+    except OSError:
+        return ""
+    if os.geteuid() == 0 or st.st_uid == os.geteuid() or st.st_gid in os.getgroups():
+        return ""
+    try:
+        import grp
+        gname = grp.getgrgid(st.st_gid).gr_name
+    except (ImportError, KeyError):
+        gname = f"gid {st.st_gid}"
+    return (
+        f"daharness doctor must run as root, as the owner of {root}, or as "
+        f"a member of the '{gname}' group — a non-privileged lane probes "
+        f"blind and reports false downs.\n"
+        "  run: sudo daharness doctor\n"
+        "  (shared-state alternative: sudo usermod -aG "
+        f"{gname} <user>, then re-login or `newgrp {gname}`)"
+    )
+
+
 @framework_tool(
     "Run capability probes for the framework's analysis and attack tooling "
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
@@ -493,7 +527,11 @@ PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
     "registry backend, and the engagement-cobweb Postgres lane. Each probe "
     "returns available/reason/remediation so a 'can I run X' question is "
     "answered before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|chroma)."
+    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|chroma). The "
+    "doctor refuses lanes that do not share the framework state root (root, "
+    "its owner, or a member of its group) — a non-privileged lane probes "
+    "blind and reports false downs, so it gets the refusal and the "
+    "remediation instead of a lying report."
 )
 def framework_doctor(provider: str = "") -> Dict[str, Any]:
     """Probe per-lane capability and return a doctor report.
@@ -503,6 +541,9 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
             (r2|jadx|masscan|msf|scanners|snapshot_cache|
             postgres|chroma).  Empty = full sweep.
     """
+    gate = _doctor_gate_error()
+    if gate:
+        raise PermissionError(gate)
     p = (provider or "").strip().lower()
     providers: Dict[str, Any] = {}
 
