@@ -66,8 +66,8 @@ whether pg.env is in place.
 Works as any user.
 .SH FILES
 \f[CR]/etc/daharness/pg.env\f[R] \(em generated lane knobs (not a
-package conffile: it is operator data and survives upgrades and
-\f[I]\-\-purge\f[R]).
+package conffile: it survives upgrades; \f[CR]apt purge\f[R] collects it
+\(em \f[CR]init\f[R] re\-mints it losslessly).
 .PP
 \f[CR]/usr/share/daharness/postgres/init/001_roles.sh\f[R],
 \f[CR]002_schemas.sql\f[R], \f[CR]003_functions.sql\f[R],

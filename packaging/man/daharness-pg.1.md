@@ -62,7 +62,8 @@ pg.env is in place. Works as any user.
 # FILES
 
 `/etc/daharness/pg.env` — generated lane knobs (not a package conffile:
-it is operator data and survives upgrades and *--purge*).
+it survives upgrades; `apt purge` collects it — `init` re-mints it
+losslessly).
 
 `/usr/share/daharness/postgres/init/001_roles.sh`,
 `002_schemas.sql`, `003_functions.sql`,

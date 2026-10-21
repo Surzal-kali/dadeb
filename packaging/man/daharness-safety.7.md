@@ -96,18 +96,26 @@ time and never scrubs it silently:
   engagement purge command erases per-engagement rows while you still want
   the rest. `rm -rf /var/lib/daharness` discards everything (the system user
   is gone at this point, so no service recreates it).
-- `/etc/daharness/pg.env` + the daharness Postgres cluster
-  (`pg_lsclusters` shows it, port 5433) — minted by `daharness-pg init` as a
-  pair: dropping one without the other strands the live passwords or strands
-  the cluster without its credential file. Discard both with
-  `sudo pg_dropcluster --stop 18 daharness && sudo rm /etc/daharness/pg.env`
-  (cluster version from `pg_lsclusters`; this keeps the engagement journal's
-  fate explicit — it is deleted data the ledger cannot undo).
+- `/etc/daharness/pg.env` — collected by purge (it is generated
+  credentials, not operator work product: `daharness-pg init` re-mints it
+  losslessly). The **Postgres cluster** (`pg_lsclusters`, port 5433) stays —
+  it holds the engagement journal, deleted data the ledger cannot undo.
+  Discard with
+  `sudo pg_dropcluster --stop 18 daharness` (cluster version from
+  `pg_lsclusters`); the next `daharness-pg init` re-provisions cluster +
+  credential file as a pair.
 - Per-user lanes in each operator's `$HOME` (maintainer scripts never scrub
   user homes): `~/.local/share/jupyter/kernels/daharness` (kernelspec —
   after a purge its `argv` points at the removed tree, so it is a zombie
   entry in every `jupyter kernelspec list` until deleted) and
   `~/.local/share/framework-stubs/` (IDE stubs). `rm -rf` either.
+
+Stray units from pre-package dev-checkout installs (the old
+`sudo cp scripts/daharness.service /etc/systemd/system/` flow) are also
+collected: postrm detects units whose ExecStart/WorkingDirectory reference a
+`github/` checkout, stops+disables+removes them along with their
+`multi-user.target.wants` symlinks. Units carrying the deb's own paths live
+in `/lib/systemd/system` and are dpkg-tracked — they never match.
 
 The package tree itself (`/usr/share/daharness`, the wrappers, unit files,
 preset, profile.d, man pages, conffiles) is fully removed by purge; state

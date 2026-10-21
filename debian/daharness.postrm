@@ -17,7 +17,49 @@ if [ "$1" = "purge" ]; then
     #    finishes off.
     rm -rf /usr/share/daharness 2>/dev/null || true
 
-    # 2. The dedicated system identity postinst minted (adduser --system).
+    # 2. The daharness-pg credential file. NOT operator work product —
+    #    `daharness-pg init` re-mints it losslessly (init re-runs the bundle
+    #    and ALTERs the lane roles when pg.env is absent), so keeping a
+    #    PASSWORD-bearing file on purge buys nothing and ships a half-state:
+    #    /etc/daharness/daharness.env (the conffile, also carrying a
+    #    generated key) is already gone here. The CLUSTER it points at is a
+    #    different matter — engagement journal data — so the cluster itself
+    #    stays (pointed at below, daharness-pg(1) PURGE section); dropping
+    #    it via the ledger's pg_dropcluster line is enough — no file pair
+    #    to worry about, the next `daharness-pg init` re-mints pg.env.
+    if [ -f /etc/daharness/pg.env ]; then
+        rm -f /etc/daharness/pg.env
+        echo "daharness: removed /etc/daharness/pg.env (daharness-pg init re-mints it)"
+    fi
+    # Best-effort: drop the empty /etc/daharness dir after conffile + pg.env
+    # removal too (a state-hostile tree the next install re-creates).
+    rmdir /etc/daharness 2>/dev/null || true
+
+    # 3. Stray units from PAST iterations (pre-deb dev checkout installs:
+    #    `sudo cp scripts/daharness.service /etc/systemd/system/` was the
+    #    old README's install step). dpkg never tracked them and they
+    #    shadow the packaged system profile: after a purge their ExecStart
+    #    points at a removed/venv path — a zombie that revives on every
+    #    `systemctl daemon-reload`. Same class as the broken per-user
+    #    kernelspec. Only touched when they reference a dev checkout (the
+    #    deb's real units live in /lib/systemd/system and are
+    #    dpkg-tracked — they are gone by postrm time and never match the
+    #    grep, so a same-name foreign unit an operator wrote is safe unless
+    #    it carries a checkout ExecStart).
+    for _UNIT in daharness.service daharness-kernel.service; do
+        _F="/etc/systemd/system/$_UNIT"
+        if [ -f "$_F" ] && grep -q "ExecStart=.*github/.*/bootstrap.py\|ExecStart=.*github/.*/tool_repl.py\|WorkingDirectory=.*github/" "$_F" 2>/dev/null; then
+            systemctl stop "$_UNIT" 2>/dev/null || true
+            systemctl disable "$_UNIT" 2>/dev/null || true
+            rm -f "$_F"
+            echo "daharness: removed stray pre-package unit $_F (dev-checkout ExecStart)"
+        fi
+    done
+    unset _UNIT _F
+    # Wants symlinks those stray units pulled in via `systemctl enable`.
+    find /etc/systemd/system -type l -lname "/etc/systemd/system/daharness*" -delete 2>/dev/null || true
+
+    # 4. The dedicated system identity postinst minted (adduser --system).
     #    Revoked only if the account still looks exactly like ours — a system
     #    uid, our nologin shell, our home — so a homonymous user an operator
     #    made independently is never touched. NOT deleting /var/lib/daharness
@@ -40,12 +82,11 @@ if [ "$1" = "purge" ]; then
     fi
     unset _PW _HOME _SHELL
 
-    # 3. What survives ON PURPOSE (operator decisions). A maintainer script
+    # 5. What survives ON PURPOSE (operator decisions). A maintainer script
     #    never scrubs user homes or silently deletes engagement work
     #    product; it points at the knobs instead.
     echo "daharness: purge kept intentional operator state (daharness-safety(7), purge section):"
     echo "  /var/lib/daharness/       findings/engagement/scratch state - rm -rf if you want it gone"
-    echo "  /etc/daharness/pg.env     daharness-pg credentials - drop only with the cluster below"
     echo "  postgres cluster 18/daharness (pg_lsclusters; engagement journal) -" \
          "sudo pg_dropcluster --stop 18 daharness to discard"
     echo "  ~/.local/share/jupyter/kernels/daharness  per-user kernelspec - rm -rf if you want it gone"

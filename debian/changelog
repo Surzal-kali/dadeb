@@ -1,3 +1,31 @@
+daharness (0.1.0+pkg8) kali; urgency=high
+
+  * purge lane round two (deb defect): the pkg7 build/purge cycle on the VM
+    surfaced two more residue classes. (1) /etc/daharness/pg.env survived
+    purge — deliberately, per the pkg7 doctrine — but the doctrine was
+    wrong: pg.env is GENERATED credentials (init re-mints + ALTERs the
+    lane roles losslessly when it is absent), not operator work product,
+    and keeping a password-bearing file while the conffile
+    (daharness.env, same generated-key class) is collected shipped a
+    half-state. postrm now collects pg.env on purge (cluster untouched —
+    it holds the engagement journal and stays in the intentional-keep
+    ledger; the operator's pg_dropcluster command does the pair when
+    wanted) and rmdir's an emptied /etc/daharness. Man pages updated for
+    the new contract: daharness-pg(1) + daharness.env(5) FILES sections
+    and the daharness-safety(7) purge ledger. (2) Stray systemd units
+    from PRE-DEB install runs (the old `sudo cp scripts/daharness.service
+    /etc/systemd/system/` dev-checkout flow, observed live: /etc/systemd/
+    system/daharness{,-kernel}.service with ExecStart pointing at a venv
+    checkout path + multi-user.target.wants symlinks — a zombie that
+    survives every purge because dpkg never tracked it). postrm now
+    detects units whose ExecStart/WorkingDirectory reference a github/
+    checkout, stops+disables+removes them and their wants symlinks; the
+    deb's own units (dpkg-tracked in /lib/systemd/system) can never match
+    the guard, and a foreign same-name unit that does not carry a checkout
+    path is untouched. daharness-safety(7) documents the sweep.
+
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Tue, 21 Oct 2026 10:30:00 -0600
+
 daharness (0.1.0+pkg7) kali; urgency=high
 
   * purge lane (deb defect): a live purge round-trip on the VM lane
