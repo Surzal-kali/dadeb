@@ -4,13 +4,15 @@
 .SH NAME
 daharness\-index \(em build or refresh the semantic tool\-registry index
 .SH SYNOPSIS
-\f[B]daharness\-index\f[R] [\-\-clear] [\-\-chat]
+\f[B]daharness\-index\f[R] [\f[I]\(enclear\f[R] | \f[I]\(enchat\f[R]]
+.PP
+\f[B]daharness\-index\f[R] \f[I]\(enstubs\f[R] [\f[I]\(encheck\f[R]]
 .SH DESCRIPTION
 The packaged deb ships an \f[B]empty\f[R] tool registry: the chroma
 collection \f[CR]tool_inventory\f[R] starts unpopulated and nothing
 fills it for you (the services daemon never indexes \(em indexing was
 removed from its boot path deliberately).
-\f[B]daharness\-index\f[R] is the operator\(aqs one\-typing pass that
+\f[B]daharness\-index\f[R] is the operator\(cqs one\-typing pass that
 builds it: discovery (static AST sweep + \f[CR]\(atframework_tool\f[R]
 dynamic scan) over the installed tree, embedding of every manifest
 through Ollama, and upsert into the chroma collection that every
@@ -19,9 +21,11 @@ discovery lane reads \(em \f[I]tools/search\f[R],
 \f[I]tools/list\f[R], the operator REPL, and memory recall.
 .PP
 Before doing any work it probes its two live dependencies and prints the
-exact fix rather than a traceback: the vendored chroma server
-(daharness\-chroma.service) and the Ollama host with the embed model
-(default \f[B]nomic\-embed\-text\f[R]).
+exact fix rather than a traceback: the chroma registry backend (the
+\f[I]daharness\f[R] daemon\(cqs own sidecar \(em or a manual
+\f[I]daharness\-chroma\f[R] lane when running outside the service) and
+the Ollama host with the embed model (default
+\f[B]nomic\-embed\-text\f[R]).
 Probe knobs are read from /etc/daharness/daharness.env (CHROMA_PORT,
 EMBED_MODEL, OLLAMA_BASE_URL), so a conffile retune is honored.
 The indexer writes only through the chroma HTTP server, so it runs as
@@ -30,7 +34,7 @@ something privileged).
 .PP
 Re\-runs are idempotent (upsert by tool id): newly added tools appear
 without rebuilding.
-\f[B]\-\-clear\f[R] wipes the collection first, for from\-scratch
+\f[B]\(enclear\f[R] wipes the collection first, for from\-scratch
 rebuilds.
 Embedding the \(ti97\-tool universe takes on the order of a minute
 against a local Ollama host.
@@ -39,17 +43,58 @@ An empty or stale registry is not an error for the gateway \(em
 \f[I]tools/search\f[R] just finds nothing and \f[I]tools/execute\f[R]
 404s an unknown \f[I]tool_id\f[R], which is exactly what a fresh install
 looks like before this command has run once.
+.SH THE STUB VIEW (\(enstubs)
+\f[CR]daharness\-index \-\-stubs\f[R] generates the static\-analysis
+view of the same registry: pyright stubs (a \f[CR].pyi\f[R], a PEP 562
+shim, and a builtins fork) for the kernel\- and REPL\-injected tool
+aliases, plus the ruff \f[CR]builtins\f[R] block for the notebook lane.
+Injected names do not exist until discovery runs, so without this pass
+an editor flags \f[I]every framework call\f[R] undefined \(em the stubs
+close that gap from the alias/signature pipeline verbatim, so they
+cannot drift from what actually executes.
+.PP
+This lane is \f[B]offline compute\f[R] (static AST + dynamic import \(em
+no chroma, no Ollama), so it routes \f[I]before\f[R] the index probes: a
+down registry or embed host never blocks it.
+The one prerequisite it enforces itself is a complete typeshed
+\f[CR]builtins.pyi\f[R] to fork (the Pylance\-extension, wheel\-pyright,
+or the deb\(cqs own bundled
+\f[CR]scripts/pyright_typeshed_builtins.pyi\f[R] copy) \(em refused
+loudly rather than shipping a partial fork that un\-defines
+\f[CR]print\f[R]/\f[CR]len\f[R].
+Output lands in \f[I]FRAMEWORK_STUBS_DIR\f[R] (default
+\f[B]\(ti/.local/share/framework\-stubs\f[R]) \(em point your
+editor\(cqs \f[CR]stubPath\f[R] there.
+\f[CR]\-\-check\f[R] reports OK/STALE \(em and SKIP for the
+checkout\-only \f[I]dabooks/ruff.toml\f[R] block, whose file the deb
+does not ship and therefore cannot regenerate \(em without writing
+anything.
+Run it after adding tools, or whenever hover/completion drifts from what
+the kernel actually injects.
+.IP
+.EX
+daharness\-index \-\-stubs \-\-check
+.EE
 .SH OPTIONS
 .TP
-\f[B]\-\-clear\f[R]
+\f[B]\(enclear\f[R]
 Delete the collection contents before re\-indexing.
 .TP
-\f[B]\-\-chat\f[R]
+\f[B]\(enchat\f[R]
 Drop into the in\-tree interactive secretary chat lane instead of
 indexing (dev\-tree convenience; the packaged headless build has no chat
 model consumer).
+.TP
+\f[B]\(enstubs\f[R]
+Route to the stub generator (offline lane; see THE STUB VIEW above).
+Generator flags pass through, e.g.\ \f[CR]\-\-stubs \-\-check\f[R].
+Honors \f[I]FRAMEWORK_STUBS_DIR\f[R] for the output directory.
 .SH FILES
 /etc/daharness/daharness.env \(em read (tolerantly) for the probe knobs.
+.PP
+\f[I]\(ti/.local/share/framework\-stubs/\f[R] \(em the \(enstubs
+lane\(cqs default output directory (FRAMEWORK_STUBS_DIR overrides).
 .SH SEE ALSO
 \f[B]daharness(1)\f[R], \f[B]daharness\-repl(1)\f[R],
-\f[B]daharness\-tools(7)\f[R], \f[B]daharness.env(5)\f[R]
+\f[B]daharness\-kernel(1)\f[R], \f[B]daharness\-tools(7)\f[R],
+\f[B]daharness.env(5)\f[R]

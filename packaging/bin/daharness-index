@@ -17,6 +17,13 @@
 #
 # Flags pass straight through: `--clear` wipes the collection first, re-run
 # to refresh (idempotent upsert; new tools appear without a rebuild).
+#
+# --stubs is the IDE lane: pyright stubs + ruff builtins from the same
+# discovery, offline compute (no chroma, no Ollama) — routed to the stub
+# generator BEFORE any probe, so a down registry never blocks it. Output dir:
+# FRAMEWORK_STUBS_DIR (default ~/.local/share/framework-stubs) — point the
+# editor's stubPath there. `daharness-index --stubs --check` reports
+# OK/STALE/SKIP without writing.
 set -u
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 if [ -r /etc/daharness/daharness.env ]; then
@@ -28,6 +35,21 @@ CHROMA_HOST=${CHROMA_HOST:-localhost}
 CHROMA_PORT=${CHROMA_PORT:-9000}
 OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
 EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+
+# Route --stubs before the probes: the stub lane needs no chroma/Ollama
+# backend (static AST + dynamic import, zero embedding), same rule as
+# msfvenom generation — offline compute is not gated. The generator enforces
+# its own prerequisite (a complete typeshed builtins.pyi to fork) with a
+# loud message instead of a traceback.
+stubs_route=0
+for arg in "$@"; do
+	case "$arg" in
+	--stubs) stubs_route=1 ;;
+	esac
+done
+if [ "$stubs_route" -eq 1 ]; then
+	exec python3 /usr/share/daharness/scripts/gen_repl_stubs.py "$@"
+fi
 
 err() { echo "daharness-index: $*" >&2; }
 

@@ -28,6 +28,16 @@ def main():
         return
 
     if args[0] == "--kernel":
+        # daharness-kernel(1) prepends --kernel for the unit lane, so an
+        # operator's --install-kernelspec arrives AFTER it.  The exact pair
+        # is unambiguous — kernelspec frontends only append -f
+        # <connection_file>, nothing they pass looks like the installer
+        # flag — so route it to the spec installer instead of feeding a
+        # non-ipykernel flag into IPKernelApp.
+        if args[1:2] == ["--install-kernelspec"]:
+            from replkit.kernel_lane import _install_kernelspec
+            _install_kernelspec()
+            return
         # Kernelspec frontends append -f <connection_file>; everything after
         # --kernel goes straight to IPKernelApp.
         from replkit.kernel_lane import _launch_kernel

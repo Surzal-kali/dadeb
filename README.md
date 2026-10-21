@@ -21,7 +21,8 @@ the moment:
 - **Tool REPL** — bypass the LLM entirely: pick a tool, pass args, see raw
   output (`python tool_repl.py run <tool_id> --flag value`)
 - **Jupyter kernel** — the same namespace preloaded into notebook cells for
-  engagement journals (`python tool_repl.py --install-kernelspec`)
+  engagement journals (`python tool_repl.py --install-kernelspec`; package
+  install: `daharness-kernel --install-kernelspec`)
 
 The intended workflow is a **hunt lifecycle**: load a program scope →
 enumerate the surface → scan in-scope targets → collect evidence → file
@@ -439,10 +440,14 @@ Launch: `python tool_repl.py` (interactive). One-shot modes:
 `info <tool_id>`, `sweep`, `search <query>`.
 
 Jupyter kernel lane — the notebook/engagement-journal twin of the
-interactive REPL: `python tool_repl.py --install-kernelspec` installs the
+interactive REPL: `python tool_repl.py --install-kernelspec` (package
+install: `daharness-kernel --install-kernelspec`) installs the
 `daharness` kernel; notebook cells run on the same preloaded namespace
 (`await session_post(...)`, envelope helpers) against the live Brain
-session. Kernel conventions and caveats:
+session. Editors need those injected names visible too:
+`daharness-index --stubs` (checkout: `python scripts/gen_repl_stubs.py`)
+regenerates pyright stubs + the ruff builtins block from the same
+discovery. Kernel conventions and caveats:
 [`dockered/README.md`](dockered/README.md#jupyterlab--the-tool-nursery) and
 [`AGENTS.md`](AGENTS.md#jupyter-kernel-dabooksipynb); the notebook work dir
 is [`dabooks/README.md`](dabooks/README.md).

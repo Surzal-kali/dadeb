@@ -32,6 +32,13 @@ Runs the daharness service stack for authorized security research:
   `daharness` behaves identically (interactive tool lane: *daharness-repl*(1);
 registry re-index: **daharness-index**(1)).
 
+**--install-kernelspec**
+: Not this wrapper's job — *daharness*(1) runs the services stack and
+  refuses the flag with a pointer to the kernel lane. Registering the
+  'daharness' Jupyter kernel is **daharness-kernel**(1)'s installer:
+  `daharness-kernel --install-kernelspec` (see its INSTALLING THE
+  KERNELSPEC section).
+
 # CONFIGURATION
 
 The systemd units load **/etc/daharness/daharness.env** via

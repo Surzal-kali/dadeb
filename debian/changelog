@@ -1,5 +1,36 @@
 daharness (0.1.0+pkg5) kali; urgency=high
 
+  * index wrapper: `daharness-index --stubs` now exists — the IDE lane is a
+    front-facing command instead of a provisioned scripts path. The stub
+    generator (pyright .pyi + PEP 562 shim + builtins.pyi fork + ruff
+    builtins, minted from the same discovery/alias pipeline for zero drift)
+    ships at /usr/share/daharness/scripts/gen_repl_stubs.py and the wrapper
+    ROUTES --stubs BEFORE the chroma/Ollama probes: stub generation is
+    offline compute (static AST + dynamic import, no embedding backend), so
+    a down registry or embed host never blocks it. A clean deb operator
+    (no ~/.vscode-server, no wheel pyright) can still generate: the deb
+    bundles a typeshed builtins.pyi fork source
+    (scripts/pyright_typeshed_builtins.pyi, Pylance 2026.4.1 copy), the
+    wheel candidate is is_file-guarded (a deb dist-packages layout crashed
+    the source scan with FileNotFoundError), and generation still refuses
+    loudly when genuinely nothing can produce a COMPLETE fork. --check
+    compares content with the humans-only "Generated:" wall-clock stamp
+    masked (minute-granularity stamps made every check STALE on rollover),
+    and on a package install reports SKIP for the checkout-only
+    dabooks/ruff.toml block instead of a lying STALE. Man page (THE STUB
+    VIEW) + README document the stubPath wiring. (VM 2026-10-20)
+  * kernel lane: `daharness-kernel --install-kernelspec` fed the
+    '--install-kernelspec' flag into IPKernelApp (the wrapper hard-prepends
+    --kernel, so the dispatch never saw the flag) and
+    `daharness --install-kernelspec` died on argparse's invalid choice —
+    the operator had no working kernelspec command outside
+    `daharness-repl --install-kernelspec`, which nothing advertised.
+    The wrapper shape (--kernel --install-kernelspec) is unambiguous —
+    kernelspec frontends only append -f <connection_file> — and now routes
+    to the spec installer; the services wrapper prints the kernel-lane
+    redirect (rc 2) instead of the dead end; man pages (daharness-kernel
+    INSTALLING THE KERNELSPEC, daharness OPTIONS), README and the
+    tool_repl usage text document the deb command. (VM 2026-10-20)
   * doctor: the masscan probe graded the doctor lane's own SOCK_RAW
     attempt and could lie both ways — a setcap'd binary (cap_net_raw+ep)
     got "may fail at launch, not at probe" while the setcap'd launch runs

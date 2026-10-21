@@ -42,6 +42,7 @@ Modes (unchanged — see ``replkit.cli:main``):
   --install-kernelspec        — register the 'daharness' kernel so every
                                 Jupyter frontend's kernel picker lists it;
                                 notebooks then run on framework tools
+                                (package: `daharness-kernel --install-kernelspec`)
 
 Argument parsing uses the tool's own parameter schema (from the manifest
 discovered at startup) for type coercion — no hardcoded type maps.

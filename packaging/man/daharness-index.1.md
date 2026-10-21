@@ -6,7 +6,9 @@ daharness-index — build or refresh the semantic tool-registry index
 
 # SYNOPSIS
 
-**daharness-index** [--clear] [--chat]
+**daharness-index** [*--clear* | *--chat*]
+
+**daharness-index** *--stubs* [*--check*]
 
 # DESCRIPTION
 
@@ -40,6 +42,31 @@ An empty or stale registry is not an error for the gateway —
 *tool_id*, which is exactly what a fresh install looks like before this
 command has run once.
 
+# THE STUB VIEW (--stubs)
+
+`daharness-index --stubs` generates the static-analysis view of the same
+registry: pyright stubs (a `.pyi`, a PEP 562 shim, and a builtins fork) for
+the kernel- and REPL-injected tool aliases, plus the ruff `builtins` block
+for the notebook lane. Injected names do not exist until discovery runs, so
+without this pass an editor flags *every framework call* undefined — the
+stubs close that gap from the alias/signature pipeline verbatim, so they
+cannot drift from what actually executes.
+
+This lane is **offline compute** (static AST + dynamic import — no chroma,
+no Ollama), so it routes *before* the index probes: a down registry or
+embed host never blocks it. The one prerequisite it enforces itself is a
+complete typeshed `builtins.pyi` to fork (the Pylance-extension, wheel-pyright, or
+the deb's own bundled `scripts/pyright_typeshed_builtins.pyi` copy) —
+refused loudly rather than shipping a partial fork that un-defines `print`/`len`. Output lands in *FRAMEWORK_STUBS_DIR*
+(default **~/.local/share/framework-stubs**) — point your editor's
+`stubPath` there. `--check` reports OK/STALE — and SKIP for the
+checkout-only *dabooks/ruff.toml* block, whose file the deb does not ship
+and therefore cannot regenerate — without writing anything. Run it after
+adding tools, or whenever hover/completion drifts from what the kernel
+actually injects.
+
+    daharness-index --stubs --check
+
 # OPTIONS
 
 **--clear**
@@ -50,11 +77,19 @@ command has run once.
   indexing (dev-tree convenience; the packaged headless build has no
   chat model consumer).
 
+**--stubs**
+: Route to the stub generator (offline lane; see THE STUB VIEW above).
+  Generator flags pass through, e.g. `--stubs --check`. Honors
+  *FRAMEWORK_STUBS_DIR* for the output directory.
+
 # FILES
 
 /etc/daharness/daharness.env — read (tolerantly) for the probe knobs.
 
+*~/.local/share/framework-stubs/* — the --stubs lane's default output
+directory (FRAMEWORK_STUBS_DIR overrides).
+
 # SEE ALSO
 
-**daharness(1)**, **daharness-repl(1)**, **daharness-tools(7)**,
-**daharness.env(5)**
+**daharness(1)**, **daharness-repl(1)**, **daharness-kernel(1)**,
+**daharness-tools(7)**, **daharness.env(5)**

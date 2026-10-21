@@ -1144,7 +1144,8 @@ def _build_cli():
             "companion wrappers:\n"
             "  daharness-repl     interactive tool lane (REPL)\n"
             "  daharness-index    re-index the tool registry\n"
-            "  daharness-kernel   Jupyter kernel\n"
+            "  daharness-kernel   Jupyter kernel (kernelspec install: "
+            "daharness-kernel --install-kernelspec)\n"
             "  daharness-pg       engagement-cobweb Postgres lane — "
             "setup is: sudo daharness-pg init\n"
             "  daharness doctor   per-provider capability probe (r2, jadx, "
@@ -1243,6 +1244,15 @@ def _prelaunch_guard(force: bool = False) -> int:
 
 
 async def run_framework():
+    if "--install-kernelspec" in sys.argv[1:]:
+        # Not this wrapper's job (the services stack + doctor live here):
+        # argparse would die on 'invalid choice' — point at the kernel lane
+        # instead of a dead end (operator ask, VM 2026-10-20).
+        print("daharness: the services stack does not install kernelspecs — "
+              "the kernelspec installer is the kernel lane")
+        print("  run: daharness-kernel --install-kernelspec "
+              "(registers the 'daharness' Jupyter kernel)")
+        sys.exit(2)
     args = _build_cli().parse_args()
 
     if args.command == "doctor":

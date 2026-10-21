@@ -8,7 +8,7 @@ daharness-kernel — Jupyter tool kernel for the daharness framework
 
 # SYNOPSIS
 
-**daharness-kernel** [*--kernel*]
+**daharness-kernel** [*--kernel* | *--install-kernelspec*]
 
 # DESCRIPTION
 
@@ -29,6 +29,23 @@ The tool's own fields sit under *result*. Envelope helpers ship in the
 namespace (auto-unwrapping): **keys**(value), **pluck**(value, key),
 **find**(value, key), **grep**(value, pattern). Prefer these over guessing the
 nesting.
+
+# INSTALLING THE KERNELSPEC
+
+Frontends find the kernel through its kernelspec. Register it once:
+
+    daharness-kernel --install-kernelspec
+
+This writes *daharness/kernel.json* into the invoking user's kernel
+directory (*~/.local/share/jupyter/kernels*); the spec points back at the
+packaged *tool_repl.py --kernel*, so `jupyter kernelspec list` showing
+*daharness* is the attach-ready signal and
+`jupyter kernelspec uninstall daharness` removes it. Under sudo the
+installer resolves the real owner via **DAHARNESS_KERNEL_OWNER** (fallback:
+SUDO_UID, else file owner) and lands the spec in that user's directory, not
+in */root*. *daharness-repl --install-kernelspec* is the same passthrough
+under a different wrapper. The kernel dispatches through the same Brain
+socket as the services lane (see FILES).
 
 # DEPENDENCIES
 

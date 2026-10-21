@@ -73,6 +73,17 @@ override_dh_auto_install:
 	# operator re-index pass: fresh deb ships an EMPTY chroma registry;
 	# nothing fills it for you (daemon boot never indexes — deliberate).
 	install -D -m 0755 packaging/bin/daharness-index debian/daharness/usr/bin/daharness-index
+	# The IDE-facing stub lane ships with the wrapper that routes to it
+	# (daharness-index --stubs); the rest of scripts/ stays dev/container
+	# tooling, not package payload.
+	install -D -m 0644 scripts/gen_repl_stubs.py \
+	  debian/daharness/usr/share/daharness/scripts/gen_repl_stubs.py
+	# The stub lane forks pyright's typeshed builtins.pyi (a stubPath-
+	# resolved builtins.pyi REPLACES the engine's — completeness is
+	# load-bearing). Bundle an engine copy so a clean deb operator
+	# (no ~/.vscode-server, no wheel pyright) can still generate.
+	install -D -m 0644 scripts/pyright_typeshed_builtins.pyi \
+	  debian/daharness/usr/share/daharness/scripts/pyright_typeshed_builtins.pyi
 	install -d -m 0755 debian/daharness/usr/share/daharness/postgres/init
 	install -m 0644 packaging/postgres/init/001_roles.sh \
 		packaging/postgres/init/002_schemas.sql \

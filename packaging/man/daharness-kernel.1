@@ -4,9 +4,10 @@
 .SH NAME
 daharness\-kernel \(em Jupyter tool kernel for the daharness framework
 .SH SYNOPSIS
-\f[B]daharness\-kernel\f[R] [\f[I]\-\-kernel\f[R]]
+\f[B]daharness\-kernel\f[R] [\f[I]\(enkernel\f[R] |
+\f[I]\(eninstall\-kernelspec\f[R]]
 .SH DESCRIPTION
-Launches an ipython kernel (\f[I]tool_repl.py \-\-kernel\f[R]) whose
+Launches an ipython kernel (\f[I]tool_repl.py \(enkernel\f[R]) whose
 namespace is the daharness tool surface, attachable from any local
 Jupyter frontend.
 It runs under the \f[I]daharness\-kernel.service\f[R] systemd unit in
@@ -25,16 +26,47 @@ Results arrive wrapped in a transport envelope:
 {status, result, _elapsed_s}
 .EE
 .PP
-The tool\(aqs own fields sit under \f[I]result\f[R].
+The tool\(cqs own fields sit under \f[I]result\f[R].
 Envelope helpers ship in the namespace (auto\-unwrapping):
 \f[B]keys\f[R](value), \f[B]pluck\f[R](value, key),
 \f[B]find\f[R](value, key), \f[B]grep\f[R](value, pattern).
 Prefer these over guessing the nesting.
+.SH INSTALLING THE KERNELSPEC
+Frontends find the kernel through its kernelspec.
+Register it once:
+.IP
+.EX
+daharness\-kernel \-\-install\-kernelspec
+.EE
+.PP
+This writes \f[I]daharness/kernel.json\f[R] into the invoking user\(cqs
+kernel directory (\f[I]\(ti/.local/share/jupyter/kernels\f[R]); the spec
+points back at the packaged \f[I]tool_repl.py \(enkernel\f[R], so
+\f[CR]jupyter kernelspec list\f[R] showing \f[I]daharness\f[R] is the
+attach\-ready signal and
+\f[CR]jupyter kernelspec uninstall daharness\f[R] removes it.
+Under sudo the installer resolves the real owner via
+\f[B]DAHARNESS_KERNEL_OWNER\f[R] (fallback: SUDO_UID, else file owner)
+and lands the spec in that user\(cqs directory, not in \f[I]/root\f[R].
+\f[I]daharness\-repl \(eninstall\-kernelspec\f[R] is the same
+passthrough under a different wrapper.
+The kernel dispatches through the same Brain socket as the services lane
+(see FILES).
+.SH DEPENDENCIES
+The kernel lane hard\-imports the Jupyter closure, so the deb ships it
+as Depends: \f[B]python3\-ipykernel\f[R] (pulls
+\f[I]python3\-ipython\f[R], \f[I]python3\-jupyter\-client\f[R],
+\f[I]python3\-zmq\f[R], \f[I]python3\-tornado\f[R]); Kali builds these
+against the system python.
+In a checkout, restore the lane with
+\f[CR]pip install \-e \(dq.[jupyter]\(dq\f[R].
+Without it the unit fails fast \(em kernel_lane prints the remediation
+string above the traceback (journalctl \-u daharness\-kernel).
 .SH ENVIRONMENT
 .TP
 \f[B]DAHARNESS_KERNEL_OWNER\f[R]
 Name or uid to chown the kernel connection file and runtime artifacts
-to, so the attaching operator\(aqs IDE can reach them.
+to, so the attaching operator\(cqs IDE can reach them.
 Empty falls back to the uid inferred by the launcher (SUDO_UID, else
 file owner).
 .SH FILES

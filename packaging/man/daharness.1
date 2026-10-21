@@ -34,6 +34,14 @@ Passing it is optional \(em the interactive secretary chat loop was
 trimmed from the packaged build, so bare \f[CR]daharness\f[R] behaves
 identically (interactive tool lane: \f[I]daharness\-repl\f[R](1);
 registry re\-index: \f[B]daharness\-index\f[R](1)).
+.TP
+\f[B]\(eninstall\-kernelspec\f[R]
+Not this wrapper\(cqs job \(em \f[I]daharness\f[R](1) runs the services
+stack and refuses the flag with a pointer to the kernel lane.
+Registering the `daharness' Jupyter kernel is
+\f[B]daharness\-kernel\f[R](1)\(cqs installer:
+\f[CR]daharness\-kernel \-\-install\-kernelspec\f[R] (see its INSTALLING
+THE KERNELSPEC section).
 .SH CONFIGURATION
 The systemd units load \f[B]/etc/daharness/daharness.env\f[R] via
 \f[I]EnvironmentFile=\f[R] (system profile: WORKSPACE_ROOT,

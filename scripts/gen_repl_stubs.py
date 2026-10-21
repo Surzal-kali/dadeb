@@ -51,6 +51,9 @@ block in dabooks/ruff.toml is written back into the repo.
 Usage:
     python scripts/gen_repl_stubs.py            # regenerate stubs + builtins
     python scripts/gen_repl_stubs.py --check    # exit 1 if either is stale
+    python scripts/gen_repl_stubs.py --stubs    # same as bare (daharness-index
+                                                # --stubs routes here; the flag
+                                                # spells the caller's intent)
 
 Env knobs:
     FRAMEWORK_STUBS_DIR   override the output dir (default
@@ -62,6 +65,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,16 +91,19 @@ REPO_TOML = _REPO_ROOT / "dabooks" / "ruff.toml"
 
 # Fork source: pyright's own typeshed builtins.pyi.  Preferred order: the
 # Pylance extension bundle (editor lane parity — Pylance serves it to the
-# IDE), then the wheel-bundled pyright (CLI lane).  Both carry dist/typeshed-
-# fallback/stdlib/builtins.pyi.  If neither exists, generation aborts loudly
-# rather than shipping a partial builtins fork (which nukes real builtins).
+# IDE), then the wheel-bundled pyright (CLI lane), then the PACKAGED copy
+# (scripts/pyright_typeshed_builtins.pyi, shipped by the deb so the
+# daharness-index --stubs lane works without Pylance on a clean install).
+# Each carries dist/typeshed-fallback/stdlib/builtins.pyi.  If none exists,
+# generation aborts loudly rather than shipping a partial builtins fork
+# (which nukes real builtins).
 _FORK_SOURCES = (
     Path.home() / ".vscode-server/extensions",  # scanned below for matching dirs
 )
 
 
 def _builtins_fork_source() -> Path:
-    """Locate the newest Pylance (or wheel pyright) bundled typeshed builtins.pyi."""
+    """Locate the newest Pylance (or wheel/pyright-bundled) typeshed builtins.pyi."""
     ext_root = Path.home() / ".vscode-server/extensions"
     candidates: list[Path] = []
     if ext_root.is_dir():
@@ -111,13 +118,21 @@ def _builtins_fork_source() -> Path:
         / f"python{sys.version_info.major}.{sys.version_info.minor}"
         / "site-packages/pyright/dist/dist/typeshed-fallback/stdlib/builtins.pyi"
     )
-    candidates.append(p)
+    # is_file-guarded: max() stats every candidate, and a deb-style layout
+    # (dist-packages, or no pyright wheel at all) must not crash the scan.
+    if p.is_file():
+        candidates.append(p)
+    packaged = Path(__file__).resolve().parent / "pyright_typeshed_builtins.pyi"
+    if packaged.is_file():
+        candidates.append(packaged)
     newest = max(candidates, key=lambda c: c.stat().st_mtime, default=None)
     if newest is None:
         raise SystemExit(
             "builtins.pyi fork source not found: no ms-python.vscode-pylance-* "
-            "extension in ~/.vscode-server/extensions and no wheel-bundled "
-            "pyright typeshed in the current environment. The fork must be "
+            "extension in ~/.vscode-server/extensions, no wheel-bundled "
+            "pyright typeshed in the current environment, and no packaged "
+            "scripts/pyright_typeshed_builtins.pyi beside this file. "
+            "The fork must be "
             "COMPLETE (a partial builtins.pyi replaces real builtins and "
             "breaks print/len/etc.) — refusing to generate from nothing."
         )
@@ -355,6 +370,18 @@ def __getattr__(name: str) -> Any:
 
 # ── Ruff builtins block (dabooks notebook lane) ──────────────────────────────
 
+# The "Generated: ..." stamp lines live in the .pyi/.py headers (bare stamp
+# in the .pyi; "Generated: ... | Tools: ... | ..." in the shim); they are
+# for humans. --check must compare CONTENT (alias set, signatures,
+# docstrings), not generation minutes — minute-granularity stamps would
+# otherwise report STALE on every minute rollover and make check useless as
+# a front-facing freshness contract.
+_GENERATED_LINE = re.compile(r"(?m)^Generated: .*$")
+
+
+def _strip_stamp(text: str) -> str:
+    return _GENERATED_LINE.sub("Generated: <stamp>", text)
+
 def build_builtins(manifests) -> list[str]:
     """Every name the kernel namespace injects at runtime.
 
@@ -417,16 +444,28 @@ def build_builtins_fork(names: list[str]) -> str:
     return f"{header}\n\n{base}\n" + "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Generate pyright stubs + ruff builtins for the REPL's runtime tool aliases."
+    )
+    # Consumed by the daharness-index --stubs route: identical to the bare
+    # default — the flag exists so the wrapper can key on it and the
+    # operator's intent reads at the front-facing command.
+    ap.add_argument(
+        "--stubs",
+        action="store_true",
+        help="generate the stub view (what daharness-index --stubs routes to)",
     )
     ap.add_argument(
         "--check",
         action="store_true",
         help="exit 1 if the stubs or the ruff builtins block are stale",
     )
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv=None) -> int:
+    args = _build_parser().parse_args(argv)
 
     manifests = tool_repl.discover_tools()
     alias_map = tool_repl.build_tool_aliases(manifests)
@@ -447,17 +486,24 @@ def main() -> int:
         stubs_ok = (
             PYI_FILE.exists()
             and PY_FILE.exists()
-            and PYI_FILE.read_text() == pyi_text
-            and PY_FILE.read_text() == shim_text
+            and _strip_stamp(PYI_FILE.read_text()) == _strip_stamp(pyi_text)
+            and _strip_stamp(PY_FILE.read_text()) == _strip_stamp(shim_text)
         )
-        toml_ok = REPO_TOML.exists() and apply_builtins(
-            REPO_TOML.read_text(), builtin_names
-        ) == REPO_TOML.read_text()
+        # dabooks/ruff.toml is a checkout-only lane (the deb ships neither
+        # dabooks/ nor the notebooks it lints) — an absent file is SKIP, not
+        # STALE: on a package install the operator cannot regenerate it and
+        # STALE would pin every --check to exit 1 forever.
+        toml_ok = True
+        toml_state = "SKIP"
+        if REPO_TOML.exists():
+            toml_ok = apply_builtins(
+                REPO_TOML.read_text(), builtin_names
+            ) == REPO_TOML.read_text()
+            toml_state = "OK" if toml_ok else "STALE"
         fork_ok = BUILTINS_FILE.exists() and (
             BUILTINS_FILE.read_text() == build_builtins_fork(builtin_names)
         )
         stubs_state = "OK" if stubs_ok else "STALE"
-        toml_state = "OK" if toml_ok else "STALE"
         fork_state = "OK" if fork_ok else "STALE"
         print(f"  {stubs_state}  {len(aliases)} tools + {stdlib_bare_count} stdlib bares + {envelope_count} envelope helpers, {PYI_FILE}")
         print(f"  {toml_state}  ruff builtins block ({len(builtin_names)} names), {REPO_TOML}")
