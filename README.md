@@ -232,7 +232,7 @@ apk/ binaries/ dropbox/ pcaps/   Drop folders (READMEs document the lanes)
 ```
 
 The code directories (`auxiliaries/`, `payloads/`, `listeners/`, `utils/`,
-`evasion/`, `knowledge/`, `tests/` and the drop folders) each carry their own
+`evasion/`, `tests/` and the drop folders) each carry their own
 `README.md` with the per-module inventory; `daharness/`, `replkit/` and the
 packaging tree document through docstrings, module summaries and man pages
 instead. Man-page sources live in `packaging/man/` as `.md` renditions of
