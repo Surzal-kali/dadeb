@@ -1,0 +1,55 @@
+#!/bin/sh
+set -e
+
+# Purge-residue lane (2026-10-20 VM round-trip census). dpkg removes exactly
+# the files recorded in its manifest + the conffiles; anything the postinst
+# minted or any runtime lane wrote is invisible to it — that residue is what
+# this script handles on `purge`. Deliberately inert on plain `remove`
+# (dpkg keeps conffiles there by design, so remove stays conservative).
+
+if [ "$1" = "purge" ]; then
+    # 1. Package tree leftovers. postrm runs AFTER dpkg removed every tracked
+    #    file, so /usr/share/daharness holds only untracked residue here:
+    #    runtime __pycache__ (legacy installs predate the build-time
+    #    compileall) and state files a pre-fallback lane wrote into the
+    #    read-only tree (ids.db, observed live 2026-10-20). dpkg's own
+    #    warnings ("directory not empty so not removed") are what this
+    #    finishes off.
+    rm -rf /usr/share/daharness 2>/dev/null || true
+
+    # 2. The dedicated system identity postinst minted (adduser --system).
+    #    Revoked only if the account still looks exactly like ours — a system
+    #    uid, our nologin shell, our home — so a homonymous user an operator
+    #    made independently is never touched. NOT deleting /var/lib/daharness
+    #    (the home / StateDirectory): operator work product — see the pointer
+    #    block below + daharness-safety(7).
+    _PW=$(getent passwd daharness 2>/dev/null || true)
+    if [ -n "$_PW" ] && command -v deluser >/dev/null 2>&1; then
+        _HOME=$(echo "$_PW" | cut -d: -f6)
+        _SHELL=$(echo "$_PW" | cut -d: -f7)
+        if [ "$_HOME" = /var/lib/daharness ] && [ "$_SHELL" = /usr/sbin/nologin ]; then
+            deluser --system daharness 2>/dev/null || true
+        fi
+    fi
+    # Group follows only when empty (postinst granted sudo members to it —
+    # with members left, delgroup refuses and the grant survives for reuse).
+    if getent group daharness >/dev/null 2>&1 && command -v delgroup >/dev/null 2>&1; then
+        if ! delgroup --only-if-empty daharness 2>/dev/null; then
+            echo "daharness: group kept — non-system members remain (sudo users re-granted on reinstall)"
+        fi
+    fi
+    unset _PW _HOME _SHELL
+
+    # 3. What survives ON PURPOSE (operator decisions). A maintainer script
+    #    never scrubs user homes or silently deletes engagement work
+    #    product; it points at the knobs instead.
+    echo "daharness: purge kept intentional operator state (daharness-safety(7), purge section):"
+    echo "  /var/lib/daharness/       findings/engagement/scratch state - rm -rf if you want it gone"
+    echo "  /etc/daharness/pg.env     daharness-pg credentials - drop only with the cluster below"
+    echo "  postgres cluster 18/daharness (pg_lsclusters; engagement journal) -" \
+         "sudo pg_dropcluster --stop 18 daharness to discard"
+    echo "  ~/.local/share/jupyter/kernels/daharness  per-user kernelspec - rm -rf if you want it gone"
+    echo "  ~/.local/share/framework-stubs/           per-user IDE stubs   - rm -rf if you want it gone"
+fi
+
+#DEBHELPER#

@@ -24,8 +24,6 @@ from uuid import uuid4
 from .models import Finding, Unknown
 from constants import resolve_workspace_root
 
-_DEFAULT_DB = str(Path(__file__).resolve().parent.parent / "ids.db")
-
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +82,12 @@ def ensure_ids_db(db_path: str | None = None) -> Path:
 class FindingStore:
     """Append-only findings store backed by a SQLite table in ``ids.db``."""
 
-    def __init__(self, db_path: str = _DEFAULT_DB):
+    def __init__(self, db_path: Optional[str] = None):
+        # Workspace-resolved default (never tree-relative: a hardcoded
+        # __file__-derived path wrote ids.db INTO the deb package tree —
+        # untracked residue that survives a purge; 2026-10-20 VM incident).
+        if db_path is None:
+            db_path = str(Path(resolve_workspace_root()) / "ids.db")
         self.db_path = db_path
         # Root guard (mirrors utils/scratch_store.py + utils/cookie_jar.py):
         # chown the DB + WAL + SHM files back to the workspace owner BEFORE

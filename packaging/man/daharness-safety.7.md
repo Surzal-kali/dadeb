@@ -82,6 +82,39 @@ Every recovered credential gets ONE validation attempt against each other
 reachable service before deeper work resumes — logged as findings, auditable
 in the evidence store.
 
+## Purge residue ledger (what `apt purge` leaves, on purpose)
+
+dpkg removes exactly the files recorded in its manifest (+ conffiles) and
+then runs `debian/daharness.postrm`, which finishes the untracked residue
+(runtime bytecode, the residual package tree, the provisioned system
+user/group). What survives a purge BY DESIGN, and how to discard it manually
+if you want a fully clean machine — `postrm` prints this ledger at purge
+time and never scrubs it silently:
+
+- `/var/lib/daharness/` — state root (ids.db, scratch.db, cookie_jar.db,
+  scope/, engagement/, dropbox, chroma, run). Operator work product; the
+  engagement purge command erases per-engagement rows while you still want
+  the rest. `rm -rf /var/lib/daharness` discards everything (the system user
+  is gone at this point, so no service recreates it).
+- `/etc/daharness/pg.env` + the daharness Postgres cluster
+  (`pg_lsclusters` shows it, port 5433) — minted by `daharness-pg init` as a
+  pair: dropping one without the other strands the live passwords or strands
+  the cluster without its credential file. Discard both with
+  `sudo pg_dropcluster --stop 18 daharness && sudo rm /etc/daharness/pg.env`
+  (cluster version from `pg_lsclusters`; this keeps the engagement journal's
+  fate explicit — it is deleted data the ledger cannot undo).
+- Per-user lanes in each operator's `$HOME` (maintainer scripts never scrub
+  user homes): `~/.local/share/jupyter/kernels/daharness` (kernelspec —
+  after a purge its `argv` points at the removed tree, so it is a zombie
+  entry in every `jupyter kernelspec list` until deleted) and
+  `~/.local/share/framework-stubs/` (IDE stubs). `rm -rf` either.
+
+The package tree itself (`/usr/share/daharness`, the wrappers, unit files,
+preset, profile.d, man pages, conffiles) is fully removed by purge; state
+never lands there anymore because the workspace/socket resolution falls
+through to the system roots when the tree is read-only or is the deb package
+tree.
+
 # SEE ALSO
 
 **daharness-repl(1)**, **daharness-tools(7)**, **daharness.env(5)**,

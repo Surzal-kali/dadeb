@@ -93,6 +93,73 @@ def framework_tool(
 
 _WORKSPACE_ROOT_WARNED = False
 
+# The deb package tree (kali-package-pitch FHS verdict). State written here
+# is invisible to dpkg and survives a purge as residue — never a state root.
+_PACKAGE_TREE = Path("/usr/share/daharness")
+
+
+def _state_hostile_tree(tree: Path) -> bool:
+    """True when state must never be written into ``tree``.
+
+    Two triggers, decided in kali-package-pitch.md + observed live:
+    - The deb package tree (state written into /usr/share/daharness survives
+      any purge as untracked residue — ids.db landed there on the VM lane
+      when a bare tree invocation resolved before the service env armed).
+    - The tree is not actually writable by this user (real mkdir probe per
+      the stale-socket pitfall doctrine — never a bare Path.exists()).
+    """
+    if str(tree) == str(_PACKAGE_TREE):
+        return True
+    try:
+        tree.mkdir(exist_ok=True)
+    except OSError:
+        return True
+    marker = tree / "run"
+    try:
+        marker.mkdir(parents=True, exist_ok=True)
+        return False
+    except OSError:
+        return True
+
+
+def _state_fallback_root(tree: Path) -> Path:
+    """Loud fallback: redirect state to the system state root (/var/lib).
+
+    Best effort only — if even the system state root is unusable (a
+    non-privileged container lane, no StateDirectory provisioned), return
+    the tree anyway after logging; the fallback protects packaged lanes and
+    must never crash the dev/container lanes it was not written for.
+    """
+    global _WORKSPACE_ROOT_WARNED
+    state_root = Path("/var/lib/daharness")
+    try:
+        state_root.mkdir(parents=True, exist_ok=True)
+        probe = state_root / ".daharness_probe"
+        probe.write_text("probe\n")
+        probe.unlink(missing_ok=True)
+        if not _WORKSPACE_ROOT_WARNED:
+            _WORKSPACE_ROOT_WARNED = True
+            import logging
+            logging.getLogger(__name__).warning(
+                "state tree %s is read-only to this lane (or is the deb "
+                "package tree); using the system state root %s instead.",
+                str(tree),
+                str(state_root),
+            )
+        return state_root
+    except OSError:
+        if not _WORKSPACE_ROOT_WARNED:
+            _WORKSPACE_ROOT_WARNED = True
+            import logging
+            logging.getLogger(__name__).warning(
+                "state tree %s is read-only to this lane, but the system "
+                "state root %s is unusable here too; falling back to the "
+                "code checkout (state will live in the tree).",
+                str(tree),
+                str(state_root),
+            )
+        return tree
+
 
 def resolve_workspace_root() -> Path:
     """Lane-safe workspace root: ``$WORKSPACE_ROOT`` when it exists, else this
@@ -106,6 +173,12 @@ def resolve_workspace_root() -> Path:
     discovery, scratch/cookie-jar state, scope files, and findings resolve
     against the tree that is actually running rather than a phantom host
     path. Read per call, so tests can redirect per-call via monkeypatch.
+
+    Fallback branch (kali-package-pitch decision, ids.db-in-tree incident
+    2026-10-20): the un-set default uses the checkout only when state can
+    actually live there — the deb package tree (/usr/share/daharness) and
+    non-writable trees fall through to /var/lib/daharness with a loud log.
+    Dev-tree behavior is unchanged (tree is writable).
     """
     global _WORKSPACE_ROOT_WARNED
     env = os.getenv("WORKSPACE_ROOT", "").strip()
@@ -123,7 +196,10 @@ def resolve_workspace_root() -> Path:
                 env,
                 str(Path(__file__).resolve().parent),
             )
-    return Path(__file__).resolve().parent
+    tree = Path(__file__).resolve().parent
+    if _state_hostile_tree(tree):
+        return _state_fallback_root(tree)
+    return tree
 
 
 def resolve_framework_root() -> Path:
@@ -152,18 +228,20 @@ def resolve_framework_root() -> Path:
 
 
 # --- Brain sidecar socket path -----------------------------------------------
-# Single source of truth for the Brain's UDS path: the sidecar that BINDS it
-# and every lane that CONNECTS (secretary executor, tool REPL + daharness
-# kernel, bootstrap's readiness probe, auxiliary reporters) all resolve
-# through this function. Default lives in the checkout's gitignored ``run/``
-# dir — NOT ``/tmp`` — because the tree is the one path already bind-mounted
-# into every container lane (jupyter: /home/jovyan/framework, open-terminal:
-# /opt/framework), so a socket inside it crosses the container boundary on
-# the existing mount with zero new volumes: the host Brain binds
+# Single source of truth for "which socket does this lane talk to": the sidecar
+# that BINDS it and every lane that CONNECTS (tool REPL + daharness kernel,
+# bootstrap's readiness probe, auxiliary reporters) all resolve through this
+# function. Default lives in the checkout's gitignored ``run/`` dir — NOT
+# ``/tmp`` — because the tree is the one path already bind-mounted into every
+# container lane (jupyter: /home/jovyan/framework, open-terminal:
+# /opt/framework), so a socket inside it crosses the container boundary on the
+# existing mount with zero new volumes: the host Brain binds
 # <checkout>/run/brain.sock and the in-container kernel connects to the SAME
 # inode through its mount alias. A /tmp socket can never do this — every
 # container has its own /tmp — which is why the notebook kernel used to
 # report "brain down" and silently fall back in-process on every call.
+# Package lane (deb): the tree's run/ is unusable, so resolution falls through
+# to the system profile socket the RuntimeDirectory provisions.
 
 def brain_socket_path() -> Path:
     """Lane-safe Brain sidecar socket path.
@@ -175,8 +253,32 @@ def brain_socket_path() -> Path:
     ``$BRAIN_SOCKET`` overrides for edge cases (a lane that deliberately runs
     its own private sidecar). Read per call so tests and lanes can redirect
     via env without re-importing.
+
+    Fallback branch (kali-package-pitch decision, 2026-10-20): the deb package
+    tree resolves straight to /run/daharness/brain.sock (systemd
+    RuntimeDirectory owns it — a bare kernelspec argv must reach the service
+    Brain, not silently fall back in-process); a non-writable non-package tree
+    prefers the system socket when one exists. Dev-tree behavior unchanged.
     """
     env = os.getenv("BRAIN_SOCKET", "").strip()
     if env:
         return Path(env)
-    return Path(__file__).resolve().parent / "run" / "brain.sock"
+    tree = Path(__file__).resolve().parent
+    # Package lane (deb system profile): the tree is root-owned and its
+    # run/ is no place for a socket — the system profile's RuntimeDirectory
+    # owns /run/daharness (systemd re-binds it every boot). A bare tree
+    # invocation (e.g. the kernelspec argv) must still reach the service
+    # Brain, or it silently falls back in-process — the split-brain trap.
+    if str(tree) == str(_PACKAGE_TREE):
+        return Path("/run/daharness/brain.sock")
+    run_dir = tree / "run"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Non-writable tree but not the package tree (container lane): the
+        # system socket may still exist (system-profile host with a mounted
+        # tree) — prefer it over a phantom in-tree path the lane can't bind.
+        system_socket = Path("/run/daharness/brain.sock")
+        if system_socket.exists():
+            return system_socket
+    return run_dir / "brain.sock"

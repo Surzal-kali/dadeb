@@ -41,6 +41,16 @@ override_dh_auto_install:
 	  cp -a $$d debian/daharness/usr/share/daharness/; \
 	done
 	cp -a -- *.py debian/daharness/usr/share/daharness/
+	# Bytecode the ENTIRE staging tree, not just vendor/ (purge-residue fix,
+	# 2026-10-20 VM round-trip: runtime imports wrote untracked __pycache__
+	# into the root-owned tree, so dpkg purge left every module dir behind
+	# with "directory not empty so not removed" — 98 .pyc survived as
+	# residue alongside a stray ids.db). Tracked .pyc keep the ~3-6x repeat
+	# import speedup the vendor-only compile gave daemon boots, and dpkg
+	# now removes them with the package. Runs AFTER the tree copy so .pyc
+	# source-mtime headers match the staged .py files (dpkg preserves
+	# mtimes end-to-end — no import-time rewrite, no residue regeneration).
+	python3 -m compileall -q -f debian/daharness/usr/share/daharness
 	install -D -m 0644 .env.example debian/daharness/usr/share/daharness/.env.example 2>/dev/null || true
 	# pytest rootdir config: testpaths=["tests"] keeps ANY pytest spawn in
 	# the tree off the vendored closure's own test files (they break

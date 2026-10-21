@@ -1,3 +1,40 @@
+daharness (0.1.0+pkg7) kali; urgency=high
+
+  * purge lane (deb defect): a live purge round-trip on the VM lane
+    (2026-10-20) left residue behind with dpkg "directory not empty so not
+    removed" warnings on every module dir of /usr/share/daharness plus
+    /etc/daharness — the package shipped NO postrm at all, and dpkg removes
+    exactly the files in its manifest, never runtime-written state. Census
+    of what survived: 98 untracked __pycache__/*.pyc across all module dirs
+    (runtime imports bytecoded the root-owned tree; only vendor/ was
+    precompiled at build), a stray ids.db at the tree root, /etc/daharness/
+    pg.env + the postgres 18/daharness cluster still RUNNING and autostarted,
+    the daharness system user/group (kali's granted membership included),
+    and per-user lanes (~/.local/share/jupyter/kernels/daharness — a now
+    broken zombie kernelspec — and ~/.local/share/framework-stubs/).
+    Repairs, in three lanes: rules now compileall's the ENTIRE staging tree
+    so runtime bytecode is dpkg-tracked (purge-clean, and the ~3-6x repeat
+    import speedup the vendor-only compile gave boots now covers the whole
+    tree); constants.resolve_workspace_root()/brain_socket_path() gained the
+    pitch-decided fallback branches — the deb package tree
+    (/usr/share/daharness) is state-hostile by name (root-run bare
+    invocations can still write it, so writability alone is not enough) and
+    non-writable trees fall through to /var/lib/daharness (socket lane:
+    /run/daharness) with a loud log, never crashing a container lane whose
+    state root is also unusable; daharness/findings.py FindingStore's
+    default dropped its tree-relative _DEFAULT_DB (the actual ids.db-writer:
+    utils/findings.py instantiates it bare at every tool call, which put
+    findings state on the tree instead of the workspace root) for a
+    workspace-resolved default. New debian/daharness.postrm: on purge only,
+    rm -rf the residual tree, deluser the daharness account (guarded: our
+    uid/home/shell shape), delgroup only-if-empty with a pointer when sudo
+    members remain, and printed pointers for the intentional keeps —
+    /var/lib/daharness work product, pg.env + the postgres cluster (drop
+    with pg_dropcluster), and the per-user $HOME lanes (maintainer scripts
+    never scrub homes). Man page: daharness-safety(7) gained the purge
+    section with the same ledger + drop commands.
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 23:59:00 -0600
+
 daharness (0.1.0+pkg6) kali; urgency=high
 
   * kernel lane (deb defect): the kernelspec was a silent NO-OP on every

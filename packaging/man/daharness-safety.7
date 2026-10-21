@@ -9,8 +9,8 @@ budgets, retention
 Traffic\-sending tools resolve every target through an operator\-armed
 scope state.
 Arming happens ONLY at the operator REPL (\f[CR]scope on <handle>\f[R])
-and is deliberately NOT exposed as an LLM\-callable tool, so no model lane
-can toggle it.
+and is deliberately NOT exposed as an LLM\-callable tool, so no model
+lane can toggle it.
 State persists across processes (the REPL can re\-arm a running Brain).
 Blocked targets raise a scope error instead of transmitting.
 .SS Human\-in\-the\-loop approval
@@ -44,8 +44,8 @@ Unauthenticated AND non\-loopback together logs a boot\-time error
 rather than serving silently.
 .SS Local\-only LLM policy
 The models driving the lanes (Open WebUI conversation model, embedding
-model) run on a locally hosted endpoint (Ollama, loopback/LAN) \(em never
-a cloud LLM API.
+model) run on a locally hosted endpoint (Ollama, loopback/LAN) \(em
+never a cloud LLM API.
 Tool outputs from live targets (credentials, tokens, internal IPs) must
 not egress to third parties.
 .SS Engagement cobweb
@@ -76,6 +76,46 @@ stores, logged once, never a crash.
 Every recovered credential gets ONE validation attempt against each
 other reachable service before deeper work resumes \(em logged as
 findings, auditable in the evidence store.
+.SS Purge residue ledger (what \f[CR]apt purge\f[R] leaves, on purpose)
+dpkg removes exactly the files recorded in its manifest (+ conffiles)
+and then runs \f[CR]debian/daharness.postrm\f[R], which finishes the
+untracked residue (runtime bytecode, the residual package tree, the
+provisioned system user/group).
+What survives a purge BY DESIGN, and how to discard it manually if you
+want a fully clean machine \(em \f[CR]postrm\f[R] prints this ledger at
+purge time and never scrubs it silently:
+.IP \(bu 2
+\f[CR]/var/lib/daharness/\f[R] \(em state root (ids.db, scratch.db,
+cookie_jar.db, scope/, engagement/, dropbox, chroma, run).
+Operator work product; the engagement purge command erases
+per\-engagement rows while you still want the rest.
+\f[CR]rm \-rf /var/lib/daharness\f[R] discards everything (the system
+user is gone at this point, so no service recreates it).
+.IP \(bu 2
+\f[CR]/etc/daharness/pg.env\f[R] + the daharness Postgres cluster
+(\f[CR]pg_lsclusters\f[R] shows it, port 5433) \(em minted by
+\f[CR]daharness\-pg init\f[R] as a pair: dropping one without the other
+strands the live passwords or strands the cluster without its credential
+file.
+Discard both with
+\f[CR]sudo pg_dropcluster \-\-stop 18 daharness && sudo rm /etc/daharness/pg.env\f[R]
+(cluster version from \f[CR]pg_lsclusters\f[R]; this keeps the
+engagement journal\(aqs fate explicit \(em it is deleted data the ledger
+cannot undo).
+.IP \(bu 2
+Per\-user lanes in each operator\(aqs \f[CR]$HOME\f[R] (maintainer
+scripts never scrub user homes):
+\f[CR]\(ti/.local/share/jupyter/kernels/daharness\f[R] (kernelspec \(em
+after a purge its \f[CR]argv\f[R] points at the removed tree, so it is a
+zombie entry in every \f[CR]jupyter kernelspec list\f[R] until deleted)
+and \f[CR]\(ti/.local/share/framework\-stubs/\f[R] (IDE stubs).
+\f[CR]rm \-rf\f[R] either.
+.PP
+The package tree itself (\f[CR]/usr/share/daharness\f[R], the wrappers,
+unit files, preset, profile.d, man pages, conffiles) is fully removed by
+purge; state never lands there anymore because the workspace/socket
+resolution falls through to the system roots when the tree is read\-only
+or is the deb package tree.
 .SH SEE ALSO
 \f[B]daharness\-repl(1)\f[R], \f[B]daharness\-tools(7)\f[R],
 \f[B]daharness.env(5)\f[R], \f[B]daharness\-pg(1)\f[R]
