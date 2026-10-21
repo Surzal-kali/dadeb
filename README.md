@@ -125,6 +125,21 @@ lives beside its code:
 Agent-facing development guide: [`AGENTS.md`](AGENTS.md). Contributor
 walkthrough: [`CONTRIBUTING.md`](.github/CONTRIBUTING.md).
 
+## Shared-state permissions (deb lane)
+
+On the packaged lane the state root (`/var/lib/daharness` — the run/, ids.db,
+scratch, cookie-jar, and binary/apk drop dirs) is owned `daharness:daharness`
+with `2770`, same footwork class as docker's socket group: the service runs
+with it, unprivileged lanes don't. The doctor hard-gates this — a lane that
+can't see the state root exits `rc 77` with the fix instead of reporting
+false downs. One-time grant (then re-login or `newgrp daharness`):
+
+```bash
+sudo usermod -aG daharness $USER
+newgrp daharness        # no re-boot needed
+daharness doctor        # now grades honestly, no sudo
+```
+
 ## Architecture
 
 ### Tool Secretary (`daharness/`)
