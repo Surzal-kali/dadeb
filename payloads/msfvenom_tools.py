@@ -237,8 +237,8 @@ async def generate_payload(
         encrypt: Encrypt the raw shellcode with a real cipher instead of (or
             alongside) an encoder chunk: 'aes256', 'aes256cbc', 'rc4', 'xor',
             'base64' etc (msfvenom_menu(kind='encrypt')). Emits ENCRYPTED RAW
-            SHELLCODE ONLY — no decryptor is baked in; pair with a loader from
-            the encoders/ lane.
+            SHELLCODE ONLY — no decryptor is baked in; a runtime decrypt +
+            execute loader is the operator's pairing job.
         encrypt_key: Cipher key as a hex string (e.g. 32 bytes = 64 hex chars
             for aes256). Required with encrypt except for 'base64'.
         encrypt_iv: Initialization vector (hex). Optional; auto-generated when

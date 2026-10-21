@@ -8,9 +8,8 @@ checkout AND on a deb install, since `tests/` ships with the tree.
 ## Adding tests for your tool
 
 The framework invites new tool scripts into the allowed roots
-(`auxiliaries/`, `payloads/`, `listeners/`, `utils/`, `encoders/`,
-`evasion/`). Your tests belong here, named `test_<your_tool>.py`. Two
-working patterns to copy:
+(`auxiliaries/`, `payloads/`, `listeners/`, `utils/`, `evasion/`). Your
+tests belong here, named `test_<your_tool>.py`. Two working patterns to copy:
 
 1. **Argparse CLI module** (`LOCAL_FILE`, static mint) — see
    `test_tool_addition_lane.py::test_argparse_module_mints_local_file_tool_and_runs`:

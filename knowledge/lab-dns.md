@@ -1,6 +1,8 @@
 # Lab DNS — one hostname list for kali + containers
 
-Shared lab hostname resolution across execution lanes. Built 2026-10-17
+Shared lab hostname resolution across execution lanes (lab-environment
+setup, not part of the deb; the reprovision script lives in
+`packaging/reference/lab-dns-setup.sh`). Built 2026-10-17
 after notebook-resolution-vs-kali divergence (e.g. `connected.htb` resolving
 in one lane, NXDOMAIN in the other). Complements `knowledge/lanes.md`.
 
@@ -19,8 +21,9 @@ kali                                          containers (workbench net)
                 └──────────────────────────────────┘
 ```
 
-- **Why `172.28.0.1`**: the pinned gateway of the `workbench` compose bridge
-  (`ipam: 172.28.0.0/24` in `dockered/docker-compose.yaml`), so it survives
+- **Why `172.28.0.1`**: the pinned gateway of the container bridge used by
+  the lab compose lane (reference script: `packaging/reference/lab-dns-setup.sh`
+  — it picks and pins the subnet), so it survives
   docker/kali restarts. **Never bind `192.168.56.x`** — eth0 is VBox
   NAT/DHCP and churns per boot (and `.1` on that LAN is the VBox host, not
   kali).
@@ -36,8 +39,8 @@ kali                                          containers (workbench net)
 
 | Piece | File |
 |---|---|
-| Reprovision script (idempotent, sudo) | `dockered/lab-dns-setup.sh` |
-| Compose `dns:` on jupyter | `dockered/docker-compose.yaml` |
+| Reprovision script (idempotent, sudo) | `packaging/reference/lab-dns-setup.sh` |
+| Container DNS pin on the execution lane | your compose `dns:` entry (see the script) |
 | This doc | `knowledge/lab-dns.md` |
 
 Host-only state the script (re)creates on a fresh install:

@@ -37,7 +37,7 @@ Read them together:
    `python -m daharness.core` first (add `--clear` for a full rebuild).
 3. **Code edited but embeddings stale** — the REPL `reindex` command
    refreshes manifests so `run` sees your edits immediately, but semantic
-   `search` and the secretary keep seeing **old embeddings** until
+   `search` and the gateway search lane keeps seeing **old embeddings** until
    `python -m daharness.core` runs (then restart the Brain).
 
 ## 3. Scope-gate messages are not errors
@@ -45,7 +45,7 @@ Read them together:
 If a tool raises `ScopeGateError`, the operator-armed gate chose to block
 that traffic — that is the framework working. Armed state is controlled
 only from the REPL (`scope on <handle>` / `scope off` / `scope status`);
-the secretary cannot toggle it. Disarmed (lab) mode is the default. Full
+any model lane can toggle the gate. Disarmed (lab) mode is the default. Full
 semantics: [`knowledge/scope_gate.md`](scope_gate.md).
 
 ## 4. Still stuck

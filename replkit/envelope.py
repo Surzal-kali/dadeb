@@ -7,8 +7,8 @@ returned a bare string — it is never a stringified copy of ``result``.
 These helpers walk that tree so you don't have to remember the shape or
 write a 5-line comprehension every time.
 
-Ground-truth semantics mirror dabooks/primitives/kernelgate.py: the shim's
-local walkers mirror the injected helpers EXACTLY, so behavior is
+Ground-truth semantics mirror the kernel-lane's injected helpers: the
+shim's local walkers mirror them EXACTLY, so behavior is
 identical with or without delegation.
 
   find(r, "open_ports")        → list of all values at any key "open_ports"

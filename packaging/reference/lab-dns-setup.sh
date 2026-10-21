@@ -10,17 +10,17 @@
 #   /etc/dnsmasq.d/lab.conf                        — the dnsmasq config
 #   /etc/systemd/system/dnsmasq.service.d/override.conf — After=docker.service
 #     + Restart=on-failure (the 172.28.0.1 bridge gateway only exists once
-#     docker *compose* creates the workbench bridge — dockerd being up does
+#     docker *compose* creates the lab bridge — dockerd being up does
 #     not imply the bridge exists, so ordering alone can still lose the bind
 #     race at boot; on-failure retry closes that gap)
 #   then: enable + restart dnsmasq, and verify port 53 + resolution.
 #
-# The container side lives IN the repo and needs nothing here:
-#   dockered/docker-compose.yaml — jupyter service: dns: [172.28.0.1]
+# The container side is a `dns:` entry on your compose's execution lane —
+# point it at this script's BRIDGE_GW (default 172.28.0.1).
 #
 # Design notes: knowledge/lab-dns.md
 #
-# Usage:  sudo dockered/lab-dns-setup.sh
+# Usage:  sudo packaging/reference/lab-dns-setup.sh
 # =============================================================================
 set -euo pipefail
 
@@ -35,7 +35,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # The bridge gateway must exist BEFORE dnsmasq binds it (fresh-install trap).
-# Docker *compose* — not dockerd — creates the workbench bridge, so it can lag
+# Docker *compose* — not dockerd — creates the lab bridge, so it can lag
 # docker.service and this script. Wait briefly for it; fail with guidance if
 # it never shows (BRIDGE_WAIT_S overrides the wait, 0 skips straight to fail).
 bridge_wait=${BRIDGE_WAIT_S:-30}
@@ -45,8 +45,8 @@ for _ in $(seq 1 "$bridge_wait"); do
 done
 if ! ip -br addr | grep -q "${BRIDGE_GW}/"; then
     echo "ERROR: ${BRIDGE_GW}/ not present on any interface after ${bridge_wait}s." >&2
-    echo "       The workbench bridge comes from docker compose — start it first:" >&2
-    echo "         cd dockered && docker compose up -d" >&2
+    echo "       The lab bridge comes from your compose lane — start it first:" >&2
+    echo "         bring your compose lane up (docker compose up -d)" >&2
     exit 1
 fi
 
@@ -62,7 +62,7 @@ fi
 # going upstream.
 cat > "$LAB_CONF" <<'EOF'
 # Lab DNS: serves kali's /etc/hosts + forwards everything else upstream.
-# Managed by dockered/lab-dns-setup.sh — edit the script, not this file.
+# Managed by packaging/reference/lab-dns-setup.sh — edit the script, not this file.
 listen-address=127.0.0.1,BRIDGE_GW_PLACEHOLDER
 bind-interfaces
 domain-needed
@@ -78,7 +78,7 @@ chmod 644 "$LAB_CONF"
 mkdir -p "$DROPIN_DIR"
 cat > "$DROPIN_CONF" <<'EOF'
 [Unit]
-# 172.28.0.1 only exists once docker *compose* creates the workbench bridge —
+# 172.28.0.1 only exists once docker *compose* creates the lab bridge —
 # docker.service can be fully active with no bridge yet, so ordering alone
 # can still lose the bind race at boot.
 After=docker.service
@@ -116,4 +116,4 @@ else
 fi
 
 echo
-echo "Done. Container side is already in dockered/docker-compose.yaml (jupyter: dns: [${BRIDGE_GW}])."
+echo "Done. Container side: set dns: [${BRIDGE_GW}] on your compose execution lane."

@@ -25,11 +25,11 @@ CREATE TABLE IF NOT EXISTS journal.entries (
     entry_id    BIGSERIAL PRIMARY KEY,
     ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
     engagement  TEXT REFERENCES engagement.engagements(slug),
-    lane        TEXT NOT NULL DEFAULT 'unknown',   -- secretary|gateway|repl|brain|owui|mcp
+    lane        TEXT NOT NULL DEFAULT 'unknown',   -- gateway|repl|kernel|brain|mcp
     tool_id     TEXT NOT NULL,
     args        JSONB NOT NULL DEFAULT '{}'::jsonb, -- material tier: secrets stay (scrubbing is a mid-engage self-own), 24h TTL applies, purge wipes
     scope_verdict TEXT,
-    approval_path TEXT,                              -- secretary_approval|gateway|repl_direct|mcp|owui
+    approval_path TEXT,                              -- gateway|repl_direct|mcp
     status      TEXT NOT NULL,                       -- ok|error|timeout|budget_exhausted
     duration_s  REAL,
     result_mode TEXT,                                 -- large|digest|page

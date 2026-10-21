@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "daharness"
 version = "0.1.0"
-description = "Headless, MCP-capable orchestration harness for authorized security research: an external LLM (Open WebUI model, gateway or MCP client) semantically searches a vector-indexed tool registry and executes tools; the dev checkout also runs a local-LLM chat secretary with human-in-the-loop approval."
+description = "Headless, MCP-capable orchestration harness for authorized security research: an external LLM (gateway or MCP client) semantically searches a vector-indexed tool registry and executes tools inside operator-armed scope gates."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
@@ -27,9 +27,8 @@ classifiers = [
     "Topic :: Security",
 ]
 dependencies = [
-    # Core runtime — derived from actual framework imports (see CONTRIBUTING.md).
-    # The full dev venv export remains in requirements-dev.txt; do not add
-    # framework deps there. Keep pins aligned with requirements.txt.
+    # Core runtime — derived from actual framework imports. Keep pins aligned
+    # with requirements.txt (the tracked freeze).
     "chromadb==1.5.9",
     "httpx==0.28.1",
     "pydantic==2.13.4",
@@ -61,9 +60,6 @@ db = ["psycopg[binary]==3.2.12", "pg8000>=1.13"]  # engagement/journal lane: Pos
 dev = [
     "pytest>=8.0",
     "black==26.5.1",
-    # The complete pinned dev-venv export (361 pins, includes everything above):
-    # install via `pip install -r requirements-dev.txt`. The `-r` reference
-    # form is not valid PEP 508 inside extras, so it lives in README instructions.
 ]
 
 [project.urls]
@@ -75,7 +71,7 @@ Issues = "https://github.com/Surzal-kali/daharness/issues"
 # The framework runs from its checkout (bootstrap.py / tool_repl.py / systemd)
 # and imports top-level helper modules by design (constants, memories, ...);
 # packages below cover the importable core for pip-installed consumers.
-packages = ["daharness", "utils", "auxiliaries", "payloads", "listeners", "encoders"]
+packages = ["daharness", "utils", "auxiliaries", "payloads", "listeners"]
 
 [tool.pytest.ini_options]
 # Discovery mirrors the doc'd workflow (pytest tests/): `tests/` only — the

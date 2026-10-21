@@ -5,8 +5,8 @@
 The scope gate (`utils/scope_gate.py`) is a framework-side backstop the
 operator arms. State is persisted to `scope/.armed_packet_scope.json`
 (mtime-checked every call, so changes apply inside a running Brain).
-Arming is deliberately NOT exposed as an `@framework_tool` so the
-secretary can never toggle it.
+Arming is deliberately NOT exposed as an `@framework_tool` so no
+model lane can ever toggle it.
 
 ## kernel wrappers (execute_code / REPL)
 

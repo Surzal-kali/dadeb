@@ -83,21 +83,6 @@ def _sanitize_preview(text: str) -> str:
     if _IPYTHON_TOOLBAR_NEWLINES == "collapse":
         return text.replace("\n", " ").replace("\t", " ")
     return text
-# Mouse support: click to position cursor inside the input buffer.
-# Tradeoff: when ON, the terminal's native drag-to-select is captured by
-# the app — hold Shift while dragging to force terminal-native selection
-# (works in GNOME Terminal, iTerm2, Windows Terminal, Konsole, etc.).
-_IPYTHON_MOUSE_SUPPORT = os.getenv("IPYTHON_MOUSE", "1").lower() not in ("0", "false", "no", "off")
-# External editor for the IPython shell.  F2 (always on in IPython) opens
-# the current cell in $VISUAL/$EDITOR; we default to nvim so the escape
-# hatch lands in a full TUI IDE (LazyVim, copilot, neo-tree, telescope, …)
-# instead of the nano/vi fallback.  Override with IPYTHON_EDITOR="code --wait"
-# or similar if you prefer a different editor.
-_IPYTHON_EDITOR = os.getenv("IPYTHON_EDITOR", "nvim")
-# F3 launches a full standalone nvim session (not cell-edit) — the TUI IDE
-# escape hatch.  :qa returns to IPython with all live state intact.
-# Set IPYTHON_NVIM_ESCAPE=0 to disable the F3 binding.
-_IPYTHON_NVIM_ESCAPE = os.getenv("IPYTHON_NVIM_ESCAPE", "1").lower() not in ("0", "false", "no", "off")
 
 
 def _user_globals(shell) -> List[tuple]:

@@ -16,7 +16,7 @@ skipped, evidence falls back to SQLite), never breaking a tool. One cached
 connection per process, one reconnect-backoff window so a down server never
 pins the dispatch path.
 
-Roles (dockered/postgres/init/001_roles.sh): lanes authenticate per-lane
+Roles (packaging/postgres/init/001_roles.sh): lanes authenticate per-lane
 (brain_lane/gateway_lane/repl_lane via ``HARNESS_DB_LANE``); the operator
 session (harness_operator) is the only identity allowed to run
 ``engagement.purge()`` — the audit-trail eraser stays human-only, the same

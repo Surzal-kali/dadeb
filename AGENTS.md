@@ -51,7 +51,7 @@ The `daharness/` package splits imports across focused modules:
 ### Tool Discovery (`daharness/registry.py:discover_local_tools`)
 
 Two passes scan `ALLOWED_TOOL_ROOTS` (`auxiliaries/`, `payloads/`,
-`listeners/`, `utils/`, `encoders/`, `evasion/`):
+`listeners/`, `utils/`, `evasion/`):
 
 1. **Static AST analysis** (`LOCAL_FILE` transport): `extract_module_profile()`
    parses each `.py` with `ast` — **never imports** — extracting the module
@@ -171,10 +171,10 @@ Entry point and daemon. `FrameworkLoader.launch_all()` starts:
 - Metasploit MCP (launches `msfconsole` with `msgrpc`, waits for RPC port)
 
 Also runs a wordlist-tree preflight (`utils.wordlists.preflight_wordlists`)
-before anything can dispatch. Container lane: the workbench containers
-(chroma, open-webui, jupyter) run via `dockered/docker-compose.yaml` and
-reach the host-lane Brain over the shared `run/brain.sock` — see
-[`dockered/README.md`](dockered/README.md).
+before anything can dispatch. Remote lanes (a Jupyter/Open WebUI container,
+another box) reach the host-lane Brain over the socket resolved by
+`constants.brain_socket_path()` — same path on every lane that shares the
+tree.
 
 Interactive mode: indexes tools via `bootstrap_registry()`, then enters
 `_chat()` REPL. Daemon mode (`--daemon`): starts services and waits for
@@ -182,7 +182,7 @@ SIGTERM/SIGINT.
 
 ### API Gateway (`api_gateway.py`)
 
-FastAPI server (port 5000 on the host lane; 6000 in the container lane):
+FastAPI server (port 5000; 6000 on the container profile):
 - `GET /health` — health check
 - `POST /tools/execute` — exact `tool_id` dispatch, or semantic lookup (`find_best_tool`) + execution. Accepts `result_mode` (full|digest|page) for result projection.
 - `POST /tools/search` — candidate menu (top_k) without execution
@@ -265,9 +265,9 @@ until the operator closes it (2026-10-19 design):
   tag rows with a new key or erase the audit trail. State persists to
   `engagement/.armed_engagement.json`, mtime-checked per dispatch; rows
   written while disarmed carry NULL engagement and are engagement-bound.
-- **Postgres lane (optional)**: `dockered/docker-compose.yaml` gains a
-  `postgres` service (loopback-only publish, 2g cap); init scripts in
-  `dockered/postgres/init/` mint per-lane LOGIN roles (brain_lane /
+- **Postgres lane (optional)**: shipped on the deb as `daharness-pg(1)` —
+  it provisions a dedicated cluster and runs the init bundle
+  (`packaging/postgres/init/`) that mints per-lane LOGIN roles (brain_lane /
   gateway_lane / repl_lane), and only `harness_operator` may run
   `engagement.purge()` — lanes hold INSERT/SELECT (+ evidence UPDATE), the
   retention sweep (`engagement.sweep_expired()`) runs as a SECURITY DEFINER
@@ -291,7 +291,7 @@ until the operator closes it (2026-10-19 design):
   target)` on `evidence.attempts` refuses a second validation attempt with
   re-mint guidance (re-acquisition is cheap, brute-forcing isn't).
   Phase 1 ships SQLite-backed (same schema); the PG lane takes over when
-  psycopg + the container are up. Tools: `record_evidence` /
+  psycopg + the `daharness-pg` cluster are up. Tools: `record_evidence` /
   `add_validation_attempt` / `list_open_evidence` / `resolve_evidence`.
 - **Envelope contract**: `daharness/models.py:ExecutionEnvelope` (+
   `EnvelopeMeta`/`Provenance`/`BudgetDirective`) pins the dispatch-result
@@ -508,21 +508,14 @@ honest limits: `evasion/README.md` (transport-identity stack section).
 `encrypt_key` / `encrypt_iv` (aes256/aes256cbc/rc4/xor/base64; key+iv
 hex-validated before any subprocess; exact cipher names come from
 `msfvenom_menu(kind='encrypt')`). It emits **encrypted raw shellcode only** —
-no decryptor stub, no wrapper. The pairing artifact is an `encoders/` loader
-(decrypt + execute at runtime, staged lane); until one exists, an encrypted
-blob alone is inert. Readiness framing, honest taxonomy, and expansion policy
+no decryptor stub, no wrapper. An encrypted blob alone is inert; a pairing
+loader (decrypt + execute at runtime) is a future expansion lane.
+Readiness framing, honest taxonomy, and expansion policy
 live in [`evasion/README.md`](evasion/README.md).
-
-### Open WebUI Tool (`owui-tools/owui-wrapper.py` → `owui_tools.framework_bridge`)
-
-Open WebUI tool definitions (v0.3.2) that call the framework API for tool
-execution and memory operations, with per-chat session isolation. Used to
-expose the framework as a tool in Open Web UI. (`owui-tool.py` was the
-predecessor and no longer exists.)
 
 ## Development Guidelines
 
-### Jupyter Kernel (`dabooks/*.ipynb`)
+### Jupyter Kernel (notebook lane)
 
 The Jupyter kernel used in this workspace resolves like the IPython REPL:
 the framework root is on `sys.path`, so codebase modules and
@@ -554,7 +547,7 @@ the field is at the top level or nested under `result`.
 
 **Option A — argparse module (LOCAL_FILE):**
 1. Create a `.py` file under an allowed root (`auxiliaries/`, `payloads/`,
-   `listeners/`, `utils/`, `encoders/`, `evasion/`).
+   `listeners/`, `utils/`, `evasion/`).
 2. Add a module-level docstring (this becomes the embedding text).
 3. Use `argparse` with `add_argument` calls — the static scanner extracts
    flags, types, and required-ness into the parameter schema.
@@ -658,14 +651,12 @@ automatically after reporting any credential-bearing finding.
   Missing signatures cause silent type coercion or segfaults.
 - **C plugin paths:** use `Path(__file__).resolve().parent / "plugins" /
   "name.so"` for absolute paths. Relative paths break when the CWD changes.
-- **code-server owns the host docker daemon:** the editor container shares
-  `/var/run/docker.sock` (root-equivalent, deliberate). Compose invoked from
-  the editor must target the host-identical tree mount
-  (`-f /home/kali/github/daharness/dockered/docker-compose.yaml`) — never the
-  `/config/workspace` alias: the HOST daemon resolves `./` bind sources on
-  host paths, so alias paths produce stray dirs / wrong mounts. Socket GID
-  drift after daemon changes = `permission denied` on `/var/run/docker.sock`;
-  re-read `stat -c %g` and sync the compose `group_add`.
+- **Deb tree is read-only:** on the system-package lane the checkout at
+  `/usr/share/daharness` is root-owned — never write state into it
+  (`constants.resolve_workspace_root()` falls through to
+  `/var/lib/daharness`, and `brain_socket_path()` resolves
+  `/run/daharness/brain.sock`). Bare-tree invocations (kernelspec argv) rely
+  on that fallback; don't add code paths that assume a writable checkout.
 - **Process-local sessions:** `SessionManager` is per-process. If the Brain
   dies and a call falls back in-process, sessions created on the Brain are
   invisible. Design tools to detect and report this, not silently fail.

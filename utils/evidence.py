@@ -5,7 +5,7 @@ open item the investigation noticed but hasn't answered yet: a recovered
 credential not yet validated against other services, an unprobed service,
 an ambiguous result, a scope question. Phase 1 stores locally in SQLite
 (mirroring the Postgres ``evidence`` schema in
-``dockered/postgres/init/002_schemas.sql``); the Postgres lane takes over
+``packaging/postgres/init/002_schemas.sql``); the Postgres lane takes over
 when psycopg + the postgres container are up.
 
 The headline is the credential-reuse sweep made mechanical: every recovered

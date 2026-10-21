@@ -1,11 +1,8 @@
 # Framework Knowledge Directory
 
 Version-controlled operational guides loaded into Open Web UI's knowledge
-collection at container startup. The directory is bind-mounted into the
-`open-webui` container (see `dockered/docker-compose.yaml`) and OWUI's RAG
-pipeline handles chunking, embedding (`nomic-embed-text` via Ollama), and
-context-top injection — the same way the `repl-bank` knowledge collection
-works, minus the manual upload step.
+collection (upload the directory contents into an OWUI knowledge collection;
+OWUI's RAG pipeline handles chunking, embedding, and context-top injection).
 
 ## Why a directory, not an endpoint?
 
@@ -23,8 +20,9 @@ that knowledge; OWUI's own RAG is the delivery mechanism.
   heading/paragraph — descriptive headings improve retrieval).
 - Keep headings descriptive — they're what OWUI's semantic matcher scores
   against. `## ids.db schema` matches "database schema" better than `## DB`.
-- Cross-reference source files (`schema.md`, `AGENTS.md`, `SYSTEM_PROMPT.md`)
-  by name so the model can follow up with the full doc if needed.
+- Cross-reference source docs by name (`AGENTS.md`, the per-lane `README.md`
+  files, the `packaging/man/` man pages) so the model can follow up with the
+  full doc if needed.
 - No engagement data, no target specifics — assistant-ops knowledge only
   (same scope rule as the `repl-bank` knowledge collection).
 

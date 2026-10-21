@@ -93,15 +93,17 @@ def framework_tool(
 
 _WORKSPACE_ROOT_WARNED = False
 
-# The deb package tree (kali-package-pitch FHS verdict). State written here
-# is invisible to dpkg and survives a purge as residue — never a state root.
+# The deb package tree is never a state root (FHS verdict; see README.md
+# "Project layout"). State written here is invisible to dpkg and survives a
+# purge as residue — never a state root.
 _PACKAGE_TREE = Path("/usr/share/daharness")
 
 
 def _state_hostile_tree(tree: Path) -> bool:
     """True when state must never be written into ``tree``.
 
-    Two triggers, decided in kali-package-pitch.md + observed live:
+    Two triggers, decided at packaging time (2026-10-20, system-package tree)
+    and observed live on the deb lane:
     - The deb package tree (state written into /usr/share/daharness survives
       any purge as untracked residue — ids.db landed there on the VM lane
       when a bare tree invocation resolved before the service env armed).
@@ -174,8 +176,8 @@ def resolve_workspace_root() -> Path:
     against the tree that is actually running rather than a phantom host
     path. Read per call, so tests can redirect per-call via monkeypatch.
 
-    Fallback branch (kali-package-pitch decision, ids.db-in-tree incident
-    2026-10-20): the un-set default uses the checkout only when state can
+    Fallback branch (packaging decision, ids.db-in-tree incident 2026-10-20):
+    the un-set default uses the checkout only when state can
     actually live there — the deb package tree (/usr/share/daharness) and
     non-writable trees fall through to /var/lib/daharness with a loud log.
     Dev-tree behavior is unchanged (tree is writable).
@@ -254,7 +256,7 @@ def brain_socket_path() -> Path:
     its own private sidecar). Read per call so tests and lanes can redirect
     via env without re-importing.
 
-    Fallback branch (kali-package-pitch decision, 2026-10-20): the deb package
+    Fallback branch (packaging decision, 2026-10-20): the deb package
     tree resolves straight to /run/daharness/brain.sock (systemd
     RuntimeDirectory owns it — a bare kernelspec argv must reach the service
     Brain, not silently fall back in-process); a non-writable non-package tree

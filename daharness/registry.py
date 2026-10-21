@@ -88,7 +88,6 @@ ALLOWED_TOOL_ROOTS = [
     (FRAMEWORK_ROOT / "payloads").resolve(),
     (FRAMEWORK_ROOT / "listeners").resolve(),
     (FRAMEWORK_ROOT / "utils").resolve(),
-    (FRAMEWORK_ROOT / "encoders").resolve(),
     (FRAMEWORK_ROOT / "evasion").resolve(),
 ]
 
@@ -443,7 +442,6 @@ class ToolRegistry(ExecutorMixin):
             "bootstrap.py",
             "daharness.py",
             "memories.py",
-            "owui-tool.py",
         }
 
         manifests = []

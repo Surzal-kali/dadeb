@@ -60,7 +60,7 @@ the deb's own bundled `scripts/pyright_typeshed_builtins.pyi` copy) —
 refused loudly rather than shipping a partial fork that un-defines `print`/`len`. Output lands in *FRAMEWORK_STUBS_DIR*
 (default **~/.local/share/framework-stubs**) — point your editor's
 `stubPath` there. `--check` reports OK/STALE — and SKIP for the
-checkout-only *dabooks/ruff.toml* block, whose file the deb does not ship
+checkout-only *ruff.toml* builtins block, whose file the deb does not ship
 and therefore cannot regenerate — without writing anything. Run it after
 adding tools, or whenever hover/completion drifts from what the kernel
 actually injects.

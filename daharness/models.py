@@ -235,7 +235,7 @@ class EnvelopeMeta(BaseModel):
     """Transport/lane metadata. Anything lane-specific goes in ``extra``"""
     tool_id: str
     transport: str = Field(..., description="brain|in_process|local_file|mcp_rpc")
-    lane: str = Field(default="unknown", description="secretary|gateway|repl|owui|mcp")
+    lane: str = Field(default="unknown", description="gateway|repl|kernel|brain|mcp")
     session_id: str = "0"
     run_ref: Optional[str] = None
     degraded: bool = False

@@ -34,10 +34,10 @@ TREE = pathlib.Path(os.environ.setdefault("DAHARNESS_TREE", str(DRIVER_TREE)))
 REPORT = os.environ.setdefault("DAHARNESS_FLOOR_REPORT", "/tmp/da-l2-floor.json")
 TIMEOUT_S = int(os.environ.get("DAHARNESS_FLOOR_TIMEOUT", "15"))
 
-ROOTS = {"auxiliaries", "payloads", "listeners", "utils", "encoders",
-         "evasion", "owui-tools", "engagement", "daharness"}
+ROOTS = {"auxiliaries", "payloads", "listeners", "utils",
+         "evasion", "engagement", "daharness"}
 SKIP_DIRS = {"venv", ".venv", "__pycache__", ".git", "tests", "docs",
-             "packaging", "dockered", "node_modules", "dist", "build",
+             "packaging", "node_modules", "dist", "build",
              "daharness.egg-info", "run", ".memory",
              # vendored third-party closure (deb lane): pip's deps are not
              # ship entries — auditing them explodes the run into hours

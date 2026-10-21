@@ -92,5 +92,5 @@ file); the arming verbs are deliberately NOT exposed as framework tools.
   the DB lane is additive.
 
 Cross-references: `knowledge/findings.md` (report rendering + evidence
-lifecycle), `AGENTS.md` (architecture deep-dive), `memory_schema.md`
-(vector-memory schema).
+lifecycle), `AGENTS.md` (architecture deep-dive), `memories.py` (vector
+memory service).

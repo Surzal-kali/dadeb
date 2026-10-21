@@ -507,8 +507,8 @@ def _check_chroma() -> Dict[str, Any]:
     """ChromaDB registry backend — the semantic lifeblood lane.
 
     The daemon launches it as a supervised sidecar (2026-10-20 merge of
-    the old daharness-chroma.service); the compose container owns this
-    port on the dockered lane. ONE probe question: does the store answer
+    the old daharness-chroma.service); a container lane can also serve this
+    port. ONE probe question: does the store answer
     on CHROMA_HOST:CHROMA_PORT (the same knobs registry.py dials)? If the
     lane is silent, the registry's semantic search / the gateway's
     find_best_tool / indexing are ALL down — the remediation names the
@@ -576,9 +576,9 @@ def _check_postgres() -> Dict[str, Any]:
         )
         base["remediation"] = (
             "deb lane: apt install postgresql && sudo daharness-pg init — "
-            "dev lane: pip install -e \".[db]\" + the dockered compose "
-            "postgres (dockered/docker-compose.yaml, init scripts under "
-            "dockered/postgres/init/)"
+            "dev lane: pip install -e \".[db]\" and provision a cluster "
+            "whose roles/schemas match packaging/postgres/init/ "
+            "(daharness-pg init is the reference implementation)"
         )
         return base
 

@@ -10,9 +10,9 @@
 #
 # NOTE: single placeholder file — whether daemon/kernel split into separate
 # user units and whether they instantiate per-user (daharness@<user>.service)
-# is a dh_installsystemd decision at packaging time (kali-package-pitch.txt
-# "Profiles"). ExecStart shows the daemon; the kernel variant swaps in
-# /usr/bin/daharness-kernel and drops KillMode (ipykernel SIGTERM path).
+# is a dh_installsystemd decision at packaging time ("Profiles"). ExecStart
+# shows the daemon; the kernel variant swaps in /usr/bin/daharness-kernel and
+# drops KillMode (ipykernel SIGTERM path).
 
 [Unit]
 Description=daharness tool framework (user profile)

@@ -16,12 +16,9 @@ lazily inside functions in the package).
 
 **The filename is load-bearing.** This exact filename is matched/launched by:
 
-  • the ``daharness`` kernelspec (docker-baked kernel.json ``argv``) — both
-    Dockerfile lanes and ``replkit.kernel_lane._install_kernelspec``
-  • ``dockered/code-server-init/10-framework-runtime.sh`` (stub regen guard,
-    kernelspec sanity check)
-  • ``dockered/10-refresh-stubs.sh`` (jupyter lane stub refresh)
-  • ``scripts/daharness-kernel.service`` (systemd unit)
+  • the ``daharness`` kernelspec (kernel.json ``argv``) —
+    ``replkit.kernel_lane._install_kernelspec`` and the deb's
+    ``daharness-kernel`` wrapper
   • ``utils/engagement.py`` (journal lane inference via argv[0])
   • ``scripts/gen_repl_stubs.py`` (stub generator import + private helpers)
 

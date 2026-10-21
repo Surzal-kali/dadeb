@@ -26,12 +26,12 @@ for the editor lane:
            advertise) with ``_build_docstring`` output.  This is what pyright
            consumes for completion + hover + signature help.
 
-  3. Maintain the generated ``builtins`` block in ``dabooks/ruff.toml``
-     (between BEGIN/END marks).  The notebook-lane ruff config needs every
-     kernel-injected name declared as a lint ``builtins`` entry, and ruff has
-     no external-fragment include — the values must live in the config file
-     itself.  Only the marked block is ever touched; hand-written config
-     around it is never modified.
+  3. Maintain the generated ``builtins`` block in the checkout's
+     ``ruff.toml`` (between BEGIN/END marks).  The notebook-lane ruff config
+     needs every kernel-injected name declared as a lint ``builtins`` entry,
+     and ruff has no external-fragment include — the values must live in the
+     config file itself.  Only the marked block is ever touched; hand-written
+     config around it is never modified.
 
   4. Emit a BUILTINS FORK into the stub dir:
 
@@ -46,7 +46,7 @@ for the editor lane:
            no longer needs the global reportUndefinedVariable kill.
 
 Everything here reads framework code — nothing outside the marked builtins
-block in dabooks/ruff.toml is written back into the repo.
+block in ruff.toml is written back into the repo.
 
 Usage:
     python scripts/gen_repl_stubs.py            # regenerate stubs + builtins
@@ -87,7 +87,7 @@ OUT_DIR = Path(
 PY_FILE = OUT_DIR / "framework_tools.py"
 PYI_FILE = OUT_DIR / "framework_tools.pyi"
 BUILTINS_FILE = OUT_DIR / "builtins.pyi"
-REPO_TOML = _REPO_ROOT / "dabooks" / "ruff.toml"
+REPO_TOML = _REPO_ROOT / "ruff.toml"
 
 # Fork source: pyright's own typeshed builtins.pyi.  Preferred order: the
 # Pylance extension bundle (editor lane parity — Pylance serves it to the
@@ -368,7 +368,7 @@ def __getattr__(name: str) -> Any:
 '''
 
 
-# ── Ruff builtins block (dabooks notebook lane) ──────────────────────────────
+# ── Ruff builtins block (notebook lane) ──────────────────────────────────────
 
 # The "Generated: ..." stamp lines live in the .pyi/.py headers (bare stamp
 # in the .pyi; "Generated: ... | Tools: ... | ..." in the shim); they are
@@ -489,8 +489,8 @@ def main(argv=None) -> int:
             and _strip_stamp(PYI_FILE.read_text()) == _strip_stamp(pyi_text)
             and _strip_stamp(PY_FILE.read_text()) == _strip_stamp(shim_text)
         )
-        # dabooks/ruff.toml is a checkout-only lane (the deb ships neither
-        # dabooks/ nor the notebooks it lints) — an absent file is SKIP, not
+        # ruff.toml is a checkout-only lane (the deb ships neither the
+        # notebooks nor the config) — an absent file is SKIP, not
         # STALE: on a package install the operator cannot regenerate it and
         # STALE would pin every --check to exit 1 forever.
         toml_ok = True

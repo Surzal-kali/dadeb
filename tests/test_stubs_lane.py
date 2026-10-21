@@ -42,7 +42,7 @@ def test_builtins_fork_source_deb_fallback(monkeypatch, tmp_path):
 
 
 def test_check_mode_skips_missing_repo_toml(capsys):
-    # dabooks/ is a checkout-only lane: on a package install the ruff block
+    # ruff.toml is a checkout-only lane: on a package install the ruff block
     # cannot exist, --check must report SKIP (not STALE) and exit 0 even
     # with the stub files themselves fresh.
     import tool_repl
@@ -57,7 +57,7 @@ def test_check_mode_skips_missing_repo_toml(capsys):
         mod.PY_FILE = out / "framework_tools.py"
         mod.PYI_FILE = out / "framework_tools.pyi"
         mod.BUILTINS_FILE = out / "builtins.pyi"
-        mod.REPO_TOML = Path(tmp) / "dabooks" / "ruff.toml"  # deliberately absent
+        mod.REPO_TOML = Path(tmp) / "ruff.toml"  # deliberately absent
 
         # Fresh-on-disk fixture: generate the three files from the same
         # pipeline main() will recompute, so the only failing check is the

@@ -5,7 +5,7 @@
 `report_finding` (`utils/findings.py`) is the terminal action for any tool
 chain. It mints a structured `Finding` in the SQLite findings store
 (`ids.db`) and stores a lightweight one-line pointer in vector memory so the
-secretary can recall that the finding exists later without bloating its
+driving model can recall that the finding exists later without bloating its
 context with the full evidence payload.
 
 ## finding fields
@@ -21,7 +21,7 @@ context with the full evidence payload.
 
 ## finding IDs
 
-Sequential `F-0001`-style IDs. Concurrent adds (gateway + secretary + MCP
+Sequential `F-0001`-style IDs. Concurrent adds (gateway + REPL + MCP
 clients all share `ids.db`) can compute the same F-id; the PRIMARY KEY turns
 that into a loud IntegrityError instead of a duplicate. The store recounts
 and retries so the caller just gets their finding, slightly later. A lost
@@ -43,7 +43,7 @@ Lifecycle columns (`status`, `superseded_by`, `closed_by`, `closed_reason`,
 
 `render_findings` reads the findings store and returns a markdown report
 suitable as a bug-bounty submission draft or lab documentation. The
-secretary can call it mid-session to review what has been found so far.
+the driving model can call it mid-session to review what has been found so far.
 Filters by severity, asset, and status.
 
 ## credential-reuse sweep
@@ -55,7 +55,7 @@ standing step: SSH, web login forms, HTTP Basic, MySQL, PostgreSQL, SMB,
 FTP. A single failure means "not reused here" — do not brute-force. Log
 each validation via `report_finding` so the chain is auditable. The
 `report_finding` tool carries a `next_hints` entry that nudges the
-secretary to do this sweep automatically.
+driving model to do this sweep automatically.
 
 ## unknown ledger (open questions)
 
@@ -84,7 +84,7 @@ listing open unknowns — including when zero findings exist yet, so an
 early-days engagement report still shows the open threads. The appendix
 disappears once every unknown is closed.
 
-`report_finding` carries a `next_hints` entry nudging the secretary to sweep
+`report_finding` carries a `next_hints` entry nudging the driver to sweep
 open ledger questions (e.g. creds pending validation) before continuing
 deeper.
 
@@ -93,7 +93,7 @@ deeper.
 **Successor to the unknown ledger** (which still runs in parallel and is
 being retired). The evidence store (2026-10-19 design,
 `utils/evidence.py`; Postgres schema `evidence` in
-`dockered/postgres/init/002_schemas.sql`, SQLite mirror at
+`packaging/postgres/init/002_schemas.sql`, SQLite mirror at
 `evidence/evidence.db`) gives open items *typed kinds*, *TTLs*, and — the
 headline — a **database-enforced credential-reuse sweep**.
 

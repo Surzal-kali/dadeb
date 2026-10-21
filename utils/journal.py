@@ -1,5 +1,5 @@
 """Journal: the append-only what-happened spine (Postgres lane, schema
-``journal``; see dockered/postgres/init/002_schemas.sql).
+``journal``; see packaging/postgres/init/002_schemas.sql).
 
 One row per tool dispatch across every lane. The journal records WHAT
 happened (findings record conclusions; evidence records open questions) and

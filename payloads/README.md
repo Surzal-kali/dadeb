@@ -121,8 +121,8 @@ here is built around:
 - **`encrypt` / `encrypt_key` / `encrypt_iv`** invoke msfvenom's real-cipher
   `--encrypt` (aes256, aes256cbc, rc4, xor, base64; key/IV hex-validated
   before the binary runs, exact names via `msfvenom_menu(kind='encrypt')`).
-  Emits ENCRYPTED RAW SHELLCODE only — the decrypt-and-execute wrapper is the
-  `encoders/` loader lane's job, so pair the artifacts or they just sit there.
+  Emits ENCRYPTED RAW SHELLCODE only — a decrypt-and-execute wrapper is a
+  future expansion lane, so pair the artifacts or they just sit there.
 - **`start_handler=True`** starts a persistent `exploit/multi/handler` job
   via `MetasploitClient._start_handler_job` — the shared handler-start
   primitive extracted from `_execute_module_impl` so both the dispatch lane

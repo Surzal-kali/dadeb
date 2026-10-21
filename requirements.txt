@@ -1,5 +1,5 @@
-# Core runtime dependencies (see pyproject.toml for the canonical list — keep the
-# two in sync). For reproducing the full dev environment use requirements-dev.txt.
+# Core runtime dependency freeze (canonical lists live in pyproject.toml —
+# keep the two in sync).
 
 agent-client-protocol==0.11.1
 aiofile==3.12.3

@@ -2,8 +2,8 @@
 
 Complete reference for every tool in the framework registry. 208 tools
 across the indexed roots — `auxiliaries`, `payloads`, `listeners`, `utils`
-bear them (`encoders/` + `evasion/` are indexed too but currently mint
-none: resolvers/loaders, not decorated entry points). All `BRAIN_DISPATCH`
+bear them (`evasion/` is indexed too but currently mints
+none: resolvers, not decorated entry points). All `BRAIN_DISPATCH`
 transport unless marked otherwise. Parameters listed as
 `name (type, default)` — `(req)` = required.
 
@@ -96,7 +96,7 @@ owner when a prior root run left them root-owned.
 One Postgres DB (`harness`), schema-per-store — the append-only spine
 behind `ids.db`-lane stores' engagement awareness (2026-10-19 design; full
 map in `engagement_lane.md`, init scripts in
-`dockered/postgres/init/`):
+`packaging/postgres/init/`):
 
 | Schema · table | Holds | Lane rights |
 |---|---|---|
@@ -533,7 +533,7 @@ Kernel bare names: `msf_dispatch`, `msf_index`, `msf_set_payload`,
 | tool_id | alias | params | tags |
 |---|---|---|---|
 | `msfvenom_menu` | `msfvenom_menu` | `kind` ("payloads"), `query` ("") | `exploit.msf` |
-| `generate_payload` | `msfvenom` | `payload` (None), `lhost` (""), `lport` (0 int), `preset` (None), `format` (None), `out_name` (None), `encoder` (None), `iterations` (1 int), `badchars` (None), `platform` (None), `arch` (None), `encrypt` (None: aes256/aes256cbc/rc4/xor/base64), `encrypt_key` (None hex), `encrypt_iv` (None hex), `extra_options` (None dict), `start_handler` (False) | `exploit.msf`; `--encrypt` emits encrypted RAW shellcode only — pair with an `encoders/` loader |
+| `generate_payload` | `msfvenom` | `payload` (None), `lhost` (""), `lport` (0 int), `preset` (None), `format` (None), `out_name` (None), `encoder` (None), `iterations` (1 int), `badchars` (None), `platform` (None), `arch` (None), `encrypt` (None: aes256/aes256cbc/rc4/xor/base64), `encrypt_key` (None hex), `encrypt_iv` (None hex), `extra_options` (None dict), `start_handler` (False) | `exploit.msf`; `--encrypt` emits encrypted RAW shellcode only — pair with a runtime decrypt/loader of your own |
 | `list_dropbox` | `list_dropbox` | none | `exploit.msf` |
 
 ## payloads/searchsploiting.py, payloads/sqlmap.py, payloads/wordlists.py
