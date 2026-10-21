@@ -431,6 +431,10 @@ class APIGateway:
                 "daharness — the daemon spawns chroma as a supervised "
                 "sidecar) or run daharness-chroma manually."
             )
+        # Build self.app (FastAPI + MCP transport + every route) — kept in a
+        # named method so the degraded-guard above and the app assembly have
+        # an explicit boundary. self.app exists by the time __init__ returns.
+        self._init_mcp_and_app()
 
     def _registry_unavailable(self, what: str):
         """Uniform degraded-lane answer for every registry consumer.
@@ -443,6 +447,11 @@ class APIGateway:
         logging.info("Refused %s: registry unavailable (chroma down)", what)
         return self.registry_down_reason
 
+    def _init_mcp_and_app(self) -> None:
+        """MCP server + FastAPI app assembly — the continuation of __init__.
+
+        Named method so the degraded-guard insert and the app build have an
+        explicit boundary; run() calls it after constructing APIGateway."""
         # --- MCP server + transport ------------------------------------------
         # One low-level MCP server exposes the framework's operations as MCP
         # tools; the streamable-HTTP session manager turns it into an ASGI
