@@ -88,15 +88,22 @@ WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
 : OOB collaborator bind ports (default 80/443/53, which requires root);
   the rootless profile retunes (e.g. 8080/4443/5353).
 
-**HARNESS_DB_HOST / HARNESS_DB_PORT / HARNESS_DB_NAME**
-: Engagement-Postgres lane endpoint. Shipped commented: the lane stays on
-  the SQLite stores until `daharness-pg init` provisions the dedicated
-  `daharness` cluster (port 5433) and writes the resolved knobs — plus the
-  four **HARNESS_DB_PASSWORD_*** lane values (operator/brain/gateway/repl
-  roles) — to `/etc/daharness/pg.env`, which the systemd units source via a
-  tolerant `EnvironmentFile=-` line. This file's commented lines only
-  matter when binding the lane to a server daharness-pg did not provision;
-  an explicit HARNESS_DB_HOST wins over the built-in candidate list.
+**Postgres lane (HARNESS_DB_HOST / HARNESS_DB_PORT / HARNESS_DB_NAME /
+HARNESS_DB_PASSWORD_*)**
+: Not entries of this file — not even as commented rows. A commented set
+  here reads exactly like the live credential set, and on a pkg6 deb
+  (2026‑10‑20) an operator copied it for an extension connect and
+  authenticated against passwords that exist nowhere. The engagement
+  lane stays on the SQLite stores until `daharness-pg init` provisions
+  the dedicated `daharness` cluster (port 5433) and writes the resolved
+  knobs — plus the four HARNESS_DB_PASSWORD_* lane values
+  (operator/brain/gateway/repl roles) — to `/etc/daharness/pg.env`,
+  which the systemd units source via a tolerant `EnvironmentFile=-`
+  line and operator shells source for the REPL. Editing the lane onto a
+  server daharness-pg did not provision belongs in pg.env (an explicit
+  HARNESS_DB_HOST wins over the built-in candidate list), or in the
+  environment of the shell that runs the harness — never in
+  *daharness.env*.
 
 # BOARD AUTH KNOBS
 
