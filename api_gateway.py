@@ -459,7 +459,14 @@ class APIGateway:
         # REST callers and MCP clients hit the identical dispatch logic.
         self.mcp_server = Server("daharness")
         self._register_mcp_handlers()
-        self.session_manager = StreamableHTTPSessionManager(app=self.mcp_server)
+        # json_response=True: plain application/json POST responses instead of
+        # SSE framing, for simple clients that do not parse event streams.
+        # stateless=True: accept requests that do not echo Mccp-Session-Id;
+        # otherwise clients that don't track sessions get a green initialize
+        # but tools/list fails 400 "Missing session ID" and lists no tools.
+        self.session_manager = StreamableHTTPSessionManager(
+            app=self.mcp_server, json_response=True, stateless=True
+        )
 
         async def lifespan(app: FastAPI):
             # The session manager owns the per-connection MCP sessions; it must

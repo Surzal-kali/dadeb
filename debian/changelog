@@ -1,3 +1,13 @@
+daharness (0.1.0+pkg11) kali; urgency=high
+
+  * MCP transport: streamable-HTTP session manager now stateless + plain
+    JSON (kai 9000 round trip 2026-10-21). Clients that do not echo
+    Mccp-Session-Id got a green initialize but tools/list failed with
+    400 "Missing session ID" (empty tool list); json_response=True drops
+    the SSE framing such clients also fail to parse.
+
+ -- daharness packaging <operator@localhost>  Wed, 21 Oct 2026 09:28:00 -0600
+
 daharness (0.1.0+pkg10) kali; urgency=high
 
   * selftest macro: redirect, don't disable, pytest's cache on unwritable
