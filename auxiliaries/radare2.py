@@ -67,7 +67,9 @@ at both ends.  The envelope states the policy (``truncated``,
 Binary drop folder
 ------------------
 Analysis targets live in a dedicated, gitignored ``binaries/`` directory at
-the repo root (override via ``R2_BINARY_TARGETS_ROOT`` env).  Drop an ELF,
+the workspace root — the deb state root (/var/lib/daharness) on the
+packaged lane, the checkout here (override via ``R2_BINARY_TARGETS_ROOT``
+env; the deb's postinst creates the directory).  Drop an ELF,
 PE, Mach-O, shared lib, or object file there and the model can discover it
 with ``list_r2_targets`` and then call ``run_r2`` with just the bare name
 — ``run_r2`` auto-resolves a non-path ``target`` against the drop folder so
@@ -87,7 +89,7 @@ import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
-from constants import framework_tool
+from constants import framework_tool, resolve_workspace_root
 from utils.snapshot_cache import (
     build_cache_key,
     get_snapshot_store,
@@ -202,9 +204,13 @@ _R2_TIMEOUT: float = float(os.getenv("R2_TIMEOUT", "120"))
 # (or finds) binaries here, lists them with ``list_r2_targets``, and calls
 # ``run_r2`` with the bare name — ``run_r2`` auto-resolves via
 # :func:`resolve_binary_target` when the raw path doesn't exist.
-_REPO_ROOT: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Drop folder roots: the WORKSPACE state root wins (deb lane /var/lib/daharness
+# — operator content belongs with the state, and the package code tree is
+# read-only), else the code checkout (dev tree, where the workspace root IS
+# the checkout). An explicit env override always wins.
 BINARY_TARGETS_ROOT: str = os.getenv(
-    "R2_BINARY_TARGETS_ROOT", os.path.join(_REPO_ROOT, "binaries")
+    "R2_BINARY_TARGETS_ROOT",
+    os.path.join(str(resolve_workspace_root()), "binaries"),
 )
 
 # Magic-byte signatures for the formats r2 can meaningfully open.  The key

@@ -767,15 +767,16 @@ after the frameit compile) — graduated to the build lane. Files authored:
   184 manifests with every root present, manifests root-relative (no
   state-dir path leak), allow-list resolves inside FRAMEWORK_ROOT and
   refuses outside; system python bare import still lazy-degrades.
-- [decided] supply split (2026-10-20, repo-fact corrected):
+- [decided] supply split (2026-10-20, repo-fact corrected; AMENDED
+  2026-10-21 — pydantic-ai-slim is NO LONGER vendored):
   (a) VENDORED into the deb — core plumbing the Kali repo truly lacks:
-      chromadb (tool-registry vector store) + pydantic-ai-slim (registry
-      boot: ToolRegistry.__init__ constructs the in-tree secretary agent
-      object even though no headless lane RUNS it — see Progress log
-      trim entry). Without these the package fails at boot or loses
-      semantic tool discovery; onnxruntime/tokenizers
-      weight accepted as the price of self-sufficiency. Layer-2 wheel
-      availability for cp312/313/314 feeds the actual build step.
+      chromadb (tool-registry vector store) only. The pydantic-ai-slim
+      vendoring was superseded the same week: the lazy-secretary trim
+      (daharness/agent.py `_chat_runtime`, registry `secretary` property)
+      removed the chat wheel from the boot path entirely, so the deb
+      vendors chromadb only and chat-lane users install
+      `pydantic-ai-slim[openai]` themselves (pyproject `[chat]` extra).
+      See Progress log trim entry + debian/rules comment.
   (b) Suggests/Recommends lane — python3-pg8000 + python3-psycopg for the
       opt-in postgres lane (both code guards verified as honest degraders;
       psycopg also rides the installed python3-psycopg 3.3.5-1); server

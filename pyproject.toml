@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "daharness"
 version = "0.1.0"
-description = "Headless, MCP-capable orchestration harness for authorized security research: a local LLM secretary searches a vector-indexed tool registry and executes tools with human-in-the-loop approval."
+description = "Headless, MCP-capable orchestration harness for authorized security research: an external LLM (Open WebUI model, gateway or MCP client) semantically searches a vector-indexed tool registry and executes tools; the dev checkout also runs a local-LLM chat secretary with human-in-the-loop approval."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
@@ -33,7 +33,6 @@ dependencies = [
     "chromadb==1.5.9",
     "httpx==0.28.1",
     "pydantic==2.13.4",
-    "pydantic-ai-slim==2.35.0",
     "fastapi==0.141.1",
     "starlette==1.6.0",
     "uvicorn==0.52.3",
@@ -59,6 +58,7 @@ dependencies = [
 web = ["playwright==1.63.0", "curl_cffi==0.16.3"]  # rendered-DOM recon sidecar (needs: playwright install chromium) + web-session TLS/header impersonation (curl-impersonate)
 jupyter = ["ipython==9.7.0", "ipykernel==6.29.5", "jupyter_client==7.4.9"]  # notebook kernel lane
 db = ["psycopg[binary]==3.2.12", "pg8000>=1.13"]  # engagement/journal lane: Postgres writer roles, engagement.purge, GIN what_touched + PG driver for db_client's postgres lane (both degrade honestly without it)
+chat = ["pydantic-ai-slim==2.35.0"]  # secretary chat lane only (REPL/dev): imported lazily on first agent use — the headless daemon/gateway boot never needs it
 dev = [
     "pytest>=8.0",
     "black==26.5.1",

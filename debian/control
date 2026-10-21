@@ -33,20 +33,25 @@ Depends: python3,
          python3-urllib3,
          python3-uvicorn,
          python3-psutil
-Recommends: metasploit-framework, owasp-zap, wordlists
+Recommends: metasploit-framework, owasp-zap, wordlists,
+ jadx, radare2
 Suggests: python3-pg8000, python3-psycopg, python3-pip, masscan, postgresql
 Description: headless orchestration harness for authorized security research
- A local "tool secretary" (LM agent) semantically searches a vector-indexed
- tool registry (ChromaDB), selects modules and executes them with approval
- gates. Python orchestrates; a C plugin gates Brain event dispatch; systemd
- runs the system profile (Brain UDS at /run/daharness/brain.sock, state at
- /var/lib/daharness, config at /etc/daharness/daharness.env).
+ An external LLM (Open WebUI model, gateway or MCP client) semantically
+ searches the vector-indexed tool registry (ChromaDB) and executes modules
+ with result-projection and budget gates. Python orchestrates; a C plugin
+ gates Brain event dispatch; systemd runs the system profile (Brain UDS at
+ /run/daharness/brain.sock, state at /var/lib/daharness, config at
+ /etc/daharness/daharness.env).
  .
  Privileged lanes (raw sockets, low ports) degrade honestly and are
  documented in daharness-safety(7).
  .
- NOTE: the vendored pair (chromadb, pydantic-ai-slim) ships after the
- first-build mechanics prove out (ledger layer-2 decision); python3-mcp
+ NOTE: chromadb ships vendored in-package (ledger layer-2 decision);
+ pydantic-ai-slim is intentionally NOT vendored — it is chat-lane-only
+ machinery, imported lazily on first agent use, and the packaged headless
+ lanes never boot the chat loop (install it manually for the REPL chat lane);
+ python3-mcp
  and python3-pymetasploit3 ride the apt lane pending snapshot-compat
  probes. The Jupyter closure (python3-ipykernel + python3-ipython +
  python3-jupyter-client) is a hard Depends, not the [jupyter] extra:

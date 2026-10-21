@@ -158,7 +158,8 @@ surfaced is rejected — the model cannot hallucinate a tool into existence.
 The `daharness/` package exposes focused import paths:
 
 - `daharness.core` — backwards-compat shim re-exporting legacy public names
-- `daharness.agent` — secretary agent factory
+- `daharness.agent` — secretary agent factory (pydantic-ai imports lazily on
+  first chat-lane use — headless lanes never need the chat wheel)
 - `daharness.executor` — standalone execution helpers (no ChromaDB needed)
 - `daharness.registry` — discovery and semantic search API
 - `daharness.findings` — SQLite-backed findings store (`FindingStore`)
@@ -580,7 +581,7 @@ optional); the day-one set:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | Lab LAN fallback | Ollama API endpoint — set explicitly in `.env`, keep it loopback/LAN |
-| `SECRETARY_MODEL` | `ornith-1.5:35b` | LLM model for the tool secretary (a thinking/reasoning local chat model is recommended) |
+| `SECRETARY_MODEL` | *(no env knob)* | The tool secretary model is a **dev-only chat lane** constant (`daharness/registry.py:_SECRETARY_MODEL_DEFAULT`, `ornith-1.5:35b`); headless daemon/gateway builds never read a chat model. The doctor does not probe it. |
 | `CHROMA_HOST` / `CHROMA_PORT` | `localhost` / `9000` | ChromaDB server used by the tool registry (the memory service uses its own embedded store) |
 | `MSGRPC_PASSWORD` / `MSF_RPC_PORT` | — / `55553` | Metasploit RPC credentials |
 | `GATEWAY_API_KEY` | — | API gateway auth key (unset = unauthenticated dev mode) |

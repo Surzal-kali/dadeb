@@ -31,6 +31,22 @@ fi
 chown daharness:daharness "$STATE_ROOT"
 chmod 2770 "$STATE_ROOT"
 
+# Analysis drop lanes (r2 binaries/ + jadx apk/ with its decompiled/ workspaces):
+# operator content, so they live in the STATE root alongside scope/ — not the
+# read-only package tree the tools resolve their old code-root defaults from.
+# The tool modules resolve them via WORKSPACE_ROOT; mkdir-if-missing so
+# upgrades repair legacy trees too. 2770 setgid keeps the service lane and
+# group-member operators co-writing (same shape the scope/ seeding uses).
+for _LANE in binaries apk; do
+    if [ ! -d "$STATE_ROOT/$_LANE" ]; then
+        install -d -m 2770 "$STATE_ROOT/$_LANE" 2>/dev/null || true
+    fi
+    chown daharness:daharness "$STATE_ROOT/$_LANE" 2>/dev/null || true
+    chmod 2770 "$STATE_ROOT/$_LANE" 2>/dev/null || true
+    echo "daharness: drop lane ready at $STATE_ROOT/$_LANE (binaries/APK analysis targets go there)"
+done
+unset _LANE
+
 # Legacy-tree file MODES: UMask=0007 in the units only shapes files created
 # from that unit onward; a state file an older run made under a tighter
 # umask (live 2026-10-20: ids.db 0640) stays group-read-only — the

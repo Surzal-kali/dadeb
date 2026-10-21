@@ -271,9 +271,10 @@ that was a stale curated alias for the deleted `run_dns_lookup` wrapper).
 `{available, reason, remediation}` per provider. Full sweep covers r2
 (+-r2ghidra plugin + drop dir), jadx (+java + apk dir), masscan (+raw-socket
 CAP_NET_RAW check), msf (+RPC port), scanners (nmap/ffuf/hydra/sqlmap on
-PATH), secretary_model (on the Ollama host), and snapshot_cache stats.
-Drill down with `provider=` (r2\|jadx\|masscan\|msf\|scanners\|
-secretary_model\|snapshot_cache). Remediation strings agree with the tools'
+PATH), and snapshot_cache stats (the trimmed secretary chat lane is not
+probed — no chat model is read by the headless build). Drill down with
+`provider=` (r2\|jadx\|masscan\|msf\|scanners\|snapshot_cache).
+Remediation strings agree with the tools'
 own error paths (pdg's "run: r2pm -ci r2ghidra", masscan's CAP_NET_RAW).
 
 ## auxiliaries/ftp_recon.py

@@ -15,9 +15,12 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness
-	# Vendored-wheel lane (decided 2026-10-20): chromadb + pydantic-ai-slim
-	# ship IN the deb — the daemon boot path imports both at top level
-	# (daharness/registry.py:22; uncaught ImportError = systemctl exit 1).
+	# Vendored-wheel lane (decided 2026-10-20): chromadb ships IN the deb —
+	# the daemon boot path imports it at top level (daharness/registry.py);
+	# uncaught ImportError = systemctl exit 1. pydantic-ai-slim is NOT
+	# vendored: it is chat-lane-only machinery (imported lazily on first
+	# agent use, daharness/agent.py:_chat_runtime) and no packaged lane
+	# boots the chat loop.
 	# Lives HERE, not in dh_auto_build: dh's implied sequence runs dh_prep
 	# BETWEEN the build and install overrides, and dh_prep rm -rf's
 	# debian/daharness wholesale — vendor wheels installed in the build
@@ -29,7 +32,7 @@ override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness/vendor
 	python3 -m pip install --target \
 	  debian/daharness/usr/share/daharness/vendor \
-	  "chromadb==1.5.9" "pydantic-ai-slim[openai]==2.35.0" "pytest==9.1.1"
+	  "chromadb==1.5.9" "pytest==9.1.1"
 	# Bytecode the vendor closure: --no-compile saved build seconds but
 	# charged EVERY import (105-probe floor floor, daemon boots) the full
 	# source parse — vendor .pyc makes repeat imports ~3-6x faster.

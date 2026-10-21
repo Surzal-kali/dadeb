@@ -1170,7 +1170,19 @@ def _build_cli():
 def _print_doctor(provider: str = "") -> int:
     from auxiliaries.framework_status import framework_doctor
 
-    report = framework_doctor(provider=provider)
+    try:
+        report = framework_doctor(provider=provider)
+    except PermissionError as exc:
+        # Belt-and-braces: the probes degrade on an inaccessible state root
+        # themselves; this catches an unanticipated permission failure in a
+        # future provider so the doctor lane never shows a raw traceback.
+        path = getattr(exc, "filename", None) or "the framework state dir"
+        print(f"daharness: {path} is not accessible by this user "
+              f"(permission denied).")
+        print("  run: sudo daharness doctor")
+        print("  (operator shared-state alternative: "
+              "sudo usermod -aG daharness <user>, then re-login)")
+        return 77  # EACCES — scriptable "needs elevated access"
     print(f"framework doctor — {report.get('overall')} "
           f"({report.get('available')} providers up)")
     for name, rep in report.get("providers", {}).items():

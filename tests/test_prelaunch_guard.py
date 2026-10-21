@@ -324,3 +324,54 @@ def test_doctor_unknown_provider_names_postgres():
 
     rec = framework_doctor(provider="bogus")["providers"]["_unknown_provider"]
     assert "postgres" in rec["remediation"]
+
+
+# ------------------------------------------------------- state-root access
+
+
+def test_doctor_snapshot_probe_degrades_on_permission(monkeypatch):
+    """An operator lane outside the shared group cannot touch the state root;
+    a doctor probe must degrade into a down record, never a traceback."""
+    import auxiliaries.framework_status as fstat
+
+    def denied():
+        raise PermissionError(13, "Permission denied", "/var/lib/daharness/run")
+
+    monkeypatch.setattr(fstat, "get_snapshot_store", denied)
+    from auxiliaries.framework_status import framework_doctor
+    rec = framework_doctor(provider="snapshot_cache")["providers"]["snapshot_cache"]
+    assert rec["available"] is False
+    assert "permission denied" in rec["reason"]
+    assert "sudo daharness doctor" in rec["remediation"]
+    assert "usermod -aG daharness" in rec["remediation"]
+
+
+def test_doctor_sweep_survives_store_failure(monkeypatch):
+    """The full sweep keeps a shaped report when the store blows up."""
+    import auxiliaries.framework_status as fstat
+
+    def boom():
+        raise PermissionError(13, "Permission denied", "/var/lib/daharness/run")
+
+    monkeypatch.setattr(fstat, "get_snapshot_store", boom)
+    from auxiliaries.framework_status import framework_doctor
+    report = framework_doctor()
+    rec = report["providers"]["snapshot_cache"]
+    assert rec["available"] is False
+    assert set(report["providers"]) >= {"r2", "snapshot_cache"}  # sweep completed
+
+
+def test_print_doctor_sudo_hint_on_permission_error(monkeypatch, capsys):
+    """`daharness doctor` on a locked state root prints the sudo fix,
+    exits 77 — not a raw traceback (the operator ask, VM 2026-10-20)."""
+    import auxiliaries.framework_status as fstat
+
+    def denied(provider=""):
+        raise PermissionError(13, "Permission denied", "/var/lib/daharness/run")
+
+    monkeypatch.setattr(fstat, "framework_doctor", denied)
+    rc = bootstrap._print_doctor()
+    out = capsys.readouterr().out
+    assert rc == 77
+    assert "sudo daharness doctor" in out
+    assert "Traceback" not in out

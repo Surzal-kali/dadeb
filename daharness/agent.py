@@ -9,6 +9,7 @@ This module owns:
 """
 
 import asyncio
+import importlib
 import inspect
 import json
 import logging
@@ -22,22 +23,38 @@ from typing import Any, Callable, Dict, List, Optional
 # registry).
 SECRETARY_MAX_APPROVAL_ROUNDS = int(os.getenv("SECRETARY_MAX_APPROVAL_ROUNDS", "5"))
 
-from pydantic_ai import (
-    Agent,
-    DeferredToolRequests,
-    FunctionToolset,
-    ModelRetry,
-    RunContext,
-    Tool,
-    ToolApproved,
-    ToolDenied,
-    capture_run_messages,
-)
-from pydantic_ai.messages import ModelMessage
-
 from .models import ToolManifest
 
 logger = logging.getLogger(__name__)
+
+# pydantic-ai is a chat-lane dependency ONLY (embeddings ride a plain httpx
+# client in daharness/registry.py). It is imported on first agent use so the
+# packaged headless lanes (gateway, MCP, daemon boot) never need the wheel.
+_CHAT_RUNTIME: Optional[Any] = None
+
+
+def _chat_runtime() -> Any:
+    """The pydantic-ai module, imported on first chat-lane use.
+
+    Raises an actionable ImportError when the wheel is genuinely absent —
+    the deb stopped vendoring it because no packaged lane imports the chat
+    machinery top-level anymore.
+    """
+    global _CHAT_RUNTIME
+    if _CHAT_RUNTIME is None:
+        try:
+            _CHAT_RUNTIME = importlib.import_module("pydantic_ai")
+        except ImportError as exc:
+            raise ImportError(
+                "the secretary chat lane needs pydantic-ai-slim — "
+                "pip install 'pydantic-ai-slim[openai]' (the packaged "
+                "headless build never imports the chat machinery)"
+            ) from exc
+        # The tool functions' signatures quote RunContext; pydantic-ai
+        # resolves string annotations against module globals when it builds
+        # the tools' argument schemas, so inject the annotation name here.
+        globals()["RunContext"] = getattr(_CHAT_RUNTIME, "RunContext")
+    return _CHAT_RUNTIME
 
 
 # --- Per-turn live-session snapshot (Layer 4) ---
@@ -589,7 +606,7 @@ def _chaining_hint(tool_id: str, result: Dict[str, Any]) -> str:
 
 
 async def secretary_search_tools(
-    ctx: RunContext[SecretaryDeps], query: str, top_k: int = 5
+    ctx: "RunContext[SecretaryDeps]", query: str, top_k: int = 5
 ) -> List[Dict[str, Any]]:
     """Semantic search over the tool registry.
 
@@ -597,6 +614,7 @@ async def secretary_search_tools(
     parameters, semantics). The tool_ids returned here are the only ids that
     `execute_tool` will accept.
     """
+    pai = _chat_runtime()
     # Constants live on the registry module; import lazily to avoid a circular
     # import (registry mixes SecretaryMixin in at class-definition time).
     from .registry import SECRETARY_MAX_TOP_K
@@ -605,7 +623,7 @@ async def secretary_search_tools(
     limit = max(1, min(int(top_k or 5), SECRETARY_MAX_TOP_K))
     ctx.deps.search_calls += 1
     if ctx.deps.search_calls > ctx.deps.max_search_calls:
-        raise ModelRetry(
+        raise pai.ModelRetry(
             f"You have called search_tools {ctx.deps.search_calls} times in this turn without converging. "
             "Either pick a tool from the results you already have and call execute_tool, "
             "or tell the user you cannot fulfill the request. Do NOT search again."
@@ -617,7 +635,7 @@ async def secretary_search_tools(
 
 
 async def secretary_execute_tool(
-    ctx: RunContext[SecretaryDeps],
+    ctx: "RunContext[SecretaryDeps]",
     tool_id: str,
     arguments: Any = None,
 ) -> Dict[str, Any]:
@@ -640,7 +658,7 @@ async def secretary_execute_tool(
     # module_path as a tool id") is turned into a self-correcting ModelRetry
     # that names the right wrapper tool, instead of a generic "not found".
     if "/" in tool_id:
-        raise ModelRetry(
+        raise pai.ModelRetry(
             f"'{tool_id}' contains '/', so it looks like an MSF module_path (a value "
             f"you pass to a tool), not a tool id. Tool ids are dotted python paths "
             f"such as 'payloads.metasploiting.MetasploitClient.dispatch_metasploit'. "
@@ -659,11 +677,11 @@ async def secretary_execute_tool(
     manifest = ctx.deps.get_surfaced(tool_id)
     if manifest is None:
         if await registry.find_tool_by_id(tool_id):
-            raise ModelRetry(
+            raise pai.ModelRetry(
                 f"Tool '{tool_id}' exists in the registry but was never surfaced in this conversation. "
                 "Call `search_tools` first and use a tool_id taken verbatim from its results."
             )
-        raise ModelRetry(
+        raise pai.ModelRetry(
             f"Unknown tool_id '{tool_id}'. Call `search_tools` first and use a tool_id taken verbatim from its results."
         )
 
@@ -672,7 +690,7 @@ async def secretary_execute_tool(
         # pass through as {"_raw": ...} and reach the tool body (TypeError at
         # best, a hung tool until BRAIN_DISPATCH_TIMEOUT at worst). Fail the
         # model NOW with the concrete shape so it self-corrects on the retry.
-        raise ModelRetry(
+        raise pai.ModelRetry(
             f"arguments for '{tool_id}' were not a valid JSON object (payload "
             f"started: {str(args.get('_raw'))[:120]!r}). Re-emit 'arguments' as a "
             "JSON object of named parameters per the manifest's 'parameters' schema."
@@ -688,7 +706,7 @@ async def secretary_execute_tool(
     # self-correcting ModelRetry that names the correct tool to use.
     handle_reason = registry.validate_handle_argument(manifest, args)
     if handle_reason is not None:
-        raise ModelRetry(handle_reason)
+        raise pai.ModelRetry(handle_reason)
 
     # Pre-approval shape check: coerce argument values to the manifest's
     # declared types, reject missing required keys, and reject extra keys
@@ -701,7 +719,7 @@ async def secretary_execute_tool(
         logger.info(
             f"[TOOL_ARGS_REJECT] {tool_id}: {ve}"
         )
-        raise ModelRetry(
+        raise pai.ModelRetry(
             f"{ve} The manifest for '{tool_id}' shows the expected shape "
             f"in its 'parameters' field; pass arguments matching that shape."
         )
@@ -809,6 +827,26 @@ class SecretaryMixin:
     here.
     """
 
+    # Built on first chat-lane use (see `secretary`); headless lanes never
+    # touch it, keeping pydantic-ai off the daemon boot path.
+    _secretary: Optional[Any] = None
+
+    @property
+    def secretary(self) -> Any:
+        """The pydantic-ai agent, built on first use.
+
+        Keeps pydantic-ai (chat-lane-only machinery) out of the boot path of
+        gateway/daemon ToolRegistry constructions. Assign a test double to
+        override; assigning `None` rebuilds on the next access.
+        """
+        if self._secretary is None:
+            self._secretary = self._init_secretary_agent()
+        return self._secretary
+
+    @secretary.setter
+    def secretary(self, value: Optional[Any]) -> None:
+        self._secretary = value
+
     def _init_secretary_agent(self, model: Optional[Any] = None):
         """Build the conversational tool secretary.
 
@@ -816,21 +854,26 @@ class SecretaryMixin:
         reaches tools only through `search_tools` (semantic retrieval), never
         by having the registry stuffed into its context. The final answer is
         plain text; swap `model` for a test double in unit tests.
+
+        Chat lane only — this imports pydantic-ai via `_chat_runtime()`, so
+        a ToolRegistry that never serves the chat loop never needs the wheel.
         """
+        pai = _chat_runtime()
         from .registry import OLLAMA_BASE_URL  # lazy: avoid circular import
 
         if model is None:
-            from pydantic_ai.models.ollama import OllamaModel
-            from pydantic_ai.providers.ollama import OllamaProvider
+            ollama_model = importlib.import_module("pydantic_ai.models.ollama")
+            ollama_provider = importlib.import_module("pydantic_ai.providers.ollama")
 
-            model = OllamaModel(
-                self.secretary_model, provider=OllamaProvider(base_url=OLLAMA_BASE_URL)
+            model = ollama_model.OllamaModel(
+                self.secretary_model,
+                provider=ollama_provider.OllamaProvider(base_url=OLLAMA_BASE_URL),
             )
 
-        toolset = FunctionToolset(
+        toolset = pai.FunctionToolset(
             [
-                Tool(secretary_search_tools, takes_ctx=True, name="search_tools"),
-                Tool(
+                pai.Tool(secretary_search_tools, takes_ctx=True, name="search_tools"),
+                pai.Tool(
                     secretary_execute_tool,
                     takes_ctx=True,
                     name="execute_tool",
@@ -963,10 +1006,10 @@ class SecretaryMixin:
               treat its result as an msf: handle, never as an ssh: handle.
             """)
 
-        return Agent(
+        return pai.Agent(
             model,
             deps_type=SecretaryDeps,
-            output_type=[str, DeferredToolRequests],
+            output_type=[str, pai.DeferredToolRequests],
             toolsets=[toolset],
             instructions=instructions,
             retries=2,
@@ -1010,6 +1053,7 @@ class SecretaryMixin:
 
         confirmer = confirmer or self.confirmer
         deps = deps or SecretaryDeps(registry=self)
+        pai = _chat_runtime()
 
         # Reset per-turn counters so a new user prompt starts fresh.
         deps.search_calls = 0
@@ -1029,7 +1073,7 @@ class SecretaryMixin:
             )
 
             rounds = 0
-            while isinstance(result.output, DeferredToolRequests):
+            while isinstance(result.output, pai.DeferredToolRequests):
                 rounds += 1
                 if rounds > SECRETARY_MAX_APPROVAL_ROUNDS:
                     raise RuntimeError(
@@ -1047,9 +1091,9 @@ class SecretaryMixin:
                         f"[TOOL_CONFIRM] Decision for {call.tool_call_id}: {'approved' if approved else 'denied'}"
                     )
                     if approved:
-                        approvals[call.tool_call_id] = ToolApproved()
+                        approvals[call.tool_call_id] = pai.ToolApproved()
                     else:
-                        approvals[call.tool_call_id] = ToolDenied(
+                        approvals[call.tool_call_id] = pai.ToolDenied(
                             message="The user denied this execution. Do not retry it without new instructions."
                         )
 
@@ -1126,7 +1170,8 @@ async def _chat(registry: "ToolRegistry") -> None:
             print("[chat] Conversation history cleared.")
             continue
 
-        with capture_run_messages() as messages:
+        pai = _chat_runtime()
+        with pai.capture_run_messages() as messages:
             try:
                 result = await registry.run_secretary(
                     user_input.strip(), deps=deps, message_history=history

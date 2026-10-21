@@ -16,7 +16,6 @@ point in a session to verify the harness is alive.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import socket
@@ -400,8 +399,8 @@ def _check_chroma() -> Dict[str, Any]:
         pass
     rec["available"] = False
     rec["reason"] = (
-        f"registry backend not answering on {host}:{port} — secretary "
-        f"search_tools, gateway find_best_tool and indexing are DOWN"
+        f"registry backend not answering on {host}:{port} — registry "
+        f"tool search, gateway find_best_tool and indexing are DOWN"
     )
     rec["remediation"] = (
         "boot the stack (systemctl start daharness / python bootstrap.py) "
@@ -478,51 +477,26 @@ def _check_postgres() -> Dict[str, Any]:
     return base
 
 
-def _check_secretary_model() -> Dict[str, Any]:
-    """Is SECRETARY_MODEL actually pulled on the Ollama host?"""
-    model = os.getenv("SECRETARY_MODEL", "ornith-1.5:35b")
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    raw = base.rstrip("/")
-    if raw.endswith("/v1"):
-        raw = raw[:-3]
-    try:
-        import urllib.request
-        with urllib.request.urlopen(f"{raw}/api/tags", timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        models = {m.get("name", "") for m in data.get("models", [])}
-        if model in models or any(m.split(":")[0] == model.split(":")[0] for m in models):
-            return {"available": True, "provider": "secretary_model",
-                    "reason": f"{model} present on the Ollama host", "remediation": ""}
-        return {"available": False, "provider": "secretary_model",
-                "reason": f"{model} not found on the Ollama host",
-                "remediation": f"run: ollama pull {model}"}
-    except Exception as exc:
-        return {"available": False, "provider": "secretary_model",
-                "reason": f"Ollama API unreachable at {raw}: {exc}",
-                "remediation": "start ollama or fix OLLAMA_BASE_URL"}
-
-
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
-                 "secretary_model", "snapshot_cache", "postgres", "chroma")
+                 "snapshot_cache", "postgres", "chroma")
 
 
 @framework_tool(
     "Run capability probes for the framework's analysis and attack tooling "
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
     "raw-socket capability, msfconsole/msfvenom + RPC port, the scanner "
-    "tools (nmap/ffuf/hydra/sqlmap), the secretary model on the Ollama "
-    "host, the snapshot cache stats, the ChromaDB registry backend, and "
-    "the engagement-cobweb Postgres lane. Each probe returns "
-    "available/reason/remediation so a 'can I run X' question is answered "
-    "before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|postgres|chroma)."
+    "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the ChromaDB "
+    "registry backend, and the engagement-cobweb Postgres lane. Each probe "
+    "returns available/reason/remediation so a 'can I run X' question is "
+    "answered before X is attempted. Pass provider to drill into one lane "
+    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|chroma)."
 )
 def framework_doctor(provider: str = "") -> Dict[str, Any]:
     """Probe per-lane capability and return a doctor report.
 
     Args:
         provider: Optional single lane to probe
-            (r2|jadx|masscan|msf|scanners|secretary_model|snapshot_cache|
+            (r2|jadx|masscan|msf|scanners|snapshot_cache|
             postgres|chroma).  Empty = full sweep.
     """
     p = (provider or "").strip().lower()
@@ -539,18 +513,45 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
     if p in ("", "scanners"):
         for rec in _check_scan_tools():
             providers[rec["provider"]] = rec
-    if p in ("", "secretary_model"):
-        providers["secretary_model"] = _check_secretary_model()
     if p in ("", "snapshot_cache"):
-        snap = get_snapshot_store().stats()
-        providers["snapshot_cache"] = {
-            "available": not snap.get("error", False),
-            "provider": "snapshot_cache",
-            "reason": (
-                f"{snap.get('entries', 0)} entries, {snap.get('hits', 0)} hits"
-            ),
-            "remediation": "",
-        }
+        try:
+            snap = get_snapshot_store().stats()
+        except PermissionError as exc:
+            # The deb lane's state root is the daharness service user's home
+            # (/var/lib/daharness, 2770). An operator lane outside the shared
+            # group can neither read nor create run/ there — a lane-permission
+            # mismatch, not an outage: say which, and name the fix.
+            providers["snapshot_cache"] = {
+                "available": False, "provider": "snapshot_cache",
+                "reason": (
+                    f"store not accessible on this lane (permission denied: "
+                    f"{getattr(exc, 'filename', None) or 'state root'}) — the "
+                    "state root is owned by the daharness service lane"
+                ),
+                "remediation": (
+                    "sudo daharness doctor — or gain shared-state access: "
+                    "sudo usermod -aG daharness <user> (re-login or "
+                    "`newgrp daharness` applies it)"
+                ),
+            }
+        except Exception as exc:
+            # A doctor probe must degrade into a report, never a traceback.
+            providers["snapshot_cache"] = {
+                "available": False, "provider": "snapshot_cache",
+                "reason": f"store unavailable on this lane: "
+                          f"{type(exc).__name__}: {exc}",
+                "remediation": "sudo daharness doctor",
+            }
+        else:
+            providers["snapshot_cache"] = {
+                "available": not snap.get("error", False),
+                "provider": "snapshot_cache",
+                "reason": (
+                    f"{snap.get('entries', 0)} entries, "
+                    f"{snap.get('hits', 0)} hits"
+                ),
+                "remediation": "",
+            }
     if p in ("", "chroma"):
         providers["chroma"] = _check_chroma()
     if p in ("", "postgres"):
@@ -567,8 +568,7 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
             "available": False, "provider": p,
             "reason": f"unknown provider {p!r}",
             "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
-                           "secretary_model, snapshot_cache, postgres, "
-                           "chroma",
+                           "snapshot_cache, postgres, chroma",
         }
 
     ok = sum(1 for v in providers.values() if v.get("available"))

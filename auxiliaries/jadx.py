@@ -89,7 +89,7 @@ import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
-from constants import framework_tool
+from constants import framework_tool, resolve_workspace_root
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +147,14 @@ _GREP_TEXT_EXTS: frozenset = frozenset({
 
 # ---------------------------------------------------------------------------
 # Drop folder — discovery & resolution (mirrors binaries/ + R2_BINARY_TARGETS_ROOT)
+# Workspace root wins (deb lane: /var/lib/daharness — the decompiled/ cache is
+# operator content, so it lives on the state root, not the read-only package
+# tree); the checkout on dev trees. Env override always wins. The deb's
+# postinst creates the directory.
 # ---------------------------------------------------------------------------
-_REPO_ROOT: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APK_TARGETS_ROOT: str = os.getenv(
-    "JADX_APK_TARGETS_ROOT", os.path.join(_REPO_ROOT, "apk")
+    "JADX_APK_TARGETS_ROOT",
+    os.path.join(str(resolve_workspace_root()), "apk"),
 )
 _DECOMPILED_SUBDIR: str = "decompiled"  # workspaces live here; never listed
 _MANIFEST_REL: str = os.path.join("resources", "AndroidManifest.xml")

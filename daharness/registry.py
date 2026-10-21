@@ -158,7 +158,12 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
         # Human-in-the-loop gate for executions. Sync or async callables that
         # take a full-metadata summary dict and return a truthy value to approve.
         self.confirmer = confirmer or _cli_confirmer
-        self.secretary = self._init_secretary_agent()
+        # Headless lanes (gateway/MCP/daemon boot) never run the chat loop;
+        # an eager agent build made pydantic-ai a BOOT dependency of every
+        # ToolRegistry construction. Built on first use instead (the
+        # SecretaryMixin.secretary property); assign a test double to
+        # replace it.
+        self._secretary: Optional[Any] = None
         # Lazily-created class instances for in-process launches of
         # @framework_tool methods (e.g. MetasploitClient, SMBScanner).
         # One instance per class per registry, so stateful clients keep
