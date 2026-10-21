@@ -19,9 +19,6 @@ One engine — a vector-indexed registry of `@framework_tool` callables and
 gate-checked execution — surfaced through four lanes. Pick whichever fits the
 moment:
 
-- **Open WebUI / any chat client** — wire the registry into your chat model's
-  tool lane through the gateway or MCP endpoint for conversational
-  "fuzz that login form" workflows
 - **API gateway + MCP** — `POST /tools/execute` and a streamable-HTTP MCP
   endpoint for wiring the registry into any external agent harness
 - **Tool REPL** — bypass the LLM entirely: pick a tool, pass args, see raw
