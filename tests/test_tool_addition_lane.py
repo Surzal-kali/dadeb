@@ -14,11 +14,14 @@ then, in the same tree, drop a test_<tool>.py that macros it:
 
 Demo modules are written into payloads/ (discovery walks ALLOWED_TOOL_ROOTS
 and imports FRAMEWORK_ROOT-relative) and removed in finally. Underscore-
-prefixed unique names keep them collision-free with real tools.
+prefixed unique names keep them collision-free with real tools. The whole
+module skips honestly when payloads/ is unwritable from this lane (the
+root-owned deb tool tree).
 """
 
 import asyncio
 import contextlib
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,15 @@ from daharness.executor import execute_tool
 from daharness.registry import ToolRegistry
 
 PAYLOADS = Path("payloads")
+
+pytestmark = pytest.mark.skipif(
+    not os.access(Path(__file__).resolve().parent.parent / "payloads",
+                  os.W_OK),
+    reason="payloads/ is not writable from this lane — the author contract "
+           "mutates the real tool tree, and the deb lane's tool tree is "
+           "root-owned for the operator (run selftest from a writable "
+           "checkout, or as root on the deb)",
+)
 
 
 def _write(path: Path, text: str):

@@ -16,6 +16,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -35,6 +36,31 @@ _PYTEST_ARGS = [sys.executable, "-m", "pytest"]
 # from any working directory (REPL, operator shell alias, CI) — the macro used
 # to pass a rootdir-relative ``tests/`` and silently require the repo root cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _selftest_cache_dir() -> str:
+    """pytest cache target for unwritable trees (the deb lane).
+
+    A per-euid directory under the OS tempdir: the root-owned install tree
+    is never written and concurrent lanes don't fight over mode bits. The
+    cacheprovider plugin must stay ENABLED here — redirect, don't disable:
+    pyproject's ``cache_dir`` ini entry is only a known option while that
+    plugin defines it, the suite's ``--strict-config`` escalates unknown
+    ini options to a usage error, and pytest 9 answers that shape with
+    exit 4 and ZERO tests collected (the old ``-p no:cacheprovider``
+    branch made every unwritable-tree selftest collect nothing; observed
+    live on the deb 2026-10-21).
+    """
+    try:
+        uid = os.geteuid()
+    except AttributeError:  # pragma: no cover — non-POSIX dev lane
+        uid = 0
+    cache_dir = str(Path(tempfile.gettempdir()) / f"daharness-selftest-cache-{uid}")
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # pytest reports an unwritable cache dir as its own warning
+    return cache_dir
 
 
 # ── Lightweight executor (no ChromaDB, no secretary) ─────────────────────────
@@ -301,9 +327,11 @@ def _selftest_argv(extra_args: Optional[List[str]] = None) -> List[str]:
     whose bundled test files break collection (observed live on the deb
     2026-10-20: 21 collection errors, run interrupted). A passthrough arg
     already targeting a test file (anchored ``tests/...py``) skips the
-    base anchor. On a root-owned install tree pytest's cache probe trips
-    permission warnings — ``-p no:cacheprovider`` runs when the tree is
-    not writable.
+    base anchor. On a root-owned install tree the cache is redirected to
+    a writable tmpdir (``_selftest_cache_dir``) — the plugin itself stays
+    enabled, since disabling it makes pyproject's ``cache_dir`` an
+    unknown ini option and the suite's ``--strict-config`` turns that
+    into a usage error that collects nothing (pytest 9, deb 2026-10-21).
     """
     extra = [a for a in (extra_args or []) if a not in ("--force", "-f")]
     anchored = [_anchor_pytest_arg(a) for a in extra]
@@ -314,7 +342,7 @@ def _selftest_argv(extra_args: Optional[List[str]] = None) -> List[str]:
         argv.append(str(_REPO_ROOT / "tests"))
     argv += anchored
     if not os.access(_REPO_ROOT, os.W_OK):
-        argv += ["-p", "no:cacheprovider"]
+        argv += ["-o", f"cache_dir={_selftest_cache_dir()}"]
     argv.append("-q")
     return argv
 

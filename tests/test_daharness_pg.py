@@ -14,8 +14,27 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "packaging" / "bin" / "daharness-pg"
-BUNDLE = REPO_ROOT / "packaging" / "postgres" / "init" / "001_roles.sh"
+
+
+def _first_existing(*candidates: Path) -> Path:
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return candidates[-1]
+
+
+# Source-tree paths first; the deb lane falls back to the shipped twins
+# (rules install the same bytes to /usr/bin and /usr/share/daharness), so
+# the lane-addressing contract stays REAL on the deb instead of skipping.
+SCRIPT = _first_existing(
+    REPO_ROOT / "packaging" / "bin" / "daharness-pg",
+    Path("/usr/bin/daharness-pg"),
+)
+INIT_DIR = _first_existing(
+    REPO_ROOT / "packaging" / "postgres" / "init",
+    REPO_ROOT / "postgres" / "init",
+)
+BUNDLE = INIT_DIR / "001_roles.sh"
 
 
 def _text():
@@ -79,7 +98,7 @@ def test_sql_bundle_has_no_shell_style_comments():
     """Live on the guinea pig: 004 opened with a '#' header and psql
     (ON_ERROR_STOP=1) died 'syntax error at or near "#"'. SQL comments
     are '--'; '#' is only legal in 001_roles.sh (bash)."""
-    for sql in (REPO_ROOT / "packaging" / "postgres" / "init").glob("*.sql"):
+    for sql in INIT_DIR.glob("*.sql"):
         lines = sql.read_text().splitlines()
         offenders = [(n, l) for n, l in enumerate(lines, 1)
                      if l.lstrip().startswith("#")]

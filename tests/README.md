@@ -37,8 +37,19 @@ House rules, inherited from `pyproject.toml`:
 - `pythonpath = ["."]` — framework imports resolve from the repo root
   regardless of where pytest is invoked from.
 - `testpaths`/`python_files` are pinned: `tests/`, `test_*.py`.
-- cache_dir lives under gitignored `run/`.
+- cache_dir lives under gitignored `run/`; on a read-only install tree the
+  selftest macro redirects it to a per-euid tmpdir instead of disabling
+  cacheprovider (disabling it orphans the ini key and `--strict-config`
+  errors the whole run — pytest 9 collects nothing).
 - No unregistered marks (`--strict-markers`).
+- Lanes with inputs a hermetic test cannot ship skip honestly, with a
+  lane-specific reason: packaging-source asserts that read `debian/` +
+  `packaging/systemd/` (the deb ships the built artifact, not the
+  packaging sources — `test_daharness_pg.py` and the chroma wrapper
+  instead fall back to the rules-installed twins so those contracts stay
+  REAL on the deb), and `test_tool_addition_lane.py` when `payloads/` is
+  unwritable (the deb's root-owned tool tree — its author contract
+  mutates the real tree).
 
 Run it the way the macro does:
 

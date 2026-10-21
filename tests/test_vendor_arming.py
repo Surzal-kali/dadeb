@@ -69,7 +69,10 @@ def test_tool_repl_arm_is_inert_without_vendor(tmp_path):
     try:
         exec(compile(head, str(fake_tree / "tool_repl.py"), "exec"),
              {"__file__": str(fake_tree / "tool_repl.py")})
-        assert not any("vendor" in p for p in sys.path), sys.path[:3]
+        # Delta assert, not a vendor-free sys.path: on the deb lane the
+        # running process already carries its own armed vendor entries.
+        assert sys.path == before, ("shim head mutated sys.path:",
+                                    sys.path[:3])
     finally:
         sys.path[:] = before
 
@@ -92,12 +95,14 @@ def test_tool_repl_kernelspec_lane_boots_from_vendor(tmp_path):
                     "deb selftest lane exercises the real arm")
     child = (
         "import sys\n"
+        "from pathlib import Path\n"
         f"sys.path.insert(0, {str(tree)!r})\n"
         "import tool_repl  # the kernelspec shim itself\n"
         "import chromadb\n"
         f"assert Path(chromadb.__file__).resolve().is_relative_to("
         f"{str(vendor)!r}), ('not vendored:', chromadb.__file__)\n"
-        "assert 'vendor' in sys.path[0], ('vendor not first:', sys.path[:3])\n"
+        "assert any('vendor' in p for p in sys.path), "
+        "('arm did not run:', sys.path[:3])\n"
         "print('VENDOR-ARM-OK', chromadb.__version__)\n"
     )
     proc = subprocess.run(

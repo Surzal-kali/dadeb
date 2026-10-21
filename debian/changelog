@@ -1,3 +1,57 @@
+daharness (0.1.0+pkg10) kali; urgency=high
+
+  * selftest macro: redirect, don't disable, pytest's cache on unwritable
+    trees (deb defect, VM round trip 2026-10-21). The root-owned branch
+    passed -p no:cacheprovider while pyproject ships cache_dir = "run/
+    pytest-cache" and addopts carries --strict-config: with the plugin
+    disabled the ini key becomes unknown, pytest 9 escalates exactly that
+    to a usage error at run's end — exit 4, zero tests collected, the
+    operator sees "1 warning in 0.91s" + "ERROR: Unknown config option:
+    cache_dir" and can read the deb selftest as green when the suite
+    never ran (every -q selftest on the guinea pig collected nothing).
+    The macro now passes -o cache_dir=<per-euid tmpdir> instead: plugin
+    stays loaded (cache_dir stays a known option, strict-config satisfied),
+    the install tree is still never written, --lf works across runs, and
+    the suite actually executes on the deb lane.
+  * OLLAMA_BASE_URL import-time alert removed; unset note moved to the
+    knob's only live consumer. daharness.registry minted a normalized
+    OLLAMA_BASE_URL constant + logged "unset" INFO on EVERY registry
+    import (REPL, selftest, gateway, Brain boot — first line of the
+    guinea pig selftest transcript), though nothing imported the constant:
+    auxiliaries/framework_status.py:framework_health, the harness's only
+    OLLAMA_BASE_URL consumer, already resolved the env itself at call
+    time. The dead constant + both import-time logger.info calls are gone;
+    framework_health's ollama subsystem detail now appends the
+    unset→default pointer (EMBED_URL independence included) so the note
+    surfaces exactly when the LLM lane is being looked at, not on every
+    lane's stderr. Same for the daemon boot: the deb deliberately omits
+    the knob, so import stays silent.
+  * Deb selftest lane: the cache fix made the suite actually RUN on the
+    deb for the first time and exposed 22 latent failures — packaging/
+    deb-integrity tests reading source-only inputs (debian/, packaging/
+    systemd, packaging/bin, packaging/postgres) that the deb does not
+    ship, a tool-author test writing into the root-owned payloads tree,
+    and vendor-arming asserts written against the dev lane's sys.path.
+    Fixes, honest-degrade where a contract genuinely cannot ship:
+    daharness-pg + wrapper tests resolve source paths first and fall back
+    to the rules-installed twins (/usr/bin/daharness-pg,
+    /usr/bin/daharness-chroma, /usr/share/daharness/postgres/init) so
+    those contracts stay REAL on the deb; debian/packaging-source
+    integrity asserts skip with a lane-specific reason
+    (test_chroma_sidecar.py); the tool-author lane skips when payloads/
+    is unwritable; test_vendor_arming.py's inert-shim test now asserts
+    the sys.path delta (the deb process legitimately carries its own
+    armed entries) and the kernelspec child gets its missing
+    pathlib import.
+  * bootstrap: the deb's vendored `chroma` candidate moved out of
+    start_chroma_daemon's function-local list into a module constant
+    (CHROMA_SERVER_FALLBACKS) — same list content, but the selftest's
+    absent-backend premise can now neutralize it (monkeypatch to ())
+    instead of finding the deb's vendored binary and failing the
+    "absent binary" contract tests on the deb lane.
+
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Wed, 21 Oct 2026 03:06:00 -0600
+
 daharness (0.1.0+pkg9) kali; urgency=high
 
   * ghost-uid reinstall (deb defect, 2026-10-21 VM round trip): purge keeps

@@ -6,12 +6,16 @@ the tests/ anchor — a cwd-spawned pytest then collected the whole
 rootdir INCLUDING the vendored closure's own test files (21 collection
 errors, run interrupted; the root-owned tree also tripped pytest-cache
 permission warnings). The anchor is unconditional now, a passthrough
-test-file arg covers it, and read-only install trees disable the cache
-probes.
+test-file arg covers it, and read-only install trees redirect the cache
+to a writable tmpdir — the cacheprovider plugin itself stays enabled,
+because disabling it makes pyproject's cache_dir an unknown ini option
+that --strict-config escalates to a usage error (pytest 9 exits 4,
+zero tests collected; observed on the deb 2026-10-21).
 """
 
 import os
 import stat
+import tempfile
 
 import pytest
 
@@ -57,16 +61,41 @@ def test_force_and_f_ignored(core):
     assert _argv(core, "-f", "-k", "brain") == _argv(core, "-k", "brain")
 
 
-def test_unwritable_tree_disables_cache(core, monkeypatch, tmp_path):
+def test_unwritable_tree_redirects_cache(core, monkeypatch, tmp_path):
+    """Redirect, never disable: no:cacheprovider orphans cache_dir.
+
+    The deb tree is root-owned, so the unwritable branch always fires
+    there. -p no:cacheprovider made pyproject's cache_dir an unknown option
+    and --strict-config turned that into exit 4 with zero tests collected.
+    """
     fake_root = tmp_path / "ro-tree"
     fake_root.mkdir()
     (fake_root / "tests").mkdir()
     monkeypatch.setattr(core, "_REPO_ROOT", fake_root)
     os.chmod(fake_root, 0o555)
     argv = _argv(core)
-    assert "no:cacheprovider" in argv
+    assert "no:cacheprovider" not in argv
+    i = argv.index("-o")
+    override = argv[i + 1]
+    assert override.startswith("cache_dir=")
+    cache_dir = override.split("=", 1)[1]
+    # The redirected cache lives under the OS tempdir, never inside the
+    # (root-owned) repo the suite is anchored to.
+    assert cache_dir.startswith(tempfile.gettempdir())
+    assert str(fake_root) not in cache_dir
 
     os.chmod(fake_root, 0o755)
+
+
+def test_writable_tree_keeps_pyproject_cache_dir(core, monkeypatch, tmp_path):
+    """On a writable checkout the ini's run/pytest-cache stays in play."""
+    fake_root = tmp_path / "rw-tree"
+    fake_root.mkdir()
+    (fake_root / "tests").mkdir()
+    monkeypatch.setattr(core, "_REPO_ROOT", fake_root)
+    argv = _argv(core)
+    assert "-o" not in argv
+    assert "no:cacheprovider" not in argv
 
 
 def test_deb_installs_pyproject_rootdir_config():

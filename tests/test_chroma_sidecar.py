@@ -22,6 +22,11 @@ import bootstrap
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WRAPPER = REPO_ROOT / "packaging" / "bin" / "daharness-chroma"
+if not WRAPPER.exists():
+    # deb lane: the rules-installed twin IS the packaging under test —
+    # byte-identical at build time, so the wrapper contract stays real on
+    # the deb instead of skipping away.
+    WRAPPER = Path("/usr/bin/daharness-chroma")
 
 
 def _shim(**attrs):
@@ -152,6 +157,10 @@ def test_absent_binary_sets_permanent_answer(fake_chroma_bin, monkeypatch):
     answer' contract as ZAP's absent launcher), never a dead spawn loop."""
     monkeypatch.delenv("CHROMA_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: None)
+    # The deb vendors the `chroma` server CLI into vendor/bin and
+    # bootstrap pins that fallback as a module constant — neutralize it so
+    # "absent" really means absent on every lane.
+    monkeypatch.setattr(bootstrap, "CHROMA_SERVER_FALLBACKS", ())
     shim = _shim()
 
     async def drive():
@@ -173,6 +182,7 @@ def test_wait_skips_budget_when_backend_absent(monkeypatch):
     backend never burns the readiness budget."""
     monkeypatch.delenv("CHROMA_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(bootstrap, "CHROMA_SERVER_FALLBACKS", ())
     shim = _shim()
     port = _free_port()
 
@@ -258,18 +268,30 @@ def test_check_chroma_down(monkeypatch):
 
 # ------------------------------------------------------------ packaging
 
+# Integrity asserts that read debian/ + packaging/systemd/ sources hold at
+# build time and run on the source lane; on the deb those inputs are not
+# shipped (the built artifact already embodies them).
+_packaging_sources = (REPO_ROOT / "debian").is_dir()
+skipif_no_packaging_sources = pytest.mark.skipif(
+    not _packaging_sources,
+    reason="debian/ + packaging/systemd sources are not shipped on the deb "
+           "lane — these integrity asserts run on the source lane",
+)
+
 
 def test_retired_unit_file_gone():
     assert not (REPO_ROOT / "packaging" / "systemd" /
                 "daharness-chroma.service").exists()
 
 
+@skipif_no_packaging_sources
 def test_preset_has_no_chroma_line():
     text = (REPO_ROOT / "packaging" / "systemd" /
             "98-daharness.preset").read_text()
     assert "daharness-chroma" not in text
 
 
+@skipif_no_packaging_sources
 def test_daemon_unit_has_no_chroma_wiring():
     """Comments may narrate the retirement history; the unit must not
     WIRE the chroma lane (Wants/After/ExecStartPre) anymore."""
@@ -280,11 +302,13 @@ def test_daemon_unit_has_no_chroma_wiring():
             assert "chroma" not in line
 
 
+@skipif_no_packaging_sources
 def test_rules_no_longer_installs_chroma_unit():
     rules = REPO_ROOT / "debian" / "rules"
     assert "daharness-chroma.service" not in rules.read_text()
 
 
+@skipif_no_packaging_sources
 def test_postinst_retires_legacy_unit():
     postinst = REPO_ROOT / "debian" / "daharness.postinst"
     text = postinst.read_text()

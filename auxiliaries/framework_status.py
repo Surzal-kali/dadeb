@@ -67,6 +67,22 @@ def _check_unix_socket(path: str) -> tuple:
         return False, f"error:{exc.errno or type(exc).__name__}"
 
 
+def _ollama_env_note() -> str:
+    """Pointer for an unset OLLAMA_BASE_URL, emitted where the knob is used.
+
+    The knob's only live consumer in the harness is this health probe
+    (the driving-LLM lanes are external), so the "unset → default" note
+    belongs in this output — not in an import-time log line that every
+    registry-importing lane heard (the deb ships without the knob).
+    """
+    if "OLLAMA_BASE_URL" in os.environ:
+        return ""
+    return (
+        " (OLLAMA_BASE_URL unset — default; driving-LLM/health knob only, "
+        "embeddings ride EMBED_URL; set in .env for a non-local LLM host)"
+    )
+
+
 @framework_tool(
     "Report the operational health of the penetration testing framework: "
     "Brain sidecar socket, Ollama LLM/embedding endpoints, ChromaDB vector "
@@ -93,6 +109,7 @@ def framework_health() -> Dict[str, Any]:
     permission mismatch reported honestly, not an outage claim.
     """
     ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    ollama_env_note = _ollama_env_note()
     # Strip /v1 for the raw API probe.
     ollama_raw = ollama_base.rstrip("/")
     if ollama_raw.endswith("/v1"):
@@ -162,9 +179,9 @@ def framework_health() -> Dict[str, Any]:
     subsystems["ollama"] = {
         "up": ollama_up,
         "detail": (
-            f"{ollama_host}:{ollama_port} (LLM + embedding){embed_note}"
+            f"{ollama_host}:{ollama_port} (LLM + embedding){embed_note}{ollama_env_note}"
             if ollama_up
-            else f"unreachable at {ollama_host}:{ollama_port}{embed_note}"
+            else f"unreachable at {ollama_host}:{ollama_port}{embed_note}{ollama_env_note}"
         ),
     }
 

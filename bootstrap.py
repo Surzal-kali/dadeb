@@ -34,7 +34,9 @@ from constants import brain_socket_path  # noqa: E402  -- after .env load
 #
 # NOTE: this load deliberately sits AFTER the daharness import. The package
 # __init__ now loads .env itself (without override) before registry.py bakes
-# OLLAMA_BASE_URL into a module constant; this block then re-applies with
+# its module-level env constants (CHROMA_HOST/CHROMA_PORT; OLLAMA_BASE_URL's
+# only consumer — framework_status's health probe — reads the env at call
+# time); this block then re-applies with
 # override=True for the rest of the stack's authoritative-.env semantics.
 # Keeping both gives: registry constants see .env, and shell exports are still
 # overridden by .env for the operator's decision above. Do not move the
@@ -95,6 +97,12 @@ if not _CHROMA_DEFAULT_PATH:
     else:
         _CHROMA_DEFAULT_PATH = str(FRAMEWORK_ROOT / "run" / "chroma")
 CHROMA_PATH = _CHROMA_DEFAULT_PATH
+# The deb's vendored chromadb closure ships the `chroma` server CLI under
+# vendor/bin (pip --target entry point). Module constant, not a
+# function-local literal: the selftest's absent-backend premise must be
+# able to neutralize the deb's vendored candidate
+# (tests/test_chroma_sidecar.py monkeypatches this to ()).
+CHROMA_SERVER_FALLBACKS = ("/usr/share/daharness/vendor/bin/chroma",)
 
 # API gateway (bootstrap-assembled service, api_gateway.run()): bind +
 # port knobs. Loopback default mirrors the ZAP pattern — the tool-execution
@@ -687,7 +695,7 @@ class FrameworkLoader:
 
         chroma_candidates = [
             os.getenv("CHROMA_BIN", ""),
-            "/usr/share/daharness/vendor/bin/chroma",
+            *CHROMA_SERVER_FALLBACKS,
             shutil.which("chroma") or "",
         ]
         chroma_bin = next(

@@ -47,39 +47,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-# Ollama/LLM endpoint: defaults to the local Ollama daemon. Both forms are
-# accepted and normalized here: "http://host:11434" (native) and
-# "http://host:11434/v1" (OpenAI-compatible). The normalized "/v1" form is
-# the canonical value; consumers strip "/v1" themselves. This is the
-# driving-LLM/health knob only — embeddings resolve their own EMBED_URL
-# (daharness/embedding.py) and no longer derive from it.
-# Set OLLAMA_BASE_URL in .env to override (loopback or LAN
-# only — see README Legal Addendum; cloud LLM APIs leak target data).
-_OLLAMA_BASE_RAW = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip(
-    "/"
-)
-if not _OLLAMA_BASE_RAW.endswith("/v1"):
-    OLLAMA_BASE_URL = _OLLAMA_BASE_RAW + "/v1"
-    logger.info(
-        "OLLAMA_BASE_URL was set without the /v1 suffix (%s) — normalized to %s "
-        "(the OpenAI-compatible endpoint form).",
-        _OLLAMA_BASE_RAW,
-        OLLAMA_BASE_URL,
-    )
-else:
-    OLLAMA_BASE_URL = _OLLAMA_BASE_RAW
-if "OLLAMA_BASE_URL" not in os.environ:
-    # Absence is the SHIPPED posture on the deb lane (the headless build
-    # reads no chat model and the conffile carries no driving-LLM knob) —
-    # a WARNING there nagged every daemon boot about a knob the package
-    # deliberately does not set. Keep a quiet pointer for dev checkouts,
-    # where the driving-LLM health probe is a live concern.
-    logger.info(
-        "OLLAMA_BASE_URL unset — driving-LLM/health endpoint defaults to %s "
-        "(dev checkout knob; the deb conffile intentionally omits it; "
-        "embeddings are independent: EMBED_URL/EMBED_MODEL).",
-        OLLAMA_BASE_URL,
-    )
+# NOTE (2026-10-21): the OLLAMA_BASE_URL constant and its import-time
+# "unset" INFO alert that used to live here are gone. Nothing in this
+# module consumed the constant, the alert fired on every lane that
+# imports the registry (REPL, selftest, gateway, Brain boot) — including
+# the deb lane, which deliberately ships without the knob — and the only
+# live consumer (auxiliaries.framework_status:framework_health) resolves
+# the env itself at call time, where its ollama detail now surfaces the
+# unset→default note. Embeddings ride their own EMBED_URL lane
+# (daharness/embedding.py).
 CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "9000"))
 # --- tool-discovery roots (code checkout, NOT the state root) ---------------
