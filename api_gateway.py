@@ -1204,7 +1204,7 @@ async def run(loader, host="127.0.0.1", port=5000):
 
     # Initialize MemoryService
     from memories import MemoryService
-    memory_service = MemoryService(storage_path=".memory/chroma")
+    memory_service = MemoryService()
 
     # Start the API gateway
     api_gateway = APIGateway(tool_registry, memory_service)

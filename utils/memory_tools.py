@@ -33,7 +33,7 @@ from uuid import uuid4
 import httpx
 
 from constants import framework_tool
-from memories import _default_service as _svc
+from memories import get_default_service as _svc
 from daharness.embedding import embed_request, parse_embed_response
 
 # ── Recency-weighted recall tuning ───────────────────────────────────────────
@@ -101,7 +101,7 @@ def remember_text(text: str, namespace: str = "engagement", memory_id: str = "",
         memory_id = f"mem-{int(time.time())}-{uuid4().hex[:6]}"
     now = time.time()
     embedding = _embed(text)
-    _svc.remember(
+    _svc().remember(
         namespace=namespace,
         memory_id=memory_id,
         text=text,
@@ -158,7 +158,7 @@ def recall_text(
     query_embedding = _embed(query)
     # Over-fetch so post-ranking + filtering still yield ``limit`` results.
     fetch_n = min(limit * 4, 50) if (target or since_hours) else limit
-    raw = _svc.recall(
+    raw = _svc().recall(
         namespace=namespace,
         query_embedding=query_embedding,
         limit=fetch_n,
@@ -201,5 +201,5 @@ def recall_text(
 )
 def list_text_namespaces() -> List[str]:
     """List all memory namespaces that exist in the vector store."""
-    return _svc.list_namespaces()
+    return _svc().list_namespaces()
 

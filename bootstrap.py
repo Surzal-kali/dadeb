@@ -170,6 +170,18 @@ def _open_child_log(name: str):
 
 
 # --- FrameworkLoader ---
+def _chroma_answering(timeout: float = 1.0) -> bool:
+    """Cheap chroma-lane readiness probe (read-side twin of
+    start_chroma_daemon's reuse-first check). Never raises: True when
+    something is already listening where the backend will bind."""
+    import socket as _socket
+    try:
+        with _socket.create_connection((CHROMA_HOST, CHROMA_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class FrameworkLoader:
     def __init__(self, framework_root: Path):
         self.framework_root = framework_root
@@ -181,16 +193,23 @@ class FrameworkLoader:
         self.packet_tool = None
         self.vector_registry = None
 
-        # Initialize ToolRegistry
-        try:
-            from daharness import ToolRegistry, OllamaEmbeddingFunction
-            self.vector_registry = ToolRegistry(
-                embedding_model=OllamaEmbeddingFunction(),
-                rpc_servers={"metasploit": MCP_ENDPOINT}
+        # Initialize ToolRegistry — readiness-gated (2026-10-21 boot-race
+        # fix): chromadb's HttpClient handshakes in its constructor, so
+        # dialing here before launch_all has started the backend was a
+        # doomed connect + traceback on every daemon boot. When the backend
+        # already answers (REPL/kernel lanes riding the running unit),
+        # construct now; otherwise defer to launch_all's post-wait init.
+        if _chroma_answering():
+            try:
+                self._init_vector_registry()
+            except Exception as exc:
+                logger.error("[!] Tool vector registry failed: %s", exc, exc_info=True)
+        else:
+            logger.info(
+                "[i] Chroma backend not answering at %s:%s — vector "
+                "registry init deferred to launch_all's readiness wait.",
+                CHROMA_HOST, CHROMA_PORT,
             )
-            logger.info("[+] Tool vector registry initialized.")
-        except Exception as exc:
-            logger.error("[!] Tool vector registry failed: %s", exc, exc_info=True)
 
         # Initialize PacketCraft
         try:
@@ -198,6 +217,21 @@ class FrameworkLoader:
             self.packet_tool = PacketCraft()
         except Exception as exc:
             logger.warning("[!] PacketCraft unavailable: %s", exc)
+
+    def _init_vector_registry(self) -> None:
+        """Construct the semantic ToolRegistry.
+
+        Callers must ensure the chroma backend is answering first — the
+        constructor dials it eagerly. On failure the registry stays None
+        and consumers hold the degraded-registry lane (api_gateway.run()
+        surfaces `daharness doctor chroma` remediation instead of a 500).
+        """
+        from daharness import ToolRegistry, OllamaEmbeddingFunction
+        self.vector_registry = ToolRegistry(
+            embedding_model=OllamaEmbeddingFunction(),
+            rpc_servers={"metasploit": MCP_ENDPOINT}
+        )
+        logger.info("[+] Tool vector registry initialized.")
 
     async def _wait_for_rpc_port(self, host: str = "127.0.0.1", port: int = 55553, timeout: float = 30.0) -> bool:
         """Wait for the RPC port to become available."""
@@ -1104,7 +1138,19 @@ class FrameworkLoader:
         self.active_tasks.append(
             asyncio.create_task(self.start_chroma_daemon())
         )
-        await self.wait_for_chroma()
+        chroma_ready = await self.wait_for_chroma()
+
+        # Deferred ToolRegistry init (2026-10-21 boot-race fix): __init__
+        # used to dial chroma before the backend had even started — a doomed
+        # connect + traceback every boot, then the gateway recovered via its
+        # degraded standalone-registry lane seconds later. Chroma has now
+        # passed (or failed) readiness: construct only on a live backend,
+        # keep registry=None otherwise so the degraded lane holds.
+        if chroma_ready and self.vector_registry is None:
+            try:
+                self._init_vector_registry()
+            except Exception as exc:
+                logger.error("[!] Tool vector registry failed: %s", exc, exc_info=True)
 
         # Start services
         self.active_tasks.append(asyncio.create_task(self.start_brain_server()))

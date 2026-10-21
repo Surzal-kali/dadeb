@@ -195,6 +195,82 @@ re-runnable form of a .dacustoms function chain — same author, two lifecycles.
 
 ---
 
+## Portability lanes (WSL / Pi test notes + NetHunter future) — 2026-10-21
+
+Double-check of the install script against non-standard hosts (WSL, Pi /
+aarch64, NetHunter chroot), plus the NetHunter display answer from the app's
+own source. Facts verified in `debian/rules` + `debian/daharness.postinst`
+and the `kali-nethunter-app` repo; the NetHunter integration itself stays a
+future lane.
+
+### Install-portability facts (verified)
+
+- **Systemd is optional at install time**: every systemd touch in postinst
+  (chroma retirement, daemon-reload) is guarded by
+  ``if [ -d /run/systemd/system ] && command -v systemctl`` — no-ops on a
+  systemd-less box; `deb-systemd-helper` (dh_installsystemd) manipulates
+  enablement state without requiring PID 1; units are enabled-**not**-started
+  so nothing can hang the install.
+- **The state root is systemd-independent**: postinst creates
+  `/var/lib/daharness` bare (mkdir + chown 2770 + scope seeding) —
+  RuntimeDirectory/StateDirectory only re-assert what postinst already made.
+- **`.pyc` are arch-neutral**: the `compileall` steps produce version-magic
+  bytecode, safe to build on x86 and run on aarch64.
+- **Trap 1 — everything compiled is a BUILD-arch artifact:**
+  `rules` runs ``pip install --target vendor chromadb==1.5.9`` on the BUILD
+  host; chromadb 1.x is a pyo3/Rust closure, so the `.so` files carried in
+  the deb are the build machine's arch (plus pydantic-core, numpy, et al).
+  Same for `frameit.so`: `override_dh_auto_build` gcc-compiles it at BUILD
+  time and ships the binary — nothing compiles at install time. (Only the
+  two C objects are repo-built — `frameit` shipped, `raw_scan` NOT in the
+  packaging at all: manually compiled per listeners/README, so on the deb
+  lane raw_scan degrades honestly via its failing CDLL.) A deb built on x86
+  installs on a Pi and the Brain dies on the top-level chromadb import.
+  ⇒ **Pi test = run `dpkg-buildpackage` ON the Pi** (or a per-arch vendor
+  lane later) — one build resolves frameit's gcc target, the wheel closure's
+  arch, and the (arch-neutral) compileall bytecode together. WSL2
+  (``systemd=true``) should give the full service lane; WSL1 /
+  systemd-off gets the bare-tree manual-lane posture.
+- **Trap 2 — `/run/daharness` on non-systemd lanes**: on the package tree
+  `brain_socket_path()` resolves `/run/daharness/brain.sock` unconditionally;
+  a normal install relies on systemd's RuntimeDirectory to make it. On an
+  init.d / systemd-less lane nobody creates it — the service entry point must
+  `mkdir /run/daharness` before bind, or the Brain silently has no socket.
+
+### NetHunter future lane (display mechanics verified from source)
+
+The NetHunter app has **no package-discovery protocol** — its tabs are
+hardcoded fragments (`AppNavHomeActivity`). The three real surfaces:
+
+- **Custom Commands tab** = app-private **SQLite** (`CustomCommandsSQL` /
+  `CustomCommandsData`: label, command, send-to, exec mode, run-on-boot),
+  user-authored via the app UI, backup/restore as a DB file on the sdcard.
+  A chroot package **cannot inject entries** — only the app's own restore
+  flow writes that DB.
+- **Kali Services tab** = the init.d route: the app ships
+  `assets/etc.init.d` startup scripts into the chroot (and carries a
+  chroot-side systemd workaround as of 2026-10). **This is the blessed
+  display surface** — a system package's services appear as start/stop
+  toggles.
+- **NetHunter Store** = Android APKs; unrelated to chroot packaging.
+
+Future daharness-on-NetHunter shape (an install-env check helper forks the
+unpacked unit lane):
+
+- Check: ``[ -d /run/systemd/system ] && command -v systemctl`` → existing
+  deb lane untouched; else → same tree + state root, **init.d scripts
+  instead of units** for `daharness` / `daharness-kernel`, and
+  `mkdir /run/daharness` at boot (no RuntimeDirectory on this lane),
+  `PYTHONDONTWRITEBYTECODE` irrelevant here (tree is root-owned; .pyc stay
+  tracked).
+- Expect: the two services surface in **Kali Services**; the REPL/gateway
+  entry points get a documented "add these custom commands by hand" (the
+  Custom-Commands DB is user-owned); no Store APK lane.
+
+---
+
+---
+
 ## Walkthrough refinements (2026-10-21, decisions stress-tested)
 
 Amendments from the per-decision review — implementation follows THESE,

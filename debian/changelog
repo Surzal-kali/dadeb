@@ -1,3 +1,46 @@
+daharness (0.1.0+pkg12) kali; urgency=high
+
+  * Memory lane: tool discovery no longer dies on the deb with sqlite
+    "(code: 8) attempt to write a readonly database" (VM, 2026-10-21
+    16:33 — the "[discovery] Dynamic scan failed for utils/findings.py"
+    pair with the follow-on 'RustBindingsAPI' object has no attribute
+    'bindings' / "Could not connect to tenant default_tenant" tracebacks).
+    Three stacked layers fixed in one incident:
+    - Root cause: memories.py instantiated `_default_service = MemoryService()`
+      at MODULE IMPORT with a CWD-relative ".memory/chroma" default. The
+      dynamic discovery scan imports utils/findings.py ->
+      utils/memory_tools.py -> memories.py, and the deb lane runs with CWD
+      inside the root-owned /usr/share/daharness checkout — chroma's sqlite
+      opened INTO the read-only tree and took both scanned modules down with
+      it (the later tenant/bindings errors were just chromadb's poisoned
+      shared-system cache replaying the half-started system). The shared
+      service now builds LAZILY on first use (get_default_service(); PEP 562
+      keeps `from memories import _default_service` green) and its default
+      resolves through constants.resolve_workspace_root() — the deb lane
+      falls through to /var/lib/daharness/.memory/chroma, dev/container
+      lanes land exactly where they always did. api_gateway's own
+      CWD-relative memory path is gone too.
+    - State-mode residue: the unit intends a group-shareable state root
+      (StateDirectoryMode=2770, UMask=0007, "group-shareable to operator
+      CLIs") but the live chroma.sqlite3 sat at 0640 — operator accounts
+      in the daharness group had READ-only access and still hit code 8 on
+      the existing file. MemoryService now repairs what it owns at
+      construction (dirs 2770, files 0660, mirroring the scratch-store
+      root guard): one owner boot heals the mode for the whole group,
+      root runs chown residue to the workspace owner, and a lane that is
+      neither owner nor root gets a loud remediation WARNING instead of a
+      raw sqlite error.
+    - Guard rails: new tests/test_memory_lane_health.py pins the whole
+      class — scan-import from a read-only CWD writes nothing anywhere,
+      laziness + workspace-root path resolution, fresh-dir 2770/660 shape
+      under a hostile umask, and 0640 -> 0660 self-heal. Suite 135 passed.
+      Deploy shape: rebuild the deb and restart the service once — the
+      owner boot self-heals the live 0640 file; without it, a manual
+      `chmod g+w /var/lib/daharness/.memory/chroma/chroma.sqlite3*` does
+      the same.
+
+ -- daharness packaging <operator@localhost>  Wed, 21 Oct 2026 16:43:00 -0600
+
 daharness (0.1.0+pkg11) kali; urgency=high
 
   * MCP transport: streamable-HTTP session manager now stateless + plain

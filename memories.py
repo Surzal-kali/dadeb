@@ -8,6 +8,7 @@ from typing import Any
 
 import chromadb
 
+from constants import resolve_workspace_root
 from listeners.thebrain import framework_tool
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,99 @@ def _is_important(metadata: dict[str, Any]) -> bool:
 class MemoryService:
     """Persistent, namespaced vector memory for cross-harness recall."""
 
-    def __init__(self, storage_path: str = ".memory/chroma"):
+    def __init__(self, storage_path: str | None = None):
+        # Lane-safe default: resolve_workspace_root() understands the deb
+        # lane (read-only /usr/share/daharness -> /var/lib/daharness). The
+        # old ".memory/chroma" default was CWD-relative, so on the deb lane
+        # it aimed into the root-owned checkout.
+        if storage_path is None:
+            storage_path = default_chroma_path()
         self.storage_path = str(Path(storage_path))
+        # Before the client: create the dir with the unit's intended shape
+        # and warn (instead of a raw sqlite code-8) when the lane cannot
+        # write an existing foreign DB. After the client: align whatever
+        # mode the client's own creations landed at under this umask.
+        self._repair_chroma_permissions()
         self.client = chromadb.PersistentClient(path=self.storage_path)
+        self._repair_chroma_permissions()
         self._collections: dict[str, Any] = {}
+
+    def _repair_chroma_permissions(self) -> None:
+        """Best-effort permission hygiene for the chroma dir; never raises.
+
+        Mirrors the scratch-store root guard (utils/scratch_store.py) and
+        fixes two deb-lane incident classes:
+
+        * Prior root run leaves root-owned files (root runs masscan /
+          packetcraft); later non-root runs then hit sqlite "attempt to
+          write a readonly database". As root, chown the tree to the
+          workspace-root owner; a non-root run meeting root-owned files
+          warns loudly (it cannot chown).
+        * The unit provisions a group-shareable state root
+          (StateDirectoryMode=2770, UMask=0007 — "group-shareable to
+          operator CLIs"), but the sqlite file can be created under a
+          tighter umask (2026-10-21: chroma.sqlite3 landed 0640 while the
+          operator account sits in the daharness group) — every operator-
+          lane open of the existing DB then dies with sqlite code 8. The
+          owner process restores group-write on what it owns so one fixed
+          service boot heals it for the group; a non-owner that still
+          cannot write warns with the operator remediation.
+        """
+        log = logging.getLogger(__name__)
+        root = Path(self.storage_path)
+        try:
+            root.mkdir(parents=True, exist_ok=True, mode=0o2770)
+        except OSError:
+            return  # no writable parent — let the client surface the real error
+        try:
+            ws_stat = resolve_workspace_root().stat()
+        except OSError:
+            ws_stat = None
+        is_root = os.geteuid() == 0
+        foreign_root_owned = False
+        blocked_not_group_writable = False
+
+        for p in [root, *root.rglob("*")]:
+            try:
+                if p.is_symlink():
+                    continue
+                st = p.stat()
+                if is_root and ws_stat and st.st_uid != ws_stat.st_uid:
+                    os.chown(p, ws_stat.st_uid, ws_stat.st_gid)
+                if st.st_uid == 0 and not is_root:
+                    foreign_root_owned = True
+                # Owner (or root-after-repair) restores the unit's intended
+                # group-shareable shape: dirs 2770, files 0660.
+                if is_root or st.st_uid == os.geteuid():
+                    if p.is_dir():
+                        os.chmod(p, 0o2770)
+                    else:
+                        os.chmod(p, 0o660)
+                elif (st.st_mode & 0o020) == 0 and p.suffix in (
+                    ".sqlite3", ".sqlite3-wal", ".sqlite3-shm",
+                ):
+                    # Not owner, not root, and group-write missing on an
+                    # existing file — exactly the sqlite code-8 trap.
+                    blocked_not_group_writable = True
+            except OSError:
+                continue
+
+        if blocked_not_group_writable:
+            log.warning(
+                "Memory DB at %s is not group-writable but we are neither "
+                "owner nor root — operator lanes sharing the state group "
+                "will hit sqlite 'attempt to write a readonly database'. "
+                "Remediation: restart the daharness service once with this "
+                "build (the owner self-heals the mode), or chmod g+w the "
+                "DB files manually.", self.storage_path,
+            )
+        if foreign_root_owned:
+            log.warning(
+                "Root-owned files found in memory DB at %s from a prior "
+                "root run and we are not root — restart the framework as "
+                "root once to trigger the ownership repair, or chown them "
+                "to the workspace owner manually.", self.storage_path,
+            )
     def create_collection(self, namespace: str, embedding_model: str = "nomic-embed-text"):
         """Create a new collection for a given namespace."""
         name = self._namespace_name(namespace)
@@ -329,7 +419,45 @@ class MemoryService:
                 _FORGET_BANNED.discard(agent_id)
 
 
-_default_service = MemoryService()
+def default_chroma_path() -> str:
+    """Lane-safe default chroma dir — under the workspace root, never CWD.
+
+    The pre-fix default (".memory/chroma") was CWD-relative: the deb lane
+    runs service processes with CWD inside the read-only /usr/share/daharness
+    tree, so chroma init died there with sqlite "attempt to write a readonly
+    database".
+    """
+    return str(resolve_workspace_root() / ".memory" / "chroma")
+
+
+_DEFAULT_SERVICE: MemoryService | None = None
+_DEFAULT_SERVICE_LOCK = threading.Lock()
+
+
+def get_default_service() -> MemoryService:
+    """Shared MemoryService, built lazily on first use — never at import.
+
+    Tool discovery dynamically imports modules that reach this module
+    (utils/findings.py -> utils/memory_tools.py), so import-time
+    construction used to open chroma inside whatever CWD the scanning
+    process had — and a failure poisoned the tool scan itself. First-use
+    construction means a chroma failure fails the memory call, not the
+    scan.
+    """
+    global _DEFAULT_SERVICE
+    if _DEFAULT_SERVICE is None:
+        with _DEFAULT_SERVICE_LOCK:
+            if _DEFAULT_SERVICE is None:
+                _DEFAULT_SERVICE = MemoryService()
+    return _DEFAULT_SERVICE
+
+
+def __getattr__(name: str):
+    # PEP 562 back-compat: `from memories import _default_service` still
+    # resolves, but only builds the service when actually referenced.
+    if name == "_default_service":
+        return get_default_service()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def store_embedding(
@@ -340,7 +468,7 @@ def store_embedding(
     agent_id: str | None = None,
 ) -> str:
     """Compatibility wrapper for storing a raw embedding under a namespaced key."""
-    return _default_service.remember(
+    return get_default_service().remember(
         namespace=namespace,
         memory_id=key,
         text=key,
@@ -358,7 +486,7 @@ def retrieve_embedding(
     agent_id: str | None = None,
 ) -> tuple[list[float] | None, str | None]:
     """Compatibility wrapper returning the stored embedding and id for a key."""
-    result = _default_service.get(namespace=namespace, memory_id=key, session_id=session_id, agent_id=agent_id)
+    result = get_default_service().get(namespace=namespace, memory_id=key, session_id=session_id, agent_id=agent_id)
     if result is None:
         return None, None
     return result.get("embedding"), result.get("id")
@@ -366,7 +494,7 @@ def retrieve_embedding(
 
 def store_id(key: str, id_value: str, namespace: str = "shared", session_id: str | None = None, agent_id: str | None = None) -> str:
     """Compatibility wrapper for storing a key-to-id mapping in a namespace."""
-    return _default_service.remember(
+    return get_default_service().remember(
         namespace=namespace,
         memory_id=str(id_value),
         text=str(key),
@@ -380,7 +508,7 @@ def store_id(key: str, id_value: str, namespace: str = "shared", session_id: str
 
 def retrieve_id(key: str, namespace: str = "shared", session_id: str | None = None, agent_id: str | None = None) -> str:
     """Compatibility wrapper for retrieving the id assigned to a key."""
-    collection = _default_service._get_collection(namespace)
+    collection = get_default_service()._get_collection(namespace)
     where = {"key": str(key)}
     normalized = MemoryService._normalize_session_id(session_id)
     if normalized is not None:
