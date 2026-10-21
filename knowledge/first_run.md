@@ -9,10 +9,9 @@ All commands assume the repo root and your venv active.
 ## 1. The two diagnostic tools
 
 ```bash
-# Smoke-test EVERY discovered tool with safe args — a summary table where
-# each row is a tool verdict. Tools needing a live service are skipped
-# unless you pass --force.
-python tool_repl.py sweep
+# Run the pytest suite through the REPL macro (executes
+# python -m pytest tests/ -q; failures name the tool lane that regressed).
+python tool_repl.py selftest
 
 # Subsystem health: Brain socket, Ollama, ChromaDB, ZAP, findings DB,
 # plus the registry tool count. Also works after bootstrap:
@@ -23,7 +22,7 @@ Read them together:
 
 | Signal | Meaning |
 | --- | --- |
-| `sweep` fails for tool X, but `framework_status` is all-up | The tool (or its external CLI) — check that tool's backend binary is on `PATH` |
+| `selftest` fails for tool X, but `framework_status` is all-up | The tool (or its external CLI) — check that tool's backend binary is on `PATH` |
 | `framework_status` shows Ollama down | Your model endpoint. Check `.env` → `OLLAMA_BASE_URL`, and that Ollama is actually running (`ollama list`) |
 | `framework_status` shows ChromaDB down but the REPL `list` works | Discovery works; only *semantic search* needs ChromaDB. Start the server (`docker run -p 9000:8000 chromadb/chroma`) |
 | Brain socket down | `bootstrap.py` starts it; check `/tmp/brain.log`. In-process fallback still executes `BRAIN_DISPATCH` tools, but sessions held by the Brain are invisible to it (see AGENTS.md pitfalls) |
@@ -45,7 +44,7 @@ Read them together:
 If a tool raises `ScopeGateError`, the operator-armed gate chose to block
 that traffic — that is the framework working. Armed state is controlled
 only from the REPL (`scope on <handle>` / `scope off` / `scope status`);
-any model lane can toggle the gate. Disarmed (lab) mode is the default. Full
+no model lane can toggle the gate. Disarmed (lab) mode is the default. Full
 semantics: [`knowledge/scope_gate.md`](scope_gate.md).
 
 ## 4. Still stuck

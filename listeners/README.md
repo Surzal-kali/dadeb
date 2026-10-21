@@ -143,8 +143,12 @@ NTLMv2 challenge-response in a self-contained SMB2 sink.
 - **Own-name blacklist**: our hostname (short + FQDN) and `wpad` are never
   answered; LLMNR answers A queries only (AAAA ignored, IPv4 sink).
 
-Acceptance chain (todo Phase 4): poison → capture → `run_hashcat` mode
-5600 → credential-reuse sweep → `report_finding`, secretary-driven.
+Acceptance chain (driver runbook, not automated): poison → capture →
+crack (`run_hashcat(hash_input=..., mode=5600)` for NTLMv2, or
+`run_john(hash_input=..., options="--format=netntlmv2")`) →
+credential-reuse sweep → `report_finding` — driven from any chat lane;
+the reuse-sweep step's contract lives in
+[`../knowledge/findings.md`](../knowledge/findings.md).
 Parked-by-policy: relays (ntlmrelayx-class).
 
 ## C plugins in this folder
