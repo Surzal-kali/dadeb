@@ -33,8 +33,22 @@ if [ -r /etc/daharness/daharness.env ]; then
 fi
 CHROMA_HOST=${CHROMA_HOST:-localhost}
 CHROMA_PORT=${CHROMA_PORT:-9000}
-OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+# Embed probe resolves EMBED_URL — the exact knob daharness/embedding.py
+# dials (provider-agnostic: Ollama native /api/embed or OpenAI-compatible
+# /v1/embeddings). OLLAMA_BASE_URL is NOT the embed knob and the deb
+# conffile does not carry it; deriving the probe host from EMBED_URL keeps
+# the wrapper honest with whatever the indexer itself will use.
+EMBED_URL=${EMBED_URL:-http://localhost:11434/api/embed}
 EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+# Probe base = EMBED_URL sans its last path segment (…/api/embed -> base,
+# …/v1/embeddings -> base); inventory endpoints per wire shape:
+#   Ollama native   : GET {base}/api/tags
+#   OpenAI-compat   : GET {base}/models   (Bearer EMBED_API_KEY when set)
+case "$EMBED_URL" in
+        */api/embed)     EMBED_PROBE_BASE=${EMBED_URL%/api/embed} ;;
+        */v1/embeddings) EMBED_PROBE_BASE=${EMBED_URL%/v1/embeddings} ;;
+        *)               EMBED_PROBE_BASE=${EMBED_URL%/*} ;;
+esac
 
 # Route --stubs before the probes: the stub lane needs no chroma/Ollama
 # backend (static AST + dynamic import, zero embedding), same rule as
@@ -60,15 +74,102 @@ fi
 
 if ! ss -ltnH 2>/dev/null | grep -q ":${CHROMA_PORT} "; then
 	err "chroma is not listening on ${CHROMA_HOST}:${CHROMA_PORT} — discovery has no backend."
-	err "  fix: sudo systemctl start daharness-chroma   (then re-run daharness-index)"
+	err "  fix: sudo systemctl start daharness   (the daemon spawns chroma as"
+	err "       a supervised sidecar; manual lane: daharness-chroma)"
 	exit 1
 fi
-if ! curl -fsS --max-time 5 "${OLLAMA_BASE_URL}/api/tags" 2>/dev/null \
-	| grep -q "\"name\":\"${EMBED_MODEL}"; then
-	err "Ollama at ${OLLAMA_BASE_URL} is down or lacks embed model '${EMBED_MODEL}'."
-	err "  fix: sudo systemctl start ollama && ollama pull ${EMBED_MODEL}"
-	err "  (knobs: EMBED_MODEL / OLLAMA_BASE_URL in /etc/daharness/daharness.env;"
-	err "   inventory probe: curl -s ${OLLAMA_BASE_URL}/api/tags)"
-	exit 1
-fi
+# Embed-provider probe: shape-derived inventory endpoint (see the EMBED_URL
+# block above). Keyed providers carry their Bearer header on OpenAI-shape.
+# The Ollana-native check is hard (model MUST be listed — a listening Ollama
+# without nomic-embed-text fails the first real embed anyway, so saying so
+# now saves a confusing python traceback). The OpenAI-shape inventory is
+# fail-open: some compatible providers 404 /models; if the endpoint truly
+# cannot serve, the indexer's own request reports the real error.
+case "$EMBED_URL" in
+	*/api/embed)
+		_probe_ok=0
+		# Spacing-tolerant match: Ollama (Go encoding/json) emits compact
+		# JSON, but a pretty-printing reverse proxy inserts spaces after
+		# ':' — the exact-form grep '"name":"model' false-failed against
+		# those (live stub 2026-10-21). ': *"' spans both shapes.
+		if curl -fsS --max-time 5 "${EMBED_PROBE_BASE}/api/tags" 2>/dev/null \
+			| grep -q "\"name\": *\"${EMBED_MODEL}"; then
+			_probe_ok=1
+		fi
+		if [ "$_probe_ok" -eq 0 ]; then
+			err "Ollama at ${EMBED_PROBE_BASE} is down or lacks embed model '${EMBED_MODEL}'."
+			err "  fix: sudo systemctl start ollama && ollama pull ${EMBED_MODEL}"
+			err "  (knobs: EMBED_URL / EMBED_MODEL in /etc/daharness/daharness.env;"
+			err "   inventory probe: curl -s ${EMBED_PROBE_BASE}/api/tags)"
+			exit 1
+		fi
+		;;
+	*)
+		_probe_ok=0
+		# Keyed provider: header inline-quoted on its own curl invocation.
+		# Building the flag into a var expanded unquoted (the old shape)
+		# word-splits "Authorization: Bearer <key>" — curl then sees
+		# -H "Authorization:" (a header REMOVAL directive) plus "Bearer"
+		# and the key as bare URL args, and the precheck silently degrades
+		# to the fail-open note below. shellcheck SC2086 flagged the var;
+		# the fix is this conditional split, not quoting it (quoting would
+		# pass an empty -H argument on the no-key path).
+		_inv_up=0
+		_inv_code=000
+		# -w '%{http_code}' prints 000 on connect-refused AND curl exits
+		# non-zero (-f on any 4xx/5xx), so the raw capture can be garbage —
+		# normalize: keep the LAST line, accept only 3 digits. Gating on 2xx
+		# makes 'inventory readable' mean 'answered with a body', so the
+		# dead-provider case below reports unreachable (honest) instead of
+		# 'does not offer model' (a lie — nothing answered). Live-caught
+		# 2026-10-21 against a refused-port stub.
+		_inv_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+			${EMBED_API_KEY:+-H "Authorization: Bearer ${EMBED_API_KEY}"} \
+			"${EMBED_PROBE_BASE}/models" 2>/dev/null | tail -n 1)
+		case "$_inv_code" in
+			2??) _inv_up=1 ;;
+			*)   _inv_code=${_inv_code:-000} ;;
+		esac
+		if [ "${EMBED_API_KEY:-}" ]; then
+			curl -fsS --max-time 5 \
+				-H "Authorization: Bearer ${EMBED_API_KEY}" \
+				"${EMBED_PROBE_BASE}/models" 2>/dev/null \
+				| grep -q "${EMBED_MODEL}" && _probe_ok=1
+		else
+			curl -fsS --max-time 5 \
+				"${EMBED_PROBE_BASE}/models" 2>/dev/null \
+				| grep -q "${EMBED_MODEL}" && _probe_ok=1
+		fi
+		if [ "$_probe_ok" -eq 0 ]; then
+			if [ "$_inv_up" -eq 1 ]; then
+				err "Embed provider at ${EMBED_URL} does not offer model '${EMBED_MODEL}'."
+				err "  fix: align EMBED_MODEL / EMBED_API_KEY (daharness.env) with the provider."
+				exit 1
+			fi
+			# Inventory unreachable → fail open: a proxy may 404 /models
+			# while /embeddings serves fine — the indexer's own embed call is
+			# the honest test. But auth-refused on a KEYPED provider means the
+			# credential is wrong: fail loud now, or the indexer dies later
+			# with the same answer buried three Python layers deep
+			# (live-caught 2026-10-21 vs a key-enforcing stub: wrong key AND
+			# missing key both failed open as a misleading "skipping" note).
+			case "$_inv_code" in
+			401|403)
+				if [ -n "${EMBED_API_KEY:-}" ]; then
+					err "Embed provider at ${EMBED_URL} refused the credential (HTTP ${_inv_code}) — EMBED_API_KEY is wrong or lacks access."
+					err "  fix: align EMBED_API_KEY (daharness.env) with the provider."
+					exit 1
+				fi
+				err "note: ${EMBED_PROBE_BASE}/models requires auth (HTTP ${_inv_code}) but EMBED_API_KEY is unset — skipping model precheck; the indexer's first embed call will confirm."
+				;;
+			000)
+				err "note: provider inventory at ${EMBED_PROBE_BASE}/models unreachable — skipping model precheck (the indexer will report the real connect error if the endpoint is unusable)."
+				;;
+			*)
+				err "note: provider inventory at ${EMBED_PROBE_BASE}/models answered HTTP ${_inv_code} without a usable body — skipping model precheck (the indexer will report a real failure if the endpoint is unusable)."
+				;;
+			esac
+		fi
+		;;
+esac
 exec python3 -m daharness.core "$@"
