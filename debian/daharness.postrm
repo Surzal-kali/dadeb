@@ -81,6 +81,10 @@ if [ "$1" = "purge" ]; then
         fi
     fi
     unset _PW _HOME _SHELL
+    echo "daharness: removed system uid while KEEPING /var/lib/daharness — files" \
+         "under the state root now carry a ghost uid; the next install's" \
+         "postinst re-chowns the tree to the re-minted identity (state is" \
+         "kept, not lost)."
 
     # 5. What survives ON PURPOSE (operator decisions). A maintainer script
     #    never scrubs user homes or silently deletes engagement work

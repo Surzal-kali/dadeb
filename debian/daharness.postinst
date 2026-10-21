@@ -31,6 +31,23 @@ fi
 chown daharness:daharness "$STATE_ROOT"
 chmod 2770 "$STATE_ROOT"
 
+# Ghost-uid reconcile (2026-10-21 VM round-trip): dpkg purge keeps
+# /var/lib/daharness (operator work product), but dpkg ALSO deletes the
+# system user — so a reinstall mints a NEW uid under the SAME state root.
+# The tree's deep dirs (chroma/, .cache/, .config/, ids.db, ...) keep the
+# OLD uid, which now maps to nothing. systemd's StateDirectory= only
+# re-asserts the TOP dir (daharness:daharness 2770) on every start, so the
+# wrong-owner subtree survives untouched: observed live — chroma opened its
+# persisted sqlite under ghost-uid ownership and panicked with "attempt to
+# write a readonly database" 31s after every spawn (pyo3 PanicException),
+# wait_for_chroma burned its full budget on the corpse, and the gateway
+# then died on the ToolRegistry handshake. find-chown the whole tree: a
+# reinstall is exactly the moment ghost uids exist; chowning operator
+# files back to the (re-minted) daharness identity is the healing the
+# kept-state doctrine requires. Best effort — never fail the install.
+find "$STATE_ROOT" -xdev \( ! -user daharness -o ! -group daharness \) \
+    -exec chown daharness:daharness {} + 2>/dev/null || true
+
 # Analysis drop lanes (r2 binaries/ + jadx apk/ with its decompiled/ workspaces):
 # operator content, so they live in the STATE root alongside scope/ — not the
 # read-only package tree the tools resolve their old code-root defaults from.

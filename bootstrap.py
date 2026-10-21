@@ -640,6 +640,12 @@ class FrameworkLoader:
         Path(path).mkdir(parents=True, exist_ok=True)
 
         log_fd, log_path = _open_child_log("chroma")
+        # wait_for_chroma's dead-process short-circuit + log pointer ride on
+        # these: the uid-scoped path (not a hard-coded /tmp/chroma.log — the
+        # actual file _open_child_log picked) and the Popen handle whose
+        # returncode flips when the child dies mid-wait.
+        self._chroma_log_path = log_path
+        self._chroma_process = None
         try:
             logger.info("[+] Starting ChromaDB backend on %s:%s "
                         "(persist: %s, log: %s)", host, port, path, log_path)
@@ -651,6 +657,7 @@ class FrameworkLoader:
                 stdout=log_fd,
                 stderr=asyncio.subprocess.STDOUT,
             )
+            self._chroma_process = process
             self.active_tasks.append(process)
             if hasattr(log_fd, "close"):
                 self._child_log_fds = getattr(self, "_child_log_fds", {})
@@ -671,6 +678,14 @@ class FrameworkLoader:
         secretary / gateway lookup lane is degraded, not a silent dial
         failure later. Callers after an unavailable backend must surface
         the same remediation the chroma doctor provider does.
+
+        Dead-sidecar short-circuit: if the launched backend PROCESS has
+        already exited (crashed on a poisoned persist dir, port stolen
+        then lost, ...), keep polling is a pure lie — the lane cannot
+        self-heal inside this timeout, so bail early and hand the caller
+        a concrete reason. Consumers must treat chroma-down as a degraded
+        lane, never a fatal one (the gateway's ToolRegistry constructor
+        dials chroma eagerly; its run() tolerates registry=None).
         """
         host = host or CHROMA_HOST
         port = port or CHROMA_PORT
@@ -681,6 +696,15 @@ class FrameworkLoader:
                          "chroma`.", timeout)
             return False
         import socket as _socket
+
+        def _spawned_process_dead() -> bool:
+            """True when start_chroma_daemon launched a process that already
+            died (its returncode is set). Reused-lanes (\"reused\") never
+            set _chroma_process, so a foreign backend dying mid-wait keeps
+            the full budget — we merely adopted it, not supervise it."""
+            proc = getattr(self, "_chroma_process", None)
+            return proc is not None and proc.returncode is not None
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -689,14 +713,24 @@ class FrameworkLoader:
                                 host, port)
                     return True
             except OSError:
+                if _spawned_process_dead():
+                    rc = self._chroma_process.returncode
+                    logger.error(
+                        "[!] ChromaDB backend process exited rc=%s before "
+                        "answering on %s:%s — aborting the readiness wait "
+                        "(a dead process cannot self-heal; the persist dir "
+                        "is the first suspect: %s). Sidecar log: %s. "
+                        "Check `daharness doctor chroma`.",
+                        rc, host, port, CHROMA_PATH, self._chroma_log_path,
+                    )
+                    return False
                 await asyncio.sleep(1)
         logger.error(
             "[!] ChromaDB backend did not answer on %s:%s within %ss — "
             "SEMANTIC SEARCH IS DOWN (secretary search_tools, gateway "
             "find_best_tool, indexing). The sidecar log is at %s. "
             "Check `daharness doctor chroma`; manual lane: daharness-chroma.",
-            host, port, timeout,
-            "/tmp/chroma.log",
+            host, port, timeout, self._chroma_log_path,
         )
         return False
 

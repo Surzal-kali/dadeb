@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import textwrap
+import time
 import types
 from pathlib import Path
 
@@ -24,7 +25,15 @@ WRAPPER = REPO_ROOT / "packaging" / "bin" / "daharness-chroma"
 
 
 def _shim(**attrs):
-    base = {"active_tasks": [], "runner": None}
+    # Defaults matching start_chroma_daemon's post-spawn state: a uid-scoped
+    # log path (the _open_child_log result) + no spawned process (reused
+    # lanes / not-yet-spawned) — wait_for_chroma reads both.
+    base = {
+        "active_tasks": [],
+        "runner": None,
+        "_chroma_log_path": "/tmp/chroma-test.log",
+        "_chroma_process": None,
+    }
     base.update(attrs)
     return types.SimpleNamespace(**base)
 
@@ -202,6 +211,25 @@ def test_wait_times_out_loudly():
 
     assert asyncio.run(drive()) is False
     assert not getattr(shim, "chroma_backend_absent", False)
+
+
+def test_wait_aborts_on_dead_spawn():
+    """Ghost-uid class (2026-10-21): the spawned sidecar crashed (rc set)
+    before answering — polling the silent port for the full budget is a
+    lie; the wait must bail immediately citing the process exit."""
+    port = _free_port()
+    dead = types.SimpleNamespace(returncode=1)
+    shim = _shim(_chroma_process=dead)
+
+    async def drive():
+        return await bootstrap.FrameworkLoader.wait_for_chroma(
+            shim, host="127.0.0.1", port=port, timeout=30)
+
+    t0 = time.monotonic()
+    assert asyncio.run(drive()) is False
+    # Bailed in well under the 30s budget (real budget test: the timed-out
+    # neighbor above proves the slow path still works when the process lives).
+    assert time.monotonic() - t0 < 5
 
 
 # ---------------------------------------------------------------- doctor

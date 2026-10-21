@@ -414,6 +414,35 @@ class APIGateway:
         # REST and MCP dispatch paths below.
         self.tool_budget = ToolBudget()
 
+        # Registry availability guard (degraded-mode lane). ``tool_registry``
+        # is None when chroma was unreachable at gateway boot; the manifest
+        # store IS the registry, so every tool op (exact-id included) needs
+        # it on this lane. Semantic lookup + dispatch return the same
+        # remediation the chroma doctor provider emits; /health, scratch
+        # (the durable store, no chroma) and memory (own embedded store)
+        # are registry-independent and stay fully live.
+        self.registry_down_reason = None
+        if tool_registry is None:
+            self.registry_down_reason = (
+                "chroma registry backend unreachable — semantic search and "
+                "tool dispatch are DOWN until it answers on "
+                "CHROMA_HOST:CHROMA_PORT. Remediation: `sudo daharness doctor "
+                "chroma` grades the lane; boot the stack (systemctl start "
+                "daharness — the daemon spawns chroma as a supervised "
+                "sidecar) or run daharness-chroma manually."
+            )
+
+    def _registry_unavailable(self, what: str):
+        """Uniform degraded-lane answer for every registry consumer.
+
+        ``what`` names the operation for the log line; the response shape
+        matches each caller's lane (HTTPException on REST, dict on MCP —
+        callers wrap). Never a bare 500: an operator mid-incident gets the
+        doctor's remediation, not a stack dump."""
+        assert self.registry_down_reason
+        logging.info("Refused %s: registry unavailable (chroma down)", what)
+        return self.registry_down_reason
+
         # --- MCP server + transport ------------------------------------------
         # One low-level MCP server exposes the framework's operations as MCP
         # tools; the streamable-HTTP session manager turns it into an ASGI
@@ -466,7 +495,15 @@ class APIGateway:
         # --- REST entrypoints (unchanged) ------------------------------------
         @self.app.get("/health")
         async def health():
-            return {"status": "ok"}
+            # Registry lane graded honestly: degraded (not "down") when
+            # chroma was unreachable at boot — the process answers, the
+            # semantic half doesn't. Consumers poll this instead of
+            # interpreting a 503 on /tools/*.
+            return {
+                "status": "degraded" if self.tool_registry is None else "ok",
+                "registry": ("down — " + self.registry_down_reason
+                             if self.tool_registry is None else "chroma-backed, ready"),
+            }
 
         @self.app.post("/tools/execute")
         async def execute_tool(req: ToolRequest):
@@ -476,12 +513,16 @@ class APIGateway:
             # 2. only intent supplied → legacy auto-resolve-and-execute:
             #    find_best_tool picks the single best match and fires it.
             if req.tool_id:
+                if self.tool_registry is None:
+                    raise HTTPException(503, self._registry_unavailable("exact tool dispatch"))
                 manifest = await self.tool_registry.find_tool_by_id(req.tool_id)
                 if not manifest:
                     raise HTTPException(404, f"No tool found with id '{req.tool_id}'")
             else:
                 if not req.intent:
                     raise HTTPException(400, "Either 'intent' or 'tool_id' is required")
+                if self.tool_registry is None:
+                    raise HTTPException(503, self._registry_unavailable("intent dispatch"))
                 manifest = await self.tool_registry.find_best_tool(req.intent)
                 if not manifest:
                     raise HTTPException(404, "No tool found for intent")
@@ -579,6 +620,8 @@ class APIGateway:
             """
             from daharness.registry import SECRETARY_MAX_TOP_K
             top_k = max(1, min(int(req.top_k or 5), SECRETARY_MAX_TOP_K))
+            if self.tool_registry is None:
+                raise HTTPException(503, self._registry_unavailable("tool search"))
             manifests = await self.tool_registry.find_tools(req.intent, top_k=top_k)
             if not manifests:
                 raise HTTPException(404, "No tools found for intent")
@@ -850,6 +893,8 @@ class APIGateway:
                         return self._error(f"{TOOL_SEARCH}: 'intent' is required")
                     from daharness.registry import SECRETARY_MAX_TOP_K
                     top_k = max(1, min(int(arguments.get("top_k") or 5), SECRETARY_MAX_TOP_K))
+                    if self.tool_registry is None:
+                        return self._error(self._registry_unavailable("mcp tools_search"))
                     manifests = await self.tool_registry.find_tools(intent, top_k=top_k)
                     if not manifests:
                         return self._error(f"No tools found for intent: {intent}")
@@ -860,6 +905,8 @@ class APIGateway:
                     return _mcp_text(payload)
 
                 if name == TOOL_EXECUTE:
+                    if self.tool_registry is None:
+                        return self._error(self._registry_unavailable("mcp tools_call"))
                     tool_id = arguments.get("tool_id")
                     intent = arguments.get("intent")
 
@@ -1104,16 +1151,40 @@ async def run(loader, host="127.0.0.1", port=5000):
     # fresh registry here would create a parallel set of class instances and
     # silently desync state (e.g. two MetasploitClient objects fighting over
     # the same console handle).
+    #
+    # Degraded-registry lane: chromadb's HttpClient handshakes IN ITS
+    # CONSTRUCTOR (get_user_identity), so a down backend raises before any
+    # lane can serve — observed live 2026-10-21 (ghost-uid persist dir killed
+    # the chroma sidecar, then "API server failed to start: Could not connect
+    # to a Chroma server" took the whole unit to failed). The framework's
+    # contract is degrade-honestly: exact tool_id dispatch, scratch, memory,
+    # and /health must stay callable past a dead registry — the same posture
+    # the Brain's in-process fallback lane already holds. Semantic lookup
+    # returns the doctor's remediation instead of a 500; the lane self-heals
+    # when the sidecar returns (recreated registry, same collection).
     tool_registry = loader.vector_registry
     if tool_registry is None:
         # Fallback: if the loader failed to init its registry, construct one
         # so the gateway still boots (tools won't work, but the API is up).
-        logger.warning("[gateway] loader.vector_registry is None; constructing a standalone registry")
-        embedding_function = OllamaEmbeddingFunction()
-        tool_registry = ToolRegistry(
-            embedding_model=embedding_function,
-            rpc_servers={"metasploit": os.getenv("MCP_ENDPOINT", "http://127.0.0.1:55553")},
-        )
+        try:
+            logger.warning("[gateway] loader.vector_registry is None; constructing a standalone registry")
+            embedding_function = OllamaEmbeddingFunction()
+            tool_registry = ToolRegistry(
+                embedding_model=embedding_function,
+                rpc_servers={"metasploit": os.getenv("MCP_ENDPOINT", "http://127.0.0.1:55553")},
+            )
+        except Exception as exc:
+            logger.error(
+                "[gateway] registry unavailable (chroma backend down on "
+                "%s:%s?) — booting in degraded mode: exact tool_id dispatch, "
+                "scratch, memory and /health stay up; semantic lookup "
+                "returns the chroma remediation until the backend returns "
+                "(daharness doctor chroma). Error: %s",
+                os.getenv("CHROMA_HOST", "localhost"),
+                os.getenv("CHROMA_PORT", "9000"),
+                exc,
+            )
+            tool_registry = None
 
     # Initialize MemoryService
     from memories import MemoryService

@@ -1,3 +1,36 @@
+daharness (0.1.0+pkg9) kali; urgency=high
+
+  * ghost-uid reinstall (deb defect, 2026-10-21 VM round trip): purge keeps
+    /var/lib/daharness (operator state — correct) AND deletes the system
+    user (correct), so a reinstall re-mints daharness under a NEW uid while
+    the kept tree's deep dirs still carry the old one. systemd's
+    StateDirectory= re-asserts only the TOP dir on every start, so the
+    wrong-owner subtree survived postinst's top-level-only reconcile —
+    observed: chroma's persisted sqlite under ghost-uid ownership opened
+    read-only, the rust frontend panicked 31s after every spawn
+    (pyo3 PanicException: "attempt to write a readonly database"),
+    wait_for_chroma burned its full 30s budget polling a corpse, then
+    api_gateway.run() died constructing ToolRegistry (chromadb's HttpClient
+    handshakes IN ITS CONSTRUCTOR) and the WHOLE unit went failed — one
+    stale subdirectory = no harness. Repairs, four lanes: postinst
+    reconciles the ENTIRE state tree (find|chown ghost files to the
+    re-minted identity — the healing the keep-state doctrine requires);
+    wait_for_chroma short-circuits when the spawned sidecar process has
+    already exited (dead processes cannot self-heal; cites the persist dir
+    + the ACTUAL uid-scoped log path — the hard-coded /tmp/chroma.log
+    pointer lied on every non-root lane) and stops blaming the wrong
+    artifact; api_gateway.run() degrades instead of dying — registry=None
+    boots the gateway so /health (now grading "degraded" vs "ok" with the
+    remediation inline), scratch, memory, and the budget lane stay up while
+    every registry consumer (REST + MCP search/execute) returns 503 with
+    the same remediation daharness doctor chroma emits, self-healing when
+    the backend returns; postrm's purge ledger now prints the ghost-uid
+    note so the kept-state/deleted-uid trade-off is visible at purge time.
+    Regression tests: dead-spawn short-circuit + timeout path under the new
+    shim attrs.
+
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Tue, 21 Oct 2026 11:55:00 -0600
+
 daharness (0.1.0+pkg8) kali; urgency=high
 
   * purge lane round two (deb defect): the pkg7 build/purge cycle on the VM
