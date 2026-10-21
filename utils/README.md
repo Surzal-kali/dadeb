@@ -15,8 +15,8 @@ The armed gate is a technical backstop the OPERATOR arms from the Tool REPL
 (see [`../README.md#tool-repl-tool_replpy`](../README.md#tool-repl-tool_replpy))
 — separate from `check_scope` (program-scope manifest checks in
 `auxiliaries/program_scope.py`), which only consults a loaded manifest.
-Arming/disarming is deliberately NOT exposed as an `@framework_tool`, so the
-secretary model has no way to toggle or bypass it. When disarmed (the
+Arming/disarming is deliberately NOT exposed as an `@framework_tool`, so no
+model lane has a way to toggle or bypass it. When disarmed (the
 default — lab mode) tools behave exactly as before.
 
     scope on <handle> [--platform P] [--no-strict]   # arm (refuses blind: needs a cached manifest)
@@ -114,8 +114,8 @@ A middleman between `execute_tool()` and the model's context window:
 `tool_id`/`arguments`, NOT a tool argument — it never reaches the tool
 body). Three modes:
 
-- **`digest`** (default for both the secretary agent and
-  `POST /tools/execute`) — stores the full result in scratch, returns a
+- **`digest`** (default for `POST /tools/execute` and MCP `tools/call`) —
+  stores the full result in scratch, returns a
   compact per-tool-family digest + a `scratch_ref` + the retrieval
   instruction. The model is taught the retrieval move every call. Results
   smaller than `SCRATCH_SMALL_RESULT_BYTES` (default 2 KiB — handles,
@@ -169,7 +169,8 @@ Long-running CLI tools (nmap, masscan, amass, ffuf, hydra, sqlmap) use the
 shared `launch_job` helper: it starts a detached `subprocess.Popen`, writes
 a JSON sidecar to disk (so polls survive a harness restart), starts a reaper
 thread for the wall-clock cap, and returns a `job_id` immediately — the
-secretary turn is not held open. `poll_job` reads the log, checks liveness,
+driving model's turn is not held open. `poll_job` reads the log, checks
+liveness,
 tails recent lines, and returns a structured `status: "running" | "done"`
 dict. Each tool pair follows the `run_*` / `*_status` / `*_cancel` shape.
 
@@ -191,7 +192,7 @@ The `finding` lifecycle tools over the SQLite store described in
 
 - **`report_finding`** — the terminal action for any tool chain. Mints a
   structured finding and stores a one-line memory pointer. Carries a
-  `next_hints` entry that nudges the secretary into the standing
+  `next_hints` entry that nudges the model into the standing
   credential-reuse sweep after any credential-bearing finding.
 - **`render_findings`** — renders all findings as a markdown report (filters
   by severity/asset/status). Writes a timestamped `.md` file to
@@ -249,16 +250,17 @@ Tools should detect and report this, not silently fail.
 ### Session Handles (`handles.py`)
 
 Typed session handles (`kind:session_id` strings) that tools declare via
-`@framework_tool(..., accepted_handle_kinds=[...])`. The secretary validates
+`@framework_tool(..., accepted_handle_kinds=[...])`. The preflight layer
+validates
 any `handle` argument's kind against the tool's accepted set before
 execution, preventing cross-namespace misuse (e.g. passing an SSH handle to
 an MSF tool).
 
 ### Per-Turn Tool Budget (`tool_budget.py`)
 
-A hard cap on tool executions per turn, enforced in the gateway so the lanes
-that bypass the secretary's approval gate (Open WebUI bridge, MCP, REST) get
-the symmetric brake (`SECRETARY_MAX_APPROVAL_ROUNDS` covers the secretary).
+A hard cap on tool executions per turn, enforced in the gateway so the
+conversational lanes (Open WebUI bridge, MCP, REST) get a brake beyond the
+model's own discipline.
 
 - **Counting**: every `/tools/execute` / MCP `tools/call` dispatch counts
   once. The request's `turn_key` (Open WebUI passes `chat_id:message_id`

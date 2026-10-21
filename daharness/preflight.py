@@ -19,9 +19,8 @@ The single choke point is ``ExecutorMixin.execute_tool`` (daharness/
 executor.py): REST, MCP, secretary and REPL all funnel through it.
 
 Dependency-free (stdlib only) so it can be imported anywhere without
-import cycles. Type coercion delegates (lazily, at call time) to
-``agent._coerce_arg_value`` so there is exactly one coercion
-implementation.
+import cycles. Type coercion (``_coerce_arg_value``) lives here, so
+there is exactly one coercion implementation shared by every lane.
 """
 
 import json
@@ -172,20 +171,125 @@ def _is_missing(val: Any) -> bool:
     return False
 
 
-def _coerce(name: str, value: Any, schema_type: str) -> Any:
-    """Delegate to agent._coerce_arg_value (single source of truth).
+_BOOL_TRUE = {"true", "yes", "1", "on"}
+_BOOL_FALSE = {"false", "no", "0", "off"}
 
-    Lazy import: agent -> registry -> executor -> preflight at module load,
-    so preflight must not import agent at module level. If the import ever
-    fails (partial install), degrade to passthrough and say so — never hang.
+
+def _coerce_arg_value(name: str, value: Any, schema_type: str) -> Any:
+    """Coerce a single argument value to match its declared schema type.
+
+    Returns the value unchanged if it's already the right type, or if the
+    schema type is unrecognized (so we don't break unknown tools). Raises
+    ValueError with a concrete message on unrecoverable type mismatches —
+    the caller turns that into a rejection envelope so the calling LLM can
+    self-correct.
     """
-    try:
-        from .agent import _coerce_arg_value
-
-        return _coerce_arg_value(name, value, schema_type or "")
-    except Exception as e:  # pragma: no cover - degraded install only
-        logger.warning("[PREFLIGHT] coercion delegate unavailable (%s); passing value through", e)
+    if value is None:
         return value
+    if not schema_type or schema_type == "null":
+        return value
+
+    if schema_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in _BOOL_TRUE:
+                return True
+            if v in _BOOL_FALSE:
+                return False
+            raise ValueError(
+                f"argument '{name}' must be a boolean (true/false), got string {value!r}"
+            )
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise ValueError(
+            f"argument '{name}' must be a boolean, got {type(value).__name__}: {value!r}"
+        )
+
+    if schema_type == "integer":
+        if isinstance(value, bool):
+            # bool is a subclass of int in Python; reject so True/False don't
+            # silently become 1/0 for a numeric param.
+            raise ValueError(f"argument '{name}' must be an integer, got boolean {value!r}")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                raise ValueError(
+                    f"argument '{name}' must be an integer, got string {value!r} that won't parse"
+                )
+        raise ValueError(
+            f"argument '{name}' must be an integer, got {type(value).__name__}: {value!r}"
+        )
+
+    if schema_type == "number":
+        if isinstance(value, bool):
+            raise ValueError(f"argument '{name}' must be a number, got boolean {value!r}")
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                raise ValueError(
+                    f"argument '{name}' must be a number, got string {value!r} that won't parse"
+                )
+        raise ValueError(f"argument '{name}' must be a number, got {type(value).__name__}")
+
+    if schema_type == "string":
+        if isinstance(value, str):
+            return value
+        # JSON-stringify dicts/lists the model sometimes emits for a "string"
+        # param that was supposed to be object/array (schema error upstream).
+        if isinstance(value, (dict, list, int, float, bool)):
+            return json.dumps(value, default=str)
+        return str(value)
+
+    if schema_type == "array":
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            v = value.strip()
+            # Try JSON first, then comma-split as a fallback for models that
+            # emit "a,b,c" when they should emit ["a","b","c"].
+            if v.startswith("["):
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+            if "," in v:
+                return [item.strip() for item in v.split(",") if item.strip()]
+            return [v]
+        raise ValueError(f"argument '{name}' must be an array, got {type(value).__name__}")
+
+    if schema_type == "object":
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            v = value.strip()
+            if not v:
+                raise ValueError(f"argument '{name}' must be an object, got empty string")
+            try:
+                parsed = json.loads(v)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"argument '{name}' must be an object/dict, got a string that "
+                    f"isn't valid JSON: {e}. Pass the dict directly, e.g. "
+                    f"\"{name}\": {{\"RHOSTS\": \"10.10.10.50\"}}, NOT as a JSON-encoded string."
+                )
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"argument '{name}' must be an object/dict, got JSON {type(parsed).__name__}: {parsed!r}"
+                )
+            return parsed
+        raise ValueError(f"argument '{name}' must be an object/dict, got {type(value).__name__}")
+
+    return value
 
 
 def validate_against_manifest(args: dict, manifest: Any) -> Optional[dict]:
@@ -246,7 +350,7 @@ def validate_against_manifest(args: dict, manifest: Any) -> Optional[dict]:
             continue
         schema_type = prop_def.get("type") or ""
         try:
-            args[name] = _coerce(name, args[name], schema_type)
+            args[name] = _coerce_arg_value(name, args[name], schema_type)
         except ValueError as ve:
             return rejection(
                 tool_id,

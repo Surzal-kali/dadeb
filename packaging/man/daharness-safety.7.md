@@ -12,16 +12,17 @@ daharness-safety — daharness safety model: scope gate, approvals, budgets, ret
 
 Traffic-sending tools resolve every target through an operator-armed scope
 state. Arming happens ONLY at the operator REPL (`scope on <handle>`) and is
-deliberately NOT exposed as an LLM-callable tool, so the secretary can never
+deliberately NOT exposed as an LLM-callable tool, so no model lane can
 toggle it. State persists across processes (the REPL can re-arm a running
 Brain). Blocked targets raise a scope error instead of transmitting.
 
 ## Human-in-the-loop approval
 
-Tool execution from the secretary is gated by an approval loop: the run
-pauses until the confirmer approves the exact manifest + arguments, capped by
-SECRETARY_MAX_APPROVAL_ROUNDS. Tool calls through the API gateway or MCP
-bypass this lane by design — those lanes carry the per-turn budget instead.
+There is no in-process approval loop: the secretary chat lane (pydantic-ai)
+was removed 2026-10-20. Tool calls through the API gateway or MCP execute
+under their own gates — the operator-armed scope gate, the per-turn budget
+and the ROUTER_MAX_DISTANCE abstention. An integrating harness that wants
+sign-off adds its own approval in front of the gateway.
 
 ## Per-turn tool budget
 
@@ -47,7 +48,8 @@ together logs a boot-time error rather than serving silently.
 
 ## Local-only LLM policy
 
-The secretary runs on a locally hosted model (Ollama, loopback/LAN) — never a
+The models driving the lanes (Open WebUI conversation model, embedding
+model) run on a locally hosted endpoint (Ollama, loopback/LAN) — never a
 cloud LLM API. Tool outputs from live targets (credentials, tokens, internal
 IPs) must not egress to third parties.
 

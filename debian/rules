@@ -17,10 +17,9 @@ override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness
 	# Vendored-wheel lane (decided 2026-10-20): chromadb ships IN the deb —
 	# the daemon boot path imports it at top level (daharness/registry.py);
-	# uncaught ImportError = systemctl exit 1. pydantic-ai-slim is NOT
-	# vendored: it is chat-lane-only machinery (imported lazily on first
-	# agent use, daharness/agent.py:_chat_runtime) and no packaged lane
-	# boots the chat loop.
+	# uncaught ImportError = systemctl exit 1. pydantic-ai is not vendored
+	# because it is not a dependency at all — the chat lane
+	# (daharness/agent.py) was removed 2026-10-20.
 	# Lives HERE, not in dh_auto_build: dh's implied sequence runs dh_prep
 	# BETWEEN the build and install overrides, and dh_prep rm -rf's
 	# debian/daharness wholesale — vendor wheels installed in the build

@@ -48,9 +48,6 @@ Description: headless orchestration harness for authorized security research
  documented in daharness-safety(7).
  .
  NOTE: chromadb ships vendored in-package (ledger layer-2 decision);
- pydantic-ai-slim is intentionally NOT vendored — it is chat-lane-only
- machinery, imported lazily on first agent use, and the packaged headless
- lanes never boot the chat loop (install it manually for the REPL chat lane);
  python3-mcp
  and python3-pymetasploit3 ride the apt lane pending snapshot-compat
  probes. The Jupyter closure (python3-ipykernel + python3-ipython +

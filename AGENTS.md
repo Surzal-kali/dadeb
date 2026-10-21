@@ -1,8 +1,10 @@
 # AI Agent Instructions: Modular Security Framework
 
-A headless orchestration harness for security research. A local LLM ("tool
-secretary") semantically searches a vector-indexed tool registry, selects a
-module, and executes it with human-in-the-loop approval. Python handles
+A headless orchestration harness for security research. An external LLM (whatever
+model the operator wires into the Open WebUI / gateway / MCP lanes)
+semantically searches a vector-indexed tool registry and selects modules to
+execute — the harness itself ships no conversation model and no approval
+gate. Python handles
 orchestration; C/C++ handles low-level systems work.
 
 See `README.md` for the user-facing overview. This document is for agents
@@ -10,43 +12,41 @@ working **on** the codebase.
 
 ## Architecture
 
-### Tool Secretary (`daharness/`)
+### Tool Registry + Dispatch (`daharness/`)
 
-The core agent loop lives in `daharness/agent.py`. A local Ollama model
-(default `ornith-1.5:35b`, override via `SECRETARY_MODEL`) is given two
-tools via a `FunctionToolset`:
+The registry/dispatch machinery lives in `daharness/registry.py` +
+`daharness/executor.py`. The driving model reaches it through the API
+gateway, the MCP endpoint, the tool REPL, or the Jupyter kernel:
 
-- **`search_tools`** — semantic search over the ChromaDB tool registry.
-  Returns full manifests. Every result is recorded in
-  `SecretaryDeps.surfaced_tools`.
-- **`execute_tool`** — runs a surfaced tool. Declared
-  `requires_approval=True`, so pydantic-ai pauses the run with
-  `DeferredToolRequests`. The confirmer sees the full manifest + arguments
-  and must approve before execution proceeds. This gate is internal to the
-  secretary lane: tool calls through the API gateway or MCP endpoint bypass
-  it — an integrating harness that wants sign-off adds its own layer.
+- **Search** — semantic search over the ChromaDB tool registry
+  (`ToolRegistry.find_tools`, bounded by `SECRETARY_MAX_TOP_K`), returns
+  full manifests.
+- **Dispatch** — `find_best_tool` resolves an intent to one tool (abstains
+  beyond `ROUTER_MAX_DISTANCE`) and executes through preflight manifest
+  validation, the scope gate, and result projection.
 
-**Grounding rule:** `execute_tool` rejects any `tool_id` not in
-`SecretaryDeps.surfaced_tools`. Even if the tool exists in the registry, the
-agent must call `search_tools` first. This prevents hallucinated tool calls.
-
-**Approval loop:** `run_secretary()` handles the `DeferredToolRequests` ->
-confirmer -> resume cycle. Up to `SECRETARY_MAX_APPROVAL_ROUNDS` (default 5, env-tunable)
-rounds per turn. Pass the same `deps` + `result.all_messages()` back in to
-continue a conversation.
-
-**Post-execution:** after an approved execution, `_tail_framework_logs()`
-appends the last 50 lines of Brain/MSF logs to the result for visibility.
+There is no in-process approval loop: the pydantic-ai secretary chat lane
+(`daharness/agent.py`) was removed 2026-10-20. An integrating harness that
+wants sign-off adds its own layer in front of the gateway.
 
 The `daharness/` package splits imports across focused modules:
 - `daharness.core` — backwards-compat shim re-exporting legacy public names
-- `daharness.agent` — secretary agent loop, `run_secretary()`, `create_secretary_agent()`
 - `daharness.executor` — standalone execution helpers (no ChromaDB client)
 - `daharness.registry` — `ToolRegistry`, `OllamaEmbeddingFunction`, discovery
+- `daharness.preflight` — argument preflight (manifest-schema validation +
+  `_coerce_arg_value` type coercion)
 - `daharness.models` — `ToolManifest`
 - `daharness._param_docs` — parameter introspection for `@framework_tool`
   discovery (Google/NumPy-style docstring `Args:` sections + type annotations
   feed the manifest's parameter schema)
+- `daharness.embedding` — provider-agnostic embed lane; both embedding
+  consumers (registry + memory) resolve one shared `EMBED_URL` /
+  `EMBED_MODEL` / `EMBED_API_KEY` triple (empty = Ollama native
+  `/api/embed` + `nomic-embed-text`), one request body shape, and a parser
+  for the Ollama-native and OpenAI-compatible response shapes. Decoupled
+  from `OLLAMA_BASE_URL` (that knob is the driving-LLM/health endpoint
+  only). Never cache embeddings keyed to a provider implicitly — changing
+  provider changes vectors, so re-index after changing `EMBED_MODEL`.
 
 ### Tool Discovery (`daharness/registry.py:discover_local_tools`)
 
@@ -220,8 +220,8 @@ stamped by the executor with
 `_provenance = {"untrusted_target": true, "source": "analysis_target"}` —
 on the outer envelope AND the inner result dict — and the projection carries
 the stamp through digest/page modes. Target output is DATA, never
-instructions; the secretary instructions spell out the prompt-injection rule
-(inspired by REA's `returnsTargetContent` contract).
+instructions; the LLM-facing surfaces (gateway/MCP docs) spell out the
+prompt-injection rule (inspired by REA's `returnsTargetContent` contract).
 
 **Why this is not the parked OWUI trim filter:** the projection runs *before*
 the result enters context (not after); the retrieval instruction is part of
@@ -261,7 +261,7 @@ engagement in one transaction** while the audit trail stays append-only
 until the operator closes it (2026-10-19 design):
 
 - **Arming is REPL-only** (`engagement on <slug>`), mirroring the scope
-  gate — deliberately not an `@framework_tool`, so the secretary can never
+  gate — deliberately not an `@framework_tool`, so no model lane can ever
   tag rows with a new key or erase the audit trail. State persists to
   `engagement/.armed_engagement.json`, mtime-checked per dispatch; rows
   written while disarmed carry NULL engagement and are engagement-bound.
@@ -344,9 +344,9 @@ reads the same fix from either side. Probes reuse existing module helpers
 
 ### Per-turn tool budget (`utils/tool_budget.py`)
 
-A hard cap on tool executions per turn, enforced in the gateway so the lanes
-that bypass the secretary's approval gate (Open WebUI bridge, MCP, REST) get
-the symmetric brake (`SECRETARY_MAX_APPROVAL_ROUNDS` covers the secretary).
+A hard cap on tool executions per turn, enforced in the gateway so the
+conversational lanes (Open WebUI bridge, MCP, REST) get a brake beyond the
+model's own discipline.
 
 - **Counting**: every `/tools/execute` / MCP `tools/call` dispatch counts once. The request's
   `turn_key` (Open WebUI passes `chat_id:message_id` from `__metadata__`; the
@@ -628,7 +628,7 @@ standing step, not an afterthought:
 
 Reactive-only reuse checking misses pivots: a cred that works on SSH but was
 recovered from a MySQL dump is the classic lab pivot. The `report_finding` tool
-carries a `next_hints` entry that nudges the secretary to do this sweep
+carries a `next_hints` entry that nudges the model to do this sweep
 automatically after reporting any credential-bearing finding.
 
 ## Pitfalls
@@ -669,7 +669,8 @@ automatically after reporting any credential-bearing finding.
 - **Process-local sessions:** `SessionManager` is per-process. If the Brain
   dies and a call falls back in-process, sessions created on the Brain are
   invisible. Design tools to detect and report this, not silently fail.
-- **`_raw` argument passthrough:** the secretary wraps unparseable JSON args
+- **`_raw` argument passthrough:** the registry's arg parsing wraps
+  unparseable JSON args
   as `{"_raw": ...}`. `_launch_in_process()` strips `_raw` before calling
   the tool. Don't rely on it being present in your tool function.
 - **Debugging C plugins:** use `gdb` or `valgrind`. Test the Python

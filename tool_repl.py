@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tool REPL: standalone harness for testing framework tools independently.
 
-Bypasses the secretary LLM entirely — you pick a tool, supply arguments, and
+Bypasses the LLM entirely — you pick a tool, supply arguments, and
 see the raw result.  This isolates tool execution problems from model reasoning
 problems so you can tell whether a tool actually works or if the model is just
 calling it wrong.

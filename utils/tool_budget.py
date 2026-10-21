@@ -1,11 +1,8 @@
 """Per-turn tool budget — a hard brake on runaway tool-call loops.
 
 Enforced in the API gateway (REST ``/tools/execute`` and the MCP
-``tools/call`` path) so every lane that bypasses the secretary's approval
-gate by design (Open WebUI bridge, MCP clients, REST integrations) shares
-one counter per ``agent_id`` + turn. The secretary lane has its own cap
-(``SECRETARY_MAX_APPROVAL_ROUNDS``); this is the symmetric brake for the
-other lanes.
+``tools/call`` path) so every conversational lane (Open WebUI bridge, MCP
+clients, REST integrations) shares one counter per ``agent_id`` + turn.
 
 Turn semantics:
 - ``turn_key`` supplied (e.g. Open WebUI ``chat_id:message_id``): each

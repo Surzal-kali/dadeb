@@ -58,7 +58,6 @@ dependencies = [
 web = ["playwright==1.63.0", "curl_cffi==0.16.3"]  # rendered-DOM recon sidecar (needs: playwright install chromium) + web-session TLS/header impersonation (curl-impersonate)
 jupyter = ["ipython==9.7.0", "ipykernel==6.29.5", "jupyter_client==7.4.9"]  # notebook kernel lane
 db = ["psycopg[binary]==3.2.12", "pg8000>=1.13"]  # engagement/journal lane: Postgres writer roles, engagement.purge, GIN what_touched + PG driver for db_client's postgres lane (both degrade honestly without it)
-chat = ["pydantic-ai-slim==2.35.0"]  # secretary chat lane only (REPL/dev): imported lazily on first agent use — the headless daemon/gateway boot never needs it
 dev = [
     "pytest>=8.0",
     "black==26.5.1",

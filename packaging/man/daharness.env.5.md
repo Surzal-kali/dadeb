@@ -66,12 +66,27 @@ WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
 # KEY POLICY KNOBS
 
 **EMBED_MODEL**
-: Ollama embedding model shared by the tool registry and memory lanes
-  (default nomic-embed-text). Change it, then re-index: `python -m
-  daharness.core`.
+: Embedding model id sent to the embed endpoint, shared by the tool
+  registry and memory lanes (default nomic-embed-text). Change it, then
+  re-index: `python -m daharness.core`.
+
+**EMBED_URL**
+: Full POST target of the embeddings endpoint — provider-agnostic
+  (default: `http://localhost:11434/api/embed`, the shipped Ollama-native
+  lab stack). Anything that speaks the Ollama-native or OpenAI-compatible
+  embeddings wire shape works; provider recipes live in `.env.example`.
+  The endpoint receives everything you embed (memory text carries finding
+  material) — loopback or LAN only for live engagements.
+
+**EMBED_API_KEY**
+: Optional. When set, every embeddings request carries an auth header
+  with `EMBED_API_KEY` as the key — covers OpenAI/Together/Mistral/Voyage/
+  Jina-style keyed providers. Shipped empty.
 
 **OLLAMA_BASE_URL**
-: Ollama endpoint — loopback or LAN only, never a cloud LLM API.
+: Driving-LLM endpoint (health probe + client reference) — loopback or LAN
+  only, never a cloud LLM API. No longer used for embeddings (EMBED_URL
+  took over; the two lanes are decoupled).
 
 **GATEWAY_API_KEY**
 : Arms X-API-Key/Bearer auth over the REST + /mcp surface. Shipped empty;

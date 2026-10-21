@@ -143,11 +143,29 @@ def framework_health() -> Dict[str, Any]:
         brain_entry["lane_blocked"] = True
     subsystems["brain_sidecar"] = brain_entry
 
-    # Ollama
+    # Ollama (LLM). Embeddings live on their own EMBED_URL lane
+    # (daharness/embedding.py) — flagged separately when it points
+    # somewhere other than the Ollama host itself.
     ollama_up = _check_tcp(ollama_host, ollama_port)
+    embed_url = os.getenv("EMBED_URL", "").strip()
+    embed_note = ""
+    if embed_url:
+        try:
+            from urllib.parse import urlparse
+            _eparsed = urlparse(embed_url)
+            _eport = _eparsed.port or (443 if _eparsed.scheme == "https" else 80)
+            embed_target = f"{_eparsed.hostname or '?'}:{_eport}"
+        except Exception:
+            embed_target = embed_url
+        if embed_target != f"{ollama_host}:{ollama_port}":
+            embed_note = f"; embeddings -> {embed_target} (EMBED_URL)"
     subsystems["ollama"] = {
         "up": ollama_up,
-        "detail": f"{ollama_host}:{ollama_port} (LLM + embedding)" if ollama_up else f"unreachable at {ollama_host}:{ollama_port}",
+        "detail": (
+            f"{ollama_host}:{ollama_port} (LLM + embedding){embed_note}"
+            if ollama_up
+            else f"unreachable at {ollama_host}:{ollama_port}{embed_note}"
+        ),
     }
 
     # ChromaDB
@@ -492,7 +510,7 @@ def _check_chroma() -> Dict[str, Any]:
     the old daharness-chroma.service); the compose container owns this
     port on the dockered lane. ONE probe question: does the store answer
     on CHROMA_HOST:CHROMA_PORT (the same knobs registry.py dials)? If the
-    lane is silent, the secretary's search_tools / the gateway's
+    lane is silent, the registry's semantic search / the gateway's
     find_best_tool / indexing are ALL down — the remediation names the
     sidecar path first, the manual dev lane second.
     """

@@ -2,8 +2,8 @@
 
 masscan is an asynchronous (stateless) TCP/UDP port scanner that can sweep
 entire /8 networks at millions of packets/sec.  Like nmap/ffuf it can run
-long enough to fight the secretary turn timeout, so it uses the shared
-:mod:`utils.background_job` helper: ``run_masscan`` launches a detached
+long enough to hold a dispatch open past the Brain timeout, so it uses the
+shared :mod:`utils.background_job` helper: ``run_masscan`` launches a detached
 subprocess and returns a ``job_id`` immediately; ``masscan_status`` polls
 until ``status: "done"``; ``masscan_cancel`` terminates early.
 

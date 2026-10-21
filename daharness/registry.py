@@ -2,9 +2,8 @@
 
 Owns the configuration constants, the Ollama embedding function and the
 :class:`ToolRegistry` — the ChromaDB-backed inventory of tool manifests plus
-discovery/embedding/search. Execution behaviour is mixed in from
-:mod:`daharness.executor` and the secretary agent loop from
-:mod:`daharness.agent`, so this module stays focused on the registry itself.
+discovery/embedding/search. Execution behaviour is mixed in from :mod:`daharness.executor`, so this
+module stays focused on the registry itself.
 """
 
 import ast
@@ -17,7 +16,7 @@ import sys
 import threading
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import chromadb
 import httpx
@@ -27,13 +26,17 @@ from pydantic import ValidationError
 from constants import TransportType, resolve_framework_root
 
 from ._param_docs import parse_param_docs, annotation_to_schema_type, annotation_to_schema_extras
+from .embedding import (
+    auth_headers,
+    embed_body,
+    embed_model,
+    embed_request,
+    parse_embed_response,
+    resolve_embed_url,
+)
 from .tool_tags import resolve_tags, tagged_doc
 from .models import ToolManifest
 from .executor import ExecutorMixin
-from .agent import (
-    SecretaryMixin,
-    _cli_confirmer,
-)
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -44,14 +47,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-# Ollama endpoint: defaults to the local Ollama daemon. Both forms are
+# Ollama/LLM endpoint: defaults to the local Ollama daemon. Both forms are
 # accepted and normalized here: "http://host:11434" (native) and
-# "http://host:11434/v1" (OpenAI-compatible). The normalized "/v1" value is
-# what pydantic-ai's OllamaProvider requires (it posts <base>/chat/completions)
-# while the API-path consumers (embeddings, memory, REPL ghost text) strip the
-# "/v1" themselves. Set OLLAMA_BASE_URL in .env to override (loopback or LAN
+# "http://host:11434/v1" (OpenAI-compatible). The normalized "/v1" form is
+# the canonical value; consumers strip "/v1" themselves. This is the
+# driving-LLM/health knob only — embeddings resolve their own EMBED_URL
+# (daharness/embedding.py) and no longer derive from it.
+# Set OLLAMA_BASE_URL in .env to override (loopback or LAN
 # only — see README Legal Addendum; cloud LLM APIs leak target data).
-# Re-index after changing it.
 _OLLAMA_BASE_RAW = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip(
     "/"
 )
@@ -59,7 +62,7 @@ if not _OLLAMA_BASE_RAW.endswith("/v1"):
     OLLAMA_BASE_URL = _OLLAMA_BASE_RAW + "/v1"
     logger.info(
         "OLLAMA_BASE_URL was set without the /v1 suffix (%s) — normalized to %s "
-        "(the OpenAI-compatible endpoint pydantic-ai requires).",
+        "(the OpenAI-compatible endpoint form).",
         _OLLAMA_BASE_RAW,
         OLLAMA_BASE_URL,
     )
@@ -90,61 +93,59 @@ ALLOWED_TOOL_ROOTS = [
 ]
 
 # Semantic top_k ceiling — bound to the API/MCP search lanes (find_tools
-# clamps per-request top_k with this), NOT the secretary chat loop.
+# clamps per-request top_k with this).
 SECRETARY_MAX_TOP_K = 10
 # Router abstention: with no human in the loop, the API dispatch path
 # refuses to run anything whose semantic match is not this close.
 # Distance is chromadb L2 on nomic-embed-text normalized vectors
 # (0 = identical). 1.1 calibrated live: good matches ~0.3-0.9.
 ROUTER_MAX_DISTANCE = float(os.getenv("ROUTER_MAX_DISTANCE", "1.1"))
-# Turn wall-clock cap — MCP/semantic dispatch semantics.
-SECRETARY_TURN_TIMEOUT = float(os.getenv("SECRETARY_TURN_TIMEOUT", "600"))  # 10 min
-# NOTE: SECRETARY_MODEL and SECRETARY_MAX_APPROVAL_ROUNDS used to be module
-# knobs here and were removed — daemon-mode bootstrap cannot run the chat
-# loop at all, so there is no secretary model to read from env. The chat
-# lanes (dev REPL) carry their own in-code defaults where they still run.
-_SECRETARY_MODEL_DEFAULT = "ornith-1.5:35b"
+# The chat lane's own knobs (SECRETARY_MODEL, SECRETARY_MAX_APPROVAL_ROUNDS,
+# SECRETARY_MAX_SEARCH_CALLS) died with the secretary chat lane, removed
+# 2026-10-20. Nothing reads a chat model here.
 
 
-# --- Ollama Embedding Function ---
-# Embed model knob — the bring-your-own-model contract ($EMBED_MODEL in .env),
-# same convention as utils/memory_tools.py's _EMBED_MODEL. Default stays
-# nomic-embed-text; re-index (python -m daharness.core) after a change.
-_EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+# --- Embedding Function (provider-agnostic HTTP lane) ---
+# One knob set (EMBED_URL / EMBED_MODEL / EMBED_API_KEY — see
+# daharness/embedding.py), one body shape ("model" + "input"), two parse
+# shapes (Ollama native + OpenAI-compat). utils/memory_tools.py shares the
+# same helpers, so the registry and memory lanes can't drift. The class
+# name stays OllamaEmbeddingFunction for call-site/export compatibility.
 
 
 class OllamaEmbeddingFunction(embedding_functions.EmbeddingFunction):
-    def __init__(
-        self, model_name: str = _EMBED_MODEL, base_url: str = OLLAMA_BASE_URL
-    ):
-        self.model_name = model_name
-        self.base_url = base_url.rstrip("/v1")
-        self.embed_url = f"{self.base_url}/api/embed"
+    """HTTP embeddings client for the tool registry.
+
+    Posts ``{"model", "input"}`` to ``EMBED_URL`` (default: the shipped
+    Ollama-native lab endpoint) and parses any common embeddings wire
+    shape — provider-agnostic. Knobs, parsing and the egress caveat live
+    in :mod:`daharness.embedding`.
+    """
+
+    def __init__(self, model_name: str = "", embed_url: str = ""):
+        self.model_name = model_name or embed_model()
+        self.embed_url = embed_url.rstrip("/") if embed_url else resolve_embed_url()
 
     async def __call__(self, texts: List[str]) -> List[List[float]]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 self.embed_url,
-                json={"model": self.model_name, "input": texts},
+                headers=auth_headers(),
+                json=embed_body(list(texts), self.model_name),
             )
             response.raise_for_status()
-            payload = response.json()
-            if "embeddings" in payload:
-                return payload["embeddings"]
-            raise ValueError(f"Unexpected Ollama embedding response: {payload}")
+            return parse_embed_response(response.json())
 
     def name(self) -> str:
         return self.model_name
 
 
 # --- Tool Registry ---
-class ToolRegistry(ExecutorMixin, SecretaryMixin):
+class ToolRegistry(ExecutorMixin):
     def __init__(
         self,
         embedding_model: OllamaEmbeddingFunction,
         rpc_servers: Optional[Dict[str, str]] = None,
-        secretary_model: Optional[str] = None,
-        confirmer: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
         self.embedding_model = embedding_model
         self.rpc_registry = rpc_servers or {}
@@ -154,23 +155,13 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
             metadata={"hnsw:space": "cosine"},
             embedding_function=self.embedding_model,
         )
-        self.secretary_model = secretary_model or _SECRETARY_MODEL_DEFAULT
-        # Human-in-the-loop gate for executions. Sync or async callables that
-        # take a full-metadata summary dict and return a truthy value to approve.
-        self.confirmer = confirmer or _cli_confirmer
-        # Headless lanes (gateway/MCP/daemon boot) never run the chat loop;
-        # an eager agent build made pydantic-ai a BOOT dependency of every
-        # ToolRegistry construction. Built on first use instead (the
-        # SecretaryMixin.secretary property); assign a test double to
-        # replace it.
-        self._secretary: Optional[Any] = None
         # Lazily-created class instances for in-process launches of
         # @framework_tool methods (e.g. MetasploitClient, SMBScanner).
         # One instance per class per registry, so stateful clients keep
         # their process/handles across calls.
         self._tool_instances: Dict[str, Any] = {}
         # Brain session-id mapping. The Brain wire protocol carries session_id
-        # as a C int; non-numeric caller ids (agent_id / secretary session) are
+        # as a C int; non-numeric caller ids (agent_id) are
         # mapped to stable unique ints here so concurrent agents get isolated
         # Brain sessions (and thus isolated stateful tool instances on the
         # sidecar) instead of all sharing session 0. ``"0"`` is the default
@@ -210,12 +201,10 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
         return candidate
 
     async def _embed_text(self, text: str):
-        """Use Ollama's native embedding endpoint for $EMBED_MODEL (default nomic-embed-text).
+        """Bare HTTP fallback: the shared embed lane (daharness/embedding.py).
 
-        pydantic_ai's OllamaModel is a chat model wrapper, not a direct embedding client.
-        The embedding model must be called via the Ollama API endpoint.
-
-        Derives the embed endpoint from OLLAMA_BASE_URL by stripping /v1 suffix.
+        Used when ``embedding_model`` exposes no embed_query/embed methods.
+        Same knobs and wire shapes as the embedding function above.
         """
         if hasattr(self.embedding_model, "embed_query"):
             implementation = getattr(type(self.embedding_model), "__dict__", {}).get(
@@ -245,37 +234,14 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
             embedding = embed(text)
             return await embedding if inspect.isawaitable(embedding) else embedding
 
-        # Strip /v1 suffix from OLLAMA_BASE_URL to get the base endpoint
-        embed_base = OLLAMA_BASE_URL.rstrip("/")
-        if embed_base.endswith("/v1"):
-            embed_base = embed_base[:-3]
-
-        embed_url = f"{embed_base}/api/embed"
+        url, headers, body = embed_request([text])
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                embed_url,
-                json={
-                    "model": _EMBED_MODEL,
-                    "input": text,
-                },
-            )
+            response = await client.post(url, headers=headers, json=body)
             response.raise_for_status()
             payload = response.json() or {}
 
-        if "embedding" in payload:
-            return payload["embedding"]
-        if "embeddings" in payload:
-            embedding = payload["embeddings"]
-            if (
-                isinstance(embedding, list)
-                and embedding
-                and isinstance(embedding[0], list)
-            ):
-                return embedding[0]
-            return embedding
-
-        raise ValueError(f"Unexpected Ollama embedding response: {payload}")
+        return parse_embed_response(payload)[0]
 
     async def register_tool(self, manifest: Union[ToolManifest, List[ToolManifest]]):
         manifests = manifest if isinstance(manifest, list) else [manifest]
@@ -855,8 +821,8 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
         whatever sibling happens to win the cosine tie (verified live:
         'framework health status check' ran a ZAP spider-status read).
         Returns None on no-match-or-too-far, which the gateway already
-        handles as a 404. The secretary path (find_tools) is untouched:
-        she sees fuzzy candidates plus a human confirmer, so she judges.
+        handles as a 404. The listing path (find_tools) still returns fuzzy
+        candidates without the abstention gate — the calling client judges.
         """
         manifests = await self.find_tools(user_intent, top_k=top_k)
         if not manifests:
@@ -875,13 +841,13 @@ class ToolRegistry(ExecutorMixin, SecretaryMixin):
         return best
 
     def describe_manifest(self, manifest: ToolManifest, lean: bool = False) -> Dict[str, Any]:
-        """Full (non-sanitized) view of a manifest for the secretary and the confirmer.
+        """Full (non-sanitized) view of a manifest for LLM clients and the API path.
 
-        When lean=True, returns only the fields the secretary model needs to
+        When lean=True, returns only the fields the model needs to
         choose a tool and construct arguments (tool_id, capability, parameters).
         The full fields (description, implementation_path, transport,
-        internal_semantics) are only needed by the human confirmer and the
-        registry's execution dispatch — not by the model's reasoning loop.
+        internal_semantics) are only needed by the registry's execution
+        dispatch — not by the model's reasoning.
         Trimming these saves ~70 tokens per manifest, which compounds across
         multi-turn conversations with multiple search calls.
         """

@@ -486,10 +486,10 @@ class ExecutorMixin:
                 return {"error": error, "status": "Failed"}
 
             args = dict(arguments or {})
-            # The secretary wraps unparseable argument payloads as {"_raw": ...}
-            # and passes them through; leaving it in place makes every tool die
-            # with "unexpected keyword argument '_raw'" instead of a clear
-            # missing-argument error.
+            # The registry's arg parsing wraps unparseable payloads as
+            # {"_raw": ...} and passes them through; leaving it in place makes
+            # every tool die with "unexpected keyword argument '_raw'" instead
+            # of a clear missing-argument error.
             args.pop("_raw", None)
             # Cap in-process tools with the same BRAIN_DISPATCH_TIMEOUT the
             # out-of-process Brain path already enforces. Without this a

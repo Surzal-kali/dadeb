@@ -21,7 +21,7 @@ background-job pattern (see
 | `cors_probe.py` | CORS posture + security-header audit | attacker-controlled `Origin` reflection + `null`-origin checks via the per-hop scope-gated HTTP client |
 | `db_client.py` | direct-database connect + enumerate | MySQL (pymysql) / PostgreSQL (pg8000) with KNOWN credentials — deliberately not the injection lane (that's sqlmap) |
 | `dns_lookup.py` | forward/reverse DNS resolution | feeds the scope workflow (IP blessing); not scope-gated — it never touches the target |
-| `framework_status.py` | `framework_health` + `framework_doctor` | health infra up/down; doctor = per-provider can-I-run-X probes (r2/jadx/masscan/msf/scanners/secretary model/snapshot cache) with remediation strings |
+| `framework_status.py` | `framework_health` + `framework_doctor` | health infra up/down; doctor = per-provider can-I-run-X probes (r2/jadx/masscan/msf/scanners/snapshot cache/postgres) with remediation strings |
 | `ftp_recon.py` | FTP/SFTP recon and transfer | banner, anonymous check, listings, authenticated get/put |
 | `impacket_suite.py` | Windows post-exploitation | SMB enum/read, secretsdump, psexec/wmiexec/atexec |
 | `jadx.py` | APK/dex/jar decompilation | `apk/` drop folder, cached workspaces, grep/read over decompiled sources |
@@ -104,7 +104,7 @@ allowed from anywhere so pages render.
 
 Pulls a program's structured scope, scope exclusions, weakness list, and
 policy text from the HackerOne Hacker API v1 (and Intigriti's API) and turns
-them into a machine-readable manifest the secretary and scan tools consult.
+them into a machine-readable manifest the model lanes and scan tools consult.
 Caches manifests to `scope/<handle>.json`.
 
 Framework tools:

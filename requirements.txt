@@ -261,9 +261,6 @@ pycrdt-websocket==0.16.5
 pycrdt-store==0.1.5
 pycryptodomex==3.23.0
 pydantic==2.13.4
-pydantic-ai-slim==2.35.0
-pydantic-evals==2.35.0
-pydantic-graph==2.35.0
 pydantic-settings==2.15.0
 pydantic_core==2.46.4
 pydocstyle==6.3.0

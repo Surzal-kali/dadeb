@@ -61,7 +61,7 @@ Approval dialogs (operator config concern, not ours)
 ----------------------------------------------------
 The BApp defaults to popping a Swing dialog for every HTTP request and
 history read (``requireHttpRequestApproval=true`` /
-``requireDataAccessApproval=true``).  In a headless secretary lane that
+``requireDataAccessApproval=true``).  In a headless dispatch lane that
 dialog is invisible and the call hangs forever.  The operator must either
 disable those toggles in the BApp's ``MCP`` tab or pre-approve targets via
 the ``_autoApproveTargets`` config field.  We assume this is done — our
@@ -658,8 +658,8 @@ def _scope_check(target: str) -> None:
 
     Raises ``ScopeGateError`` on a blocked target — same pattern as
     ``zap_send_raw`` and ``probe_web``.  The BApp has its own approval
-    dialogs, but those are a human-in-the-loop for the GUI operator; the
-    secretary lane needs the programmatic gate *before* the call.
+    dialogs, but those are a human-in-the-loop for the GUI operator; this
+    lane needs the programmatic gate *before* the call.
     """
     from utils.scope_gate import check_scan, ScopeGateError
 

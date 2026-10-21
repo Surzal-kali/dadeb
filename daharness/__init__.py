@@ -5,7 +5,6 @@ The implementation is split across focused submodules:
 * :mod:`daharness.models`    — ``ToolManifest`` data model.
 * :mod:`daharness.registry`  — config, ``OllamaEmbeddingFunction``, ``ToolRegistry``.
 * :mod:`daharness.executor`  — execution/dispatch (mixed into ``ToolRegistry``).
-* :mod:`daharness.agent`     — the secretary agent loop (mixed into ``ToolRegistry``).
 
 This package init re-exports the public surface for callers that import from
 ``daharness`` directly. ``daharness.core`` remains as a thin backwards-compat
@@ -47,29 +46,11 @@ import httpx
 from .models import ToolManifest, Finding
 from .findings import FindingStore
 from .registry import OllamaEmbeddingFunction, ToolRegistry
-from .agent import (
-    SecretaryDeps,
-    _chat,
-    _cli_confirmer,
-    _parse_tool_args,
-    _run_confirmer,
-    create_secretary_agent,
-    secretary_execute_tool,
-    secretary_search_tools,
-)
 
 __all__ = [
     "OllamaEmbeddingFunction",
-    "create_secretary_agent",
     "Finding",
     "FindingStore",
-    "SecretaryDeps",
     "ToolManifest",
     "ToolRegistry",
-    "_chat",
-    "_cli_confirmer",
-    "_parse_tool_args",
-    "_run_confirmer",
-    "secretary_execute_tool",
-    "secretary_search_tools",
 ]

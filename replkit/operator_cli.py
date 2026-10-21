@@ -2,7 +2,7 @@
 
 These are the ONLY control surfaces for arming the packet-scope gate and for
 arming/purging the engagement cobweb key; both are deliberately NOT exposed
-as ``@framework_tool`` entries, so the secretary agent can never toggle the
+as ``@framework_tool`` entries, so no model lane can ever toggle the
 gate, bless IPs, tag rows with a new engagement key, or erase the audit
 trail (same authority model the DB grants enforce for the PG lane).
 
@@ -52,8 +52,8 @@ def _json_or_none(res) -> str:
 def _scope_command(rest: str):
     """Handle the ``scope`` REPL command — operator-only packet-scope gate.
     This is the ONLY control surface for the packet-scope gate; it is
-    deliberately not exposed as an ``@framework_tool``, so the secretary
-    agent cannot arm/disarm or bless IPs.  When armed, ``send_packet``
+    deliberately not exposed as an ``@framework_tool``, so no model lane
+    can arm/disarm or bless IPs.  When armed, ``send_packet``
     refuses sends to destinations not confirmed in-scope (see
     :mod:`utils.scope_gate`).
     """
@@ -266,8 +266,8 @@ def _engagement_command(rest: str):
     cobweb key (arm/disarm/status/purge).
 
     This is the ONLY control surface for engagement arming and the ONLY
-    purge path; deliberately not exposed as an ``@framework_tool``, so the
-    secretary can never tag rows with a new engagement key or erase the
+    purge path; deliberately not exposed as an ``@framework_tool``, so no
+    model lane can tag rows with a new engagement key or erase the
     audit trail (same authority model as the scope gate). Arming writes
     ``engagement/.armed_engagement.json`` (mtime-checked every dispatch);
     purge runs under the operator DB role against BOTH lanes (Postgres

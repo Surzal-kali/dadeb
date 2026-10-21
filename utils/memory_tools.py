@@ -7,7 +7,9 @@ uncallable through the secretary loop, so ``memories.py`` was skip-listed
 during tool discovery and turns 13/14 of the e2e runner were silently
 SKIPPED -- a false green.
 
-These thin wrappers take plain text, compute the embedding via Ollama, and
+These thin wrappers take plain text, compute the embedding via the
+configured embed endpoint (EMBED_URL — provider-agnostic; see
+``daharness/embedding.py``), and
 delegate to the shared :class:`MemoryService` so the secretary can store
 and recall findings in conversation without ever touching a vector.  They
 are plain ``@framework_tool`` functions under an allowed tool root, so they
@@ -32,6 +34,7 @@ import httpx
 
 from constants import framework_tool
 from memories import _default_service as _svc
+from daharness.embedding import embed_request, parse_embed_response
 
 # ── Recency-weighted recall tuning ───────────────────────────────────────────
 # Memory entries decay in priority as they age, so old engagement summaries
@@ -43,33 +46,24 @@ from memories import _default_service as _svc
 _HALF_LIFE_HOURS = float(os.getenv("MEMORY_HALF_LIFE_HOURS", "48"))
 _RECENCY_WEIGHT = float(os.getenv("MEMORY_RECENCY_WEIGHT", "0.35"))
 
-# Derive the Ollama embed endpoint from OLLAMA_BASE_URL, stripping a trailing
-# /v1 if present (the chat-completions base URL carries it; the native embed
-# API lives at /api/embed on the bare base).
-_OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-if _OLLAMA_BASE.endswith("/v1"):
-    _OLLAMA_BASE = _OLLAMA_BASE[:-3]
-_EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+# Embed lane knobs (EMBED_URL / EMBED_MODEL / EMBED_API_KEY) resolve via the
+# shared daharness.embedding helpers — same lane as the tool registry, so the
+# two can't drift (the pre-normalization code derived the endpoint from
+# OLLAMA_BASE_URL here independently of registry.py).
 
 
 def _embed(text: str) -> List[float]:
-    """Synchronously embed a single text via Ollama's native embed endpoint.
+    """Synchronously embed a single text via the configured embed endpoint.
 
     Runs in a worker thread (the executor dispatches sync tools via
     ``asyncio.to_thread``), so the blocking HTTP call never pins the loop.
+    Provider-agnostic: EMBED_URL / EMBED_MODEL / EMBED_API_KEY resolve in
+    :mod:`daharness.embedding` (same lane as the tool registry).
     """
-    resp = httpx.post(
-        f"{_OLLAMA_BASE}/api/embed",
-        json={"model": _EMBED_MODEL, "input": [text]},
-        timeout=60.0,
-    )
+    url, headers, body = embed_request([text])
+    resp = httpx.post(url, headers=headers, json=body, timeout=60.0)
     resp.raise_for_status()
-    payload = resp.json()
-    if "embeddings" in payload:
-        return payload["embeddings"][0]
-    if "embedding" in payload:
-        return payload["embedding"]
-    raise ValueError(f"Unexpected Ollama embedding response: {payload}")
+    return parse_embed_response(resp.json())[0]
 
 
 @framework_tool(

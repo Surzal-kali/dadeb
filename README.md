@@ -1,8 +1,8 @@
 # daharness
 
-A platform for agentic, iterative security testing — a local LLM that plans,
-picks, and runs 150+ security tools under your approval, with target data
-never leaving your hardware.
+A platform for agentic, iterative security testing — plug your own LLM into
+a registry of 150+ security tools it can search, pick, and run inside
+operator-armed scope gates, with target data never leaving your hardware.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-Policy-yellow.svg)](.github/SECURITY.md)
@@ -13,9 +13,9 @@ One engine — a vector-indexed registry of `@framework_tool` callables and
 gate-checked execution — surfaced through four lanes. Pick whichever fits
 the moment:
 
-- **Secretary chat** — talk to a local Ollama model that semantically
-  searches the registry, chooses the right tool for "fuzz that login form",
-  and executes it after you approve the exact call
+- **Open WebUI** — wire the registry into your Open WebUI chat model
+  (`owui-tools/`) for conversational "fuzz that login form" workflows,
+  driven by whatever LLM you host
 - **API gateway + MCP** — `POST /tools/execute` and a streamable-HTTP MCP
   endpoint for wiring the registry into any external agent harness
 - **Tool REPL** — bypass the LLM entirely: pick a tool, pass args, see raw
@@ -29,28 +29,30 @@ enumerate the surface → scan in-scope targets → collect evidence → file
 structured findings — the scope-compliance and reportability gates hold at
 every step.
 
-Every execution is grounded (the model can only call tools its search
-actually surfaced), approval-gated in the secretary lane, and
-scope-compliance-checked against the loaded HackerOne/Intigriti program.
-Large tool outputs are projected out of model context into a durable scratch
-store (`full | digest | page` — `digest` by default) with a retrieval
-reference — evidence stays queryable without flooding context.
+Every execution is scope-compliance-checked against the loaded
+HackerOne/Intigriti program, hard-capped on the gateway lanes by a per-turn
+tool budget, and semantic dispatch abstains when an intent doesn't resolve
+cleanly (`ROUTER_MAX_DISTANCE`). Large tool outputs are projected out of
+model context into a durable scratch store (`full | digest | page` —
+`digest` by default) with a retrieval reference — evidence stays queryable
+without flooding context.
 
 ## Why local-only models
 
-The secretary reads target responses: credentials, tokens, internal IPs,
-response bodies. A cloud LLM API transmits every one of those bytes to a
-third party — unauthorized egress under most programs' ROE and data-protection
-law. The framework defaults to a locally hosted Ollama endpoint and the docs
-refuse to pretend otherwise. See the
+The models driving the lanes read target responses: credentials, tokens,
+internal IPs, response bodies. A cloud LLM API transmits every one of those
+bytes to a third party — unauthorized egress under most programs' ROE and
+data-protection law. The framework defaults to a locally hosted Ollama
+endpoint and the docs refuse to pretend otherwise. See the
 [Legal Addendum](#legal-addendum--local-models-only-for-pentesting) under
 Safety Notes and the responsible-use policy in
 [`SECURITY.md`](.github/SECURITY.md).
 
 ## Quick start
 
-Prereqs: Python 3.12+, [Ollama](https://ollama.ai) with an embedding model
-(`nomic-embed-text`) and a chat model, and a ChromaDB server
+Prereqs: Python 3.12+, an embeddings endpoint (Ollama with
+`nomic-embed-text` by default — or any HTTP provider that speaks the
+embeddings wire shape, via `EMBED_URL`), and a ChromaDB server
 (`docker run -p 9000:8000 chromadb/chroma`).
 
 ```bash
@@ -60,12 +62,13 @@ cd daharness
 # Minimal lab demo: core runtime + 3-line config
 python -m venv venv && source venv/bin/activate
 pip install -e .
-cp .env.example .env          # set: OLLAMA_BASE_URL, SECRETARY_MODEL
+cp .env.example .env          # set: OLLAMA_BASE_URL, EMBED_URL
 cd dockered
 docker compose up -d
 cd ..
 python -m daharness.core      # index the tool registry
-python bootstrap.py           # chat with the secretary
+python bootstrap.py --daemon  # start services (Brain, ZAP, gateway + MCP)
+curl -s localhost:5000/health # gateway is live; drive it via Open WebUI, any agent harness, or the tool REPL
 
 # Full bounty workbench: optional lanes + dev tooling
 pip install -e ".[web,jupyter,dev]"
@@ -143,39 +146,31 @@ daharness doctor        # now grades honestly, no sudo
 
 ## Architecture
 
-### Tool Secretary (`daharness/`)
+### Tool registry + dispatch (`daharness/`)
 
-The core of the framework. A local LLM (Ollama; `SECRETARY_MODEL`, default
-`ornith-1.5:35b`) acts as a conversational agent with two tools:
+The core of the framework: a vector-indexed registry of `@framework_tool`
+callables (ChromaDB, `EMBED_URL` embeddings — provider-agnostic,
+`nomic-embed-text` by default — HNSW cosine similarity)
+behind two entry points that the driving model — wherever it lives (Open
+WebUI, an agent harness, the tool REPL) — reaches through the gateway, MCP,
+or REPL lanes:
 
-1. **`search_tools`** — semantic search over the tool registry (ChromaDB,
-   `nomic-embed-text` embeddings, HNSW cosine similarity). Returns full tool
-   manifests.
-2. **`execute_tool`** — runs a surfaced tool. It is declared
-   `requires_approval=True`, so the run **always pauses** with pydantic-ai's
-   `DeferredToolRequests`: the confirmer shows the operator the full
-   manifest + arguments and execution proceeds only on approval
-   (`run_secretary()` resumes the loop with the same `deps` + message
-   history), capped at `SECRETARY_MAX_APPROVAL_ROUNDS` rounds per turn.
-   After an approved execution a framework-log tail (Brain/MSF) can be
-   appended to the result for visibility
-   (`POST_EXECUTION_LOGS`: `off` | `failures` | `always`, default
-   `failures`), and the result passes through the projection middleman
-   before it enters context (see
+1. **Semantic search** — intent text in, ranked candidate manifests out
+   (`ToolRegistry.find_tools`, bounded by `SECRETARY_MAX_TOP_K`).
+2. **Dispatch** — a chosen tool executes through preflight argument
+   validation against the manifest schema, the scope gate, and result
+   projection (large outputs land in the scratch store; see
    [Result Projection](utils/README.md#result-projection-result_projectionpy)).
+   Direct dispatch (`find_best_tool`) abstains when an intent doesn't
+   resolve well enough (`ROUTER_MAX_DISTANCE`).
 
-   This gate is internal to the secretary lane — tool calls that arrive
-   through the API gateway or the MCP endpoint skip it entirely.
-
-**Grounding rule:** the secretary can only execute tools it has seen returned
-by `search_tools` in the current conversation. A tool_id that was never
-surfaced is rejected — the model cannot hallucinate a tool into existence.
+There is no in-process approval loop — the pydantic-ai secretary chat lane
+was removed; an integrating harness that wants sign-off adds its own layer
+in front of the gateway.
 
 The `daharness/` package exposes focused import paths:
 
 - `daharness.core` — backwards-compat shim re-exporting legacy public names
-- `daharness.agent` — secretary agent factory (pydantic-ai imports lazily on
-  first chat-lane use — headless lanes never need the chat wheel)
 - `daharness.executor` — standalone execution helpers (no ChromaDB needed)
 - `daharness.registry` — discovery and semantic search API
 - `daharness.findings` — SQLite-backed findings store (`FindingStore`)
@@ -260,7 +255,7 @@ surfaces the tagged tools even when the tool's own prose never used that word.
 - New tools: tag inline via the decorator — `@framework_tool(doc, ...,
   tags=["web.fuzz"])` (decorator tags win over the map for the same id).
 - Tags persist in ChromaDB metadata (`tags_json`), surface in
-  `describe_manifest` (the secretary sees the category beside every search
+  `describe_manifest` (the model sees the category beside every search
   hit), and a tag change re-embeds the tool automatically on the next
   `python -m daharness.core` (the doc changes, which is the change signal).
 - Non-canonical tags are warned about (bootstrap/reindex log) but kept.
@@ -366,9 +361,9 @@ and a full lifecycle: `open` → `closed` / `false_positive` / `duplicate` /
 `superseded`, with `closed_by`, `closed_reason`, and `superseded_by` for
 audit trails.
 
-The full finding objects **never** enter the secretary model's context. Only
+The full finding objects **never** enter the driving model's context. Only
 a one-line pointer is stored in vector memory (ChromaDB, `findings`
-namespace) so the secretary can recall that a finding *exists* without
+namespace) so the model can recall that a finding *exists* without
 bloating its context with the full evidence payload.
 
 Framework tools in `utils/findings.py`:
@@ -387,7 +382,7 @@ Framework tools in `utils/findings.py`:
 
 Pulls a program's structured scope, scope exclusions, weakness list, and
 policy text from the HackerOne Hacker API v1 and turns them into a
-machine-readable manifest the secretary and scan tools consult. Caches
+machine-readable manifest the model lanes and scan tools consult. Caches
 manifests to `scope/<handle>.json`.
 
 Framework tools:
@@ -427,7 +422,7 @@ cache to `scope/intigriti_<handle>.scope`.
 ### Tool REPL (`tool_repl.py`)
 
 The operator's console for exercising framework tools directly — it
-bypasses the secretary LLM entirely: pick a tool, supply arguments, see
+bypasses the LLM entirely: pick a tool, supply arguments, see
 the raw result. Use it to isolate tool-execution problems from
 model-reasoning problems, to arm/control the scope gate, and to
 smoke-test tools after adding or editing modules. `run` dispatches
@@ -494,14 +489,14 @@ gated); it disappears when disarmed.
 Two refresh layers, easy to confuse: REPL `reindex` re-runs tool
 discovery in-process (manifests + direct `run` see code edits
 immediately), while `python -m daharness.core` rebuilds the vector
-registry — semantic `search` and the secretary keep seeing the OLD
+registry — semantic `search` and the model lanes keep seeing the OLD
 embeddings until that re-embed runs (and the Brain is restarted).
 
 ### Scope Gate — Operator-Armed (`utils/scope_gate.py`)
 
 A technical backstop the OPERATOR arms from the Tool REPL — separate from
 `check_scope`, which only consults a loaded manifest. Arming is deliberately
-not exposed as an `@framework_tool`, so the secretary can never toggle it.
+not exposed as an `@framework_tool`, so no model lane can ever toggle it.
 Enforcement is file-backed (`scope/.armed_packet_scope.json`, mtime-checked
 every call), gated calls fail closed with `ScopeGateError`, and an
 out-of-scope match always beats an in-scope wildcard. Full verdict tiers,
@@ -561,8 +556,8 @@ lane) exposing:
 
 Also serves MCP (Model Context Protocol) handlers for tool listing and
 execution. `POST /tools/execute` and MCP `tools/call` dispatch directly —
-the internal approval gate does not exist in these lanes, so an integrating
-harness that wants sign-off needs to add its own layer before calling. If
+there is no approval gate in this harness, so an integrating harness that
+wants sign-off needs to add its own layer before calling. If
 `GATEWAY_API_KEY` is set, every request is authenticated
 (sent as `X-API-Key`); otherwise the gateway runs in unauthenticated dev
 mode.
@@ -583,14 +578,17 @@ mechanics: [Projection](utils/README.md#result-projection-result_projectionpy)
 ### Prerequisites
 
 - Python 3.12+ (3.13 supported)
-- [Ollama](https://ollama.ai) running with `nomic-embed-text` and a local
-  chat model (code default: `ornith-1.5:35b`; a thinking/reasoning model is
-  recommended — the secretary plans through defenses and
-  edge-infrastructure fingerprinting, which rewards reasoning). Swap via
-  `SECRETARY_MODEL` in `.env`. The Ollama endpoint defaults to a lab-LAN
-  fallback baked into `daharness/registry.py`; set `OLLAMA_BASE_URL` in
-  `.env` to your own listener and keep it loopback/LAN (see
-  [Safety Notes](#safety-notes)).
+- An embeddings endpoint — [Ollama](https://ollama.ai) running
+  `nomic-embed-text` (the shipped default), or any HTTP provider speaking
+  the Ollama-native or OpenAI-compatible embeddings wire shape: point
+  `EMBED_URL` at it (`EMBED_MODEL` / `EMBED_API_KEY` alongside — provider
+  recipes in `.env.example`, resolved in `daharness/embedding.py`). The
+  LLM-fallback default stays baked into `daharness/registry.py`; set
+  `OLLAMA_BASE_URL` to your own listener and keep the embed endpoint
+  loopback/LAN (see [Safety Notes](#safety-notes) — the embed provider
+  receives the text being embedded). A local chat model is your own choice
+  in your client config — the harness itself never loads a conversation
+  model since the pydantic-ai chat lane was removed.
 - ChromaDB server (default: `localhost:9000`; used by the tool registry —
   the memory service `memories.py` uses its own embedded store at
   `.memory/chroma`)
@@ -609,13 +607,14 @@ optional); the day-one set:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OLLAMA_BASE_URL` | Lab LAN fallback | Ollama API endpoint — set explicitly in `.env`, keep it loopback/LAN |
-| `SECRETARY_MODEL` | *(no env knob)* | The tool secretary model is a **dev-only chat lane** constant (`daharness/registry.py:_SECRETARY_MODEL_DEFAULT`, `ornith-1.5:35b`); headless daemon/gateway builds never read a chat model. The doctor does not probe it. |
+| `OLLAMA_BASE_URL` | Lab LAN fallback | Driving-LLM endpoint (health probe + client reference) — set explicitly in `.env`, keep it loopback/LAN |
+| `EMBED_URL` | `http://localhost:11434/api/embed` | Provider-agnostic embeddings endpoint (tool registry + memory lanes) — anything speaking the Ollama-native or OpenAI-compat wire shape; loopback/LAN for live work |
+| `EMBED_MODEL` | `nomic-embed-text` | Model id sent to the embed endpoint (re-index after changing it) |
+| `EMBED_API_KEY` | — | Optional — when set, sent as a Bearer auth header on embeddings requests |
 | `CHROMA_HOST` / `CHROMA_PORT` | `localhost` / `9000` | ChromaDB server used by the tool registry (the memory service uses its own embedded store) |
 | `MSGRPC_PASSWORD` / `MSF_RPC_PORT` | — / `55553` | Metasploit RPC credentials |
 | `GATEWAY_API_KEY` | — | API gateway auth key (unset = unauthenticated dev mode) |
 | `BRAIN_DISPATCH_TIMEOUT` | `600` | Brain socket dispatch timeout (seconds) |
-| `SECRETARY_MAX_APPROVAL_ROUNDS` | `5` | Max approval rounds per secretary turn |
 | `ZAP_API_KEY` | — | ZAP daemon API key |
 | `H1_API_USERNAME` / `H1_API_TOKEN` | — | HackerOne API credentials (scope integration) |
 | `TOOL_BUDGET_PER_TURN` | `10` | Per-turn tool-execution cap in the gateway lanes (0 = off) |
@@ -634,9 +633,9 @@ python -m daharness.core
 # Clear and re-index
 python -m daharness.core --clear
 
-# Interactive chat with the secretary (starts all sidecars: Brain, ZAP, MSF MCP, API gateway)
-python bootstrap.py            # interactive (indexes + chat)
-python bootstrap.py --daemon   # background services only (no chat loop)
+# Start all sidecars (Brain, ZAP, MSF MCP, API gateway) after a wordlist preflight
+python bootstrap.py            # services stack in the foreground (--daemon is implicit)
+python bootstrap.py --daemon   # same, for systemd/background use
 
 # Run tests
 pytest tests/
@@ -661,9 +660,8 @@ In both modes, `bootstrap.py` starts the Brain sidecar, the ZAP daemon, the
 Metasploit MCP sidecar, and the API gateway (with MCP handlers), after a
 wordlist-tree preflight (`utils.wordlists.preflight_wordlists`) surfaces a
 missing/empty wordlist source as a startup warning instead of a silent
-ffuf/hydra failure. The Metasploit MCP sidecar is also vectorized, but the
-full index is only searchable from the secretary chat loop, where executions
-pause for operator approval.
+ffuf/hydra failure. The Metasploit MCP sidecar is also vectorized, so its
+tools are searchable from any lane.
 
 ## Adding a New Tool
 
@@ -709,13 +707,12 @@ pause for operator approval.
   you are explicitly authorized to test. See the full responsible-use policy
   in [`.github/SECURITY.md`](.github/SECURITY.md) — authorization first, the
   law applies to you regardless, target data never leaves your hardware.
-- **Human-in-the-loop (secretary lane — always on there):** every
-  secretary-driven tool execution pauses for explicit operator sign-off —
-  `execute_tool` is declared `requires_approval=True`, the run halts with
-  the full manifest + arguments for the operator to approve or deny, and
-  only an approved execution actually runs. This gate is internal to the
-  harness: the API gateway and MCP lanes dispatch directly, so an
-  integrating harness must add its own approval if it wants sign-off.
+- **Human-in-the-loop:** there is no approval gate inside the harness — the
+  in-repo secretary chat lane was removed, and the API gateway / MCP lanes
+  dispatch directly. The conversational model lives in your own client
+  (Open WebUI, agent harness) and gates what it sends; an integrating
+  harness that wants explicit sign-off adds its own approval layer in
+  front of the gateway.
 - **Context hygiene:** tool results pass through the projection middleman
   (`digest` by default) before entering the model's context window — large
   outputs go to the durable scratch store intact and the model gets a
@@ -734,18 +731,19 @@ pause for operator approval.
   or broken code cannot execute during indexing.
 - **Timeouts:** Brain dispatch and subprocess execution are bounded to
   prevent hanging the conversation loop. Long-running CLI tools use the
-  background job pattern so the secretary turn is never held open.
+  background job pattern so the driving model's turn is never held open.
 
 ### Legal Addendum — Local Models Only for Pentesting
 
 > **WARNING — DATA EGRESS RISK.** This framework orchestrates offensive
 > security tools (port scanners, web spiders, active scanners, exploit
-> frameworks) against live targets. The tool secretary is an LLM that
-> reads target responses, HTTP bodies, command output, and findings to
-> reason about next steps. **If the secretary model is hosted on a
-> third-party cloud API (OpenAI, Anthropic, Google, or any provider
-> outside your own infrastructure), every tool output it processes is
-> transmitted to that provider's servers.** This includes response bodies
+> frameworks) against live targets. The driving LLM — whatever model you
+> wire into the gateway/MCP lanes or your Open WebUI client — reads target
+> responses, HTTP bodies, command output, and findings to reason about
+> next steps. **If that model is hosted on a third-party cloud API
+> (OpenAI, Anthropic, Google, or any provider outside your own
+> infrastructure), every tool output it processes is transmitted to that
+> provider's servers.** This includes response bodies
 > from scanned targets, extracted credentials, session tokens, internal
 > IP addresses, error messages, and any other data the tools surface.
 >
@@ -761,16 +759,23 @@ pause for operator approval.
 >
 > **You MUST use a locally-hosted model** (e.g. via Ollama, llama.cpp, or
 > a self-managed vLLM instance on infrastructure you control) as the
-> secretary. Set `OLLAMA_BASE_URL` to a loopback or LAN address. Do not
-> point the framework at a cloud-hosted LLM API for any engagement
+> driving model. Set `OLLAMA_BASE_URL` to a loopback or LAN address. Do
+> not point the framework at a cloud-hosted LLM API for any engagement
 > involving live third-party targets.
 >
-> The framework's default `SECRETARY_MODEL` points to a locally-served
-> GGUF model. Do not override it with a cloud model for pentesting work.
-> If you are testing against your own infrastructure in an isolated lab
+> The choice of conversation model is now entirely yours — the framework
+> no longer ships or starts one — so keep your client (Open WebUI, agent
+> harness) pointed at a local model for pentesting work. If you are
+> testing against your own infrastructure in an isolated lab
 > with no real user data, the egress risk is your own to assess — but
-> the default configuration assumes local models precisely to keep
+> the documented configuration assumes local models precisely to keep
 > target data on-box.
+>
+> This applies to the embeddings provider too, not just the driving
+> model: the embed endpoint receives the text sent to it (memory contents
+> carry finding material — credentials, hostnames). Keep `EMBED_URL`
+> pointed at loopback/LAN infrastructure for live engagements; a cloud
+> embeddings API is target-data egress.
 >
 > **Using a cloud-hosted LLM with this framework against a target you do
 > not own is a data-handling decision you are solely responsible for.
@@ -780,8 +785,7 @@ pause for operator approval.
 ## Project Layout
 
 ```
-daharness/              Tool secretary agent + semantic registry (core package)
-  agent.py              Secretary agent factory
+daharness/              Semantic tool registry + dispatch (core package)
   registry.py           Discovery and semantic search API
   executor.py           Standalone execution helpers
   findings.py           SQLite-backed findings store (FindingStore)
@@ -795,7 +799,7 @@ bootstrap.py            Daemon entry point; launches all sidecars (Brain, ZAP, M
 api_gateway.py          FastAPI control panel + MCP server (port 5000 host lane / 6000 container lane)
 memories.py             ChromaDB-backed namespaced vector memory
 SYSTEM_PROMPT.md        "Brain of a local security lab" agent system prompt (reference)
-Modelfile.md            Ollama Modelfiles for the local secretary GGUF models
+Modelfile.md            Ollama Modelfiles for locally served models (reference)
 listeners/
   thebrain.py           Unix socket sidecar + function registry
   listening.py          TCP listener with Brain integration
@@ -866,7 +870,7 @@ apk/                    jadx apk drop folder (gitignored; decompiled workspaces 
 scope/                  Cached program scope manifests + .armed_packet_scope.json gate state (gitignored)
 findings_md/            Rendered markdown finding reports (gitignored)
 chroma-data/            ChromaDB persistence (gitignored)
-tests/                  pytest suite for registry + secretary flows
+tests/                  pytest suite for registry + dispatch flows
 schema.md               SQLite database schema
 AGENTS.md               AI agent development guide
 docs/                   Target dossiers (local-only, gitignored)
