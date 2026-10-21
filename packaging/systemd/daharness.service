@@ -42,6 +42,17 @@ WorkingDirectory=/var/lib/daharness
 # (compose container, manual dev run) and never double-spawns; postinst
 # retires a legacy chroma unit on upgrade so it cannot zombie-hold :9000.
 # The old ExecStartPre port-wait hack is gone with it.
+# Crash-orphan sweep (ExecStartPre): KillMode=process kills only the main
+# python on a crash; the detached-session JVMs (ZAP java, chroma's rust
+# child, msfrpcd) escape reaping when the parent dies mid-crash — a
+# port-silent ZAP zombie then blocks every restart from binding :8090
+# while the launcher logs "healthy spawn" lines (observed 2026-10-21,
+# pkg9 crash era). bootstrap.start_zap_daemon also sweeps these at launch
+# (adoption + pgrep kill); this is the boot-time belt-and-braces for the
+# case where the previous daemon died before its launcher could. PIDs are
+# matched per home-dir pin (var/lib/daharness/.zap_home) so a foreign
+# manual ZAP is never touched.
+ExecStartPre=/bin/sh -c 'pids=$(pgrep -u "$(id -u daharness 2>/dev/null || echo 0)" -f "[z]ap.*-dir /var/lib/daharness/.zap_home" || true); [ -z "$pids" ] || { kill $pids 2>/dev/null; sleep 2; kill -9 $pids 2>/dev/null || true; }'
 ExecStart=/usr/bin/daharness --daemon
 # bootstrap handles SIGTERM and reaps its sidecars; don't kill the children first
 KillMode=process

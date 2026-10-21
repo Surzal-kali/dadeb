@@ -414,7 +414,10 @@ class FrameworkLoader:
         # _open_child_log so a poisoned/immutable /tmp/zap.log can never
         # kill the launch.
         log_fd, log_path = _open_child_log("zap")
-        
+        # wait_for_zap's dead-spawn short-circuit + log pointer: uid-scoped
+        # actual path + the Popen handle whose returncode flips on death.
+        self._zap_log_path = log_path
+        self._zap_process = None
         # Force 127.0.0.1 to avoid UnresolvedAddressException (IPv6/localhost issues)
         host = host or "127.0.0.1"
         # Listener bind may be widened for the browser-proxy lane, but the
@@ -451,6 +454,52 @@ class FrameworkLoader:
             logger.info("[+] ZAP home moved to %s (%s); set ZAP_HOME to pin it.",
                         zap_home, mk_err.strerror)
         cmd.extend(["-dir", str(zap_home)])
+
+        # --- Lane reuse + zombie sweep (chroma's reuse-first contract) ------
+        # An ANSWERING lane means a live ZAP — adopt it, never double-spawn
+        # (two daemons on one home dir corrupt the session DB). A SILENT port
+        # with a stale java process still pinned to this home dir is the
+        # crash-orphan shape (KillMode=process escape: pid re-parented to
+        # init, holds no bind, but blocks the next launch's DB lock): kill it
+        # so the fresh spawn owns the port cleanly. Observed 2026-10-21: the
+        # pkg9 gateway crash left a 02:59 java zombie on the VM; every
+        # restart after it logged healthy spawn lines while 8090 stayed dead.
+        import socket as _socket
+
+        def _zap_lane_up() -> bool:
+            try:
+                with _socket.create_connection(("127.0.0.1", port), timeout=1.0):
+                    return True
+            except OSError:
+                return False
+
+        if _zap_lane_up():
+            logger.info("[+] ZAP already answering on 127.0.0.1:%s — reusing "
+                        "the live daemon (another framework lane or a manual "
+                        "zaproxy launch owns it)", port)
+            return "reused"
+        try:
+            # pgrep -f self-match guard: [z]ap keeps THIS process (and the
+            # sh -c wrappers above it) out of the hit list — its cmdline
+            # carries the pattern literal, a bare "zap" would match it and
+            # the sweep would kill the launcher mid-launch.
+            _stale = subprocess.run(
+                ["pgrep", "-u", str(os.geteuid()), "-f",
+                 f"[z]ap.*-dir {zap_home}"],
+                check=False, capture_output=True, text=True,
+            )
+            stale_pids = [int(p) for p in _stale.stdout.split() if p.isdigit()]
+        except Exception:
+            stale_pids = []
+        for pid in stale_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                logger.info("[+] Reaped stale ZAP process %s (port-silent "
+                            "orphan pinned to %s)", pid, zap_home)
+            except OSError:
+                continue
+        if stale_pids:
+            await asyncio.sleep(2)  # JVM teardown + port-release race
 
         # --- Root guard: never run the ZAP daemon as root. -----------------
         # ZAP checks write access to its home at startup
@@ -534,6 +583,10 @@ class FrameworkLoader:
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
             )
+            # wait_for_zap's dead-spawn short-circuit reads this (the ZAP
+            # JVM can die mid-wait; a returned-but-dead spawn must not rate
+            # the full 60s budget).
+            self._zap_process = process
             self.active_tasks.append(process)
             # Track the log fd so ``stop()`` can close it when the daemon
             # terminates -- otherwise the fd leaks for the lifetime of the
@@ -563,6 +616,15 @@ class FrameworkLoader:
                         "wait (zap_* tools will fail until zaproxy is "
                         "installed)", timeout)
             return False
+
+        def _spawned_process_dead() -> bool:
+            """True when start_zap_daemon launched a process that already
+            died (returncode set). A reused lane never sets _zap_process,
+            so a foreign daemon dying mid-wait keeps its budget — we
+            adopted it, we don't supervise it."""
+            proc = getattr(self, "_zap_process", None)
+            return proc is not None and proc.returncode is not None
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -570,6 +632,17 @@ class FrameworkLoader:
                 logger.info("[+] ZAP daemon is up at %s:%s", host, port)
                 return True
             except Exception:
+                if _spawned_process_dead():
+                    logger.error(
+                        "[!] ZAP daemon process exited rc=%s before "
+                        "answering on %s:%s — aborting the readiness wait "
+                        "(a dead JVM cannot self-heal; the -dir home and "
+                        "the port are the first suspects). Sidecar log: %s. "
+                        "Check `daharness doctor zap`.",
+                        self._zap_process.returncode, host, port,
+                        getattr(self, "_zap_log_path", None) or "/tmp/zap*.log",
+                    )
+                    return False
                 await asyncio.sleep(1)
         logger.warning("[!] ZAP daemon did not respond within %ss; "
                        "zap_* tools will fail until it does", timeout)

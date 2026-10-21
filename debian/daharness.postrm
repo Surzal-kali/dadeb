@@ -17,6 +17,24 @@ if [ "$1" = "purge" ]; then
     #    finishes off.
     rm -rf /usr/share/daharness 2>/dev/null || true
 
+    # 1b. Ghost-uid /tmp child logs + crash-orphan java pinned to the state
+    #     root. _open_child_log uid-scopes its fallback
+    #     (/tmp/brain-<euid>.log) but the CLASSIC paths (/tmp/brain.log,
+    #     /tmp/zap.log, /tmp/chroma.log) carry the creating uid forever —
+    #     a reinstall mints a new uid, the old files deny it append, and
+    #     the journal fills with deny+fallback lines every boot (observed
+    #     2026-10-21). daharness-owned ones are ours; the kali-owned
+    #     -1000 variants are a dev-run lane, left for the operator. A port-
+    #     silent ZAP java still pinned to the (kept) state .zap_home is
+    #     reaped too — after purge nothing will ever reap it.
+    rm -f /tmp/brain.log /tmp/zap.log /tmp/chroma.log 2>/dev/null || true
+   rm -f /tmp/brain-[0-9]*.log /tmp/zap-[0-9]*.log /tmp/chroma-[0-9]*.log 2>/dev/null || true
+    for _zp in $(pgrep -u daharness -f "[z]ap.*-dir /var/lib/daharness/.zap_home" 2>/dev/null || true); do
+        kill "$_zp" 2>/dev/null || true
+    done
+    unset _zp
+    sleep 2 2>/dev/null || true
+
     # 2. The daharness-pg credential file. NOT operator work product —
     #    `daharness-pg init` re-mints it losslessly (init re-runs the bundle
     #    and ALTERs the lane roles when pg.env is absent), so keeping a
