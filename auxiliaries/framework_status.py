@@ -343,7 +343,7 @@ def _check_masscan() -> Dict[str, Any]:
     if raw_ok:
         return {**m, "available": True, "reason": "masscan on PATH; SOCK_RAW creatable"}
     return {**m, "available": False,
-            "reason": "masscan on PATH but raw sockets are not permitted — masscan will fail at launch, not at probe",
+            "reason": "masscan on PATH but raw sockets are not permitted under current doctor namespace — masscan may fail at launch, not at probe",
             "remediation": "run under root/CAP_NET_RAW (sudo setcap cap_net_raw+ep $(which masscan))"}
 
 
