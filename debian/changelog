@@ -1,5 +1,15 @@
 daharness (0.1.0+pkg4) kali; urgency=high
 
+  * selftest on the deb lane (VM 2026-10-20): a flag-only passthrough arg
+    ('selftest -q', 'selftest -k chroma') stripped the tests/ anchor out of
+    the pytest argv, so a bare pytest collected the whole rootdir INCLUDING
+    the vendored closure's own test files — 21 collection errors, run
+    interrupted (the root-owned tree also tripped pytest-cache Permission
+    warnings, which read as the whole thing being a perms bug). The anchor
+    is unconditional now (a passthrough test-file arg covers it), the
+    cache provider is disabled on non-writable install trees, and the
+    deb ships pyproject.toml so the pytest rootdir config (testpaths
+    = tests) applies to any manual pytest too.
   * Selftest suite lands in the tree and SHIPS: the `selftest` REPL macro
     (pytest tests/) finally has a suite to drive — brain socket lane
     shaping (unit + real bind/cleanup cycle), findings-db probe truth

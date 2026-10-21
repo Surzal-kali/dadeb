@@ -40,6 +40,10 @@ override_dh_auto_install:
 	done
 	cp -a -- *.py debian/daharness/usr/share/daharness/
 	install -D -m 0644 .env.example debian/daharness/usr/share/daharness/.env.example 2>/dev/null || true
+	# pytest rootdir config: testpaths=["tests"] keeps ANY pytest spawn in
+	# the tree off the vendored closure's own test files (they break
+	# collection — observed live on the deb 2026-10-20).
+	install -m 0644 pyproject.toml debian/daharness/usr/share/daharness/pyproject.toml
 	# profile conffile: /etc/daharness/daharness.env (system profile knobs)
 	install -D -m 0644 packaging/etc/daharness.env debian/daharness/etc/daharness/daharness.env
 	# operator-shell plumbing: login shells source /etc/profile.d (the units'

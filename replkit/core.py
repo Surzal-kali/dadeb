@@ -12,6 +12,7 @@ as the Brain and the agent lanes).
 """
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -294,13 +295,28 @@ def _anchor_pytest_arg(arg: str) -> str:
 def _selftest_argv(extra_args: Optional[List[str]] = None) -> List[str]:
     """Build the selftest macro's pytest argv (see :func:`run_selftest`).
 
-    No extras runs the full ``tests/`` tree quiet; passthrough args are
-    anchored to the repo root by :func:`_anchor_pytest_arg`.
+    The ``tests/`` tree anchor is ALWAYS present — flag-only passthrough
+    args (``selftest -q``, ``selftest -k chroma``) must not strip it, or a
+    cwd-spawned bare pytest collects the whole rootdir INCLUDING vendor/
+    whose bundled test files break collection (observed live on the deb
+    2026-10-20: 21 collection errors, run interrupted). A passthrough arg
+    already targeting a test file (anchored ``tests/...py``) skips the
+    base anchor. On a root-owned install tree pytest's cache probe trips
+    permission warnings — ``-p no:cacheprovider`` runs when the tree is
+    not writable.
     """
     extra = [a for a in (extra_args or []) if a not in ("--force", "-f")]
-    if not extra:
-        return list(_PYTEST_ARGS) + [str(_REPO_ROOT / "tests"), "-q"]
-    return list(_PYTEST_ARGS) + [_anchor_pytest_arg(a) for a in extra]
+    anchored = [_anchor_pytest_arg(a) for a in extra]
+    covers_suite = any(
+        "tests/" in a or a.endswith(".py") for a in anchored)
+    argv = list(_PYTEST_ARGS)
+    if not covers_suite:
+        argv.append(str(_REPO_ROOT / "tests"))
+    argv += anchored
+    if not os.access(_REPO_ROOT, os.W_OK):
+        argv += ["-p", "no:cacheprovider"]
+    argv.append("-q")
+    return argv
 
 
 def run_selftest(extra_args: Optional[List[str]] = None) -> int:
