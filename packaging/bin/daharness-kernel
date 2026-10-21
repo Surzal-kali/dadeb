@@ -4,6 +4,9 @@
 # auto-import on py3.13/3.14 — verified empirically); it PREPENDS vendor/
 # so the exact-pinned vendored closure wins overlaps (VM-proven: apt's
 # partial python3-opentelemetry-api broke chromadb under append order).
+# Kernelspec frontends launch tool_repl.py BARE (no PYTHONPATH) — that shim
+# carries the same vendor prepend inline (tool_repl.py) so the kernelspec
+# lane never misses the closure.
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # Login shells get the profile.d plumbing already; source it here too so
 # non-login invocations (ssh host cmd, CI) still resolve the system-profile

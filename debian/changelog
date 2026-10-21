@@ -1,3 +1,31 @@
+daharness (0.1.0+pkg6) kali; urgency=high
+
+  * kernel lane (deb defect): the kernelspec was a silent NO-OP on every
+    freshly installed deb — Jupyter frontends launch kernel.json argv
+    (`python3 /usr/share/daharness/tool_repl.py --kernel ...`) BARE: no
+    wrapper to export PYTHONPATH, and script-dir sitecustomize.py does not
+    auto-import on py3.13/3.14 for absolute-script invocations (verified
+    empirically) — so the vendored chromadb closure never armed and the
+    kernel died at daharness/__init__ -> registry.py:22 `import chromadb`
+    before any tool or cell ran. `python tool_repl.py --install-kernelspec`
+    and the packaged wrappers worked (PYTHONPATH armed), which is why the
+    deb selftest lane stayed green while every frontend launch
+    (jupyter console --kernel daharness, nbconvert --execute,
+    KernelManager) died. tool_repl.py now arms <tree>/vendor itself —
+    same prepend-before-heavy-imports semantics as sitecustomize (vendored
+    closure wins overlaps; inert when vendor/ is absent, so dev-tree lanes
+    keep pristine behavior; idempotent, so wrapper-armed lanes insert
+    nothing) — one mechanism, two carriers, and a comment cross-reference
+    in sitecustomize.py to keep them in sync. Bonus repair semantics:
+    since kernelspecs re-execute the shim file (python), STALE kernelspecs
+    heal on the next apt upgrade without re-running --install-kernelspec.
+    Regression tests (tests/test_vendor_arming.py): tree arming +
+    idempotency, shim inert-without-vendor dev-tree behavior, subprocess
+    probe of the exact kernelspec launch shape (skips when no vendor/ —
+    dev lane; exercises the real arm on the deb selftest lane).
+    (VM-lane lesson, observed on deb boots 2026-10-20)
+ -- Surzal-kali <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 22:40:00 -0600
+
 daharness (0.1.0+pkg5) kali; urgency=high
 
   * index wrapper: `daharness-index --stubs` now exists — the IDE lane is a

@@ -452,6 +452,15 @@ discovery. Kernel conventions and caveats:
 [`AGENTS.md`](AGENTS.md#jupyter-kernel-dabooksipynb); the notebook work dir
 is [`dabooks/README.md`](dabooks/README.md).
 
+On the deb: every lane imports the vendored chromadb closure via
+`sitecustomize.py`, but Jupyter frontends launch the kernelspec argv
+(`python3 /usr/share/daharness/tool_repl.py --kernel …`) BARE — no
+PYTHONPATH to arm sitecustomize through (script-dir sitecustomize does not
+auto-import on py3.13/3.14). The shim therefore arms `<tree>/vendor` the
+same way, inline, before its heavy imports: freshly installed kernelspecs
+boot chromadb 1.5.9 out of the box, and stale specs heal on the next apt
+upgrade without reinstalling.
+
 Interactive commands:
 
     list [filter]        print discovered tool manifests (substring filter)

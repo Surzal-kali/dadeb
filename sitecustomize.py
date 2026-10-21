@@ -16,3 +16,7 @@ if _vendor.is_dir():
     _v = str(_vendor)
     if _v not in sys.path:
         sys.path.insert(0, _v)
+# Kernelspec-lane twin: frontends launch tool_repl.py bare (no PYTHONPATH to
+# arm this module through), so tool_repl.py carries the same prepend inline
+# before its heavy imports — one mechanism, two carriers. Keep the two in
+# sync if the arm semantics ever change.

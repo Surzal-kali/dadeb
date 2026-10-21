@@ -256,7 +256,10 @@ def _install_kernelspec() -> None:
     lists "daharness (framework tools)" in its kernel picker, and notebook
     cells run on framework tools + the live Brain session. The spec points
     back at the top-level ``tool_repl.py`` shim with ``--kernel``, so it
-    always runs the checked-out tree's tool set.
+    always runs the checked-out tree's tool set. Frontends launch that argv
+    bare — no PYTHONPATH — so the shim arms the deb's vendored closure
+    itself (tool_repl.py; a stale kernelspec heals on the next apt upgrade
+    without re-running this installer).
     """
     import tool_repl  # the load-bearing shim filename (see replkit/__init__)
 

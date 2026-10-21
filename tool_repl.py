@@ -51,6 +51,22 @@ discovered at startup) for type coercion — no hardcoded type maps.
 import sys
 from pathlib import Path
 
+# Vendored-wheel arm (deb lane) — TWIN of tree-root sitecustomize.py. This
+# shim is the kernelspec entry point: frontends launch
+# `python3 <tree>/tool_repl.py --kernel` BARE (no PYTHONPATH), and script-dir
+# sitecustomize does NOT auto-import on py3.13/3.14 (verified — the tree arm
+# only runs when PYTHONPATH carries the tree). Without this, daharness/
+# __init__ -> registry.py's top-level `import chromadb` kills every
+# frontend-launched kernel (jupyter console, nbconvert --execute,
+# KernelManager) the moment a fresh deb exists whose chromadb lives only in
+# <tree>/vendor. Same semantics as sitecustomize: prepend so the exact-pinned
+# closure wins overlaps; inert when vendor/ is absent (dev-tree lanes keep
+# pristine behavior) and idempotent, so wrapper-armed lanes (sitecustomize
+# already inserted vendor via PYTHONPATH) insert nothing.
+_vendor = str(Path(__file__).resolve().parent / "vendor")
+if Path(_vendor).is_dir() and _vendor not in sys.path:
+    sys.path.insert(0, _vendor)
+
 # Make project root importable (same as before the split — this file stays the
 # one kernelspec entry points launch).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
