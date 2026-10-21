@@ -1144,8 +1144,6 @@ def _build_cli():
             "companion wrappers:\n"
             "  daharness-repl     interactive tool lane (REPL)\n"
             "  daharness-index    re-index the tool registry\n"
-            "  daharness-chroma   manual/dev Chroma registry lane (the "
-            "daemon runs it as a sidecar)\n"
             "  daharness-kernel   Jupyter kernel\n"
             "  daharness-pg       engagement-cobweb Postgres lane — "
             "setup is: sudo daharness-pg init\n"

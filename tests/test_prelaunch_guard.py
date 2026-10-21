@@ -361,6 +361,35 @@ def test_doctor_sweep_survives_store_failure(monkeypatch):
     assert set(report["providers"]) >= {"r2", "snapshot_cache"}  # sweep completed
 
 
+def test_doctor_jadx_probe_uses_workspace_root(monkeypatch, tmp_path):
+    """The apk drop-dir probe resolves like the tool (workspace root /
+    postinst lane), NOT the read-only package tree (`__file__` math was the
+    VM bug: doctor demanded /usr/share/daharness/apk while postinst created
+    /var/lib/daharness/apk)."""
+    import shutil as shutil_mod
+
+    import auxiliaries.framework_status as fstat
+
+    empty_ws = tmp_path / "ws"
+    empty_ws.mkdir()
+    real_which = shutil_mod.which
+    monkeypatch.setattr(
+        shutil_mod, "which",
+        lambda cmd: "/usr/bin/jadx" if cmd == "jadx" else real_which(cmd))
+    import auxiliaries.jadx as jadx_mod
+    monkeypatch.setattr(jadx_mod, "APK_TARGETS_ROOT", str(empty_ws / "apk"))
+
+    rec = fstat._check_jadx()
+    assert rec["available"] is False
+    assert str(empty_ws / "apk") in rec["reason"]
+    assert "JADX_APK_TARGETS_ROOT" in rec["remediation"]
+
+    (empty_ws / "apk").mkdir()
+    rec = fstat._check_jadx()
+    assert rec["available"] is True
+    assert str(empty_ws / "apk") in rec["reason"]
+
+
 def test_print_doctor_sudo_hint_on_permission_error(monkeypatch, capsys):
     """`daharness doctor` on a locked state root prints the sudo fix,
     exits 77 — not a raw traceback (the operator ask, VM 2026-10-20)."""

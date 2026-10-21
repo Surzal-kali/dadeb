@@ -309,18 +309,22 @@ def _check_jadx() -> Dict[str, Any]:
         jadx["remediation"] = "install jadx (apt install jadx or the upstream release zip; needs JDK 11+)"
         return jadx
     java_ok = shutil.which("java") is not None
-    apk_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apk")
-    apk_ok = os.path.isdir(apk_dir)
+    try:
+        from auxiliaries.jadx import APK_TARGETS_ROOT
+    except Exception as exc:
+        APK_TARGETS_ROOT = None
+        jadx["extra"] = {"apk_root_probe_error": str(exc)}
+    apk_ok = bool(APK_TARGETS_ROOT) and os.path.isdir(APK_TARGETS_ROOT)
     if java_ok and apk_ok:
         return {**jadx, "available": True,
-                "reason": f"jadx on PATH; java present; drop dir {apk_dir}"}
+                "reason": f"jadx on PATH; java present; drop dir {APK_TARGETS_ROOT}"}
     if not java_ok:
         return {**jadx, "available": False,
                 "reason": "jadx on PATH but no java runtime",
                 "remediation": "install a JDK 11+ (apt install default-jdk)"}
     return {**jadx, "available": False,
-            "reason": f"jadx + java OK but drop dir {apk_dir} is missing",
-            "remediation": f"create {apk_dir} (APK targets go there)"}
+            "reason": f"jadx + java OK but drop dir {APK_TARGETS_ROOT} is missing",
+            "remediation": f"create {APK_TARGETS_ROOT} or set JADX_APK_TARGETS_ROOT"}
 
 
 def _check_masscan() -> Dict[str, Any]:
