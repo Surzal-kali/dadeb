@@ -69,9 +69,15 @@ if not _OLLAMA_BASE_RAW.endswith("/v1"):
 else:
     OLLAMA_BASE_URL = _OLLAMA_BASE_RAW
 if "OLLAMA_BASE_URL" not in os.environ:
-    logger.warning(
-        "OLLAMA_BASE_URL is not set — using the default %s. Set it in .env "
-        "(copy .env.example to .env) if your Ollama daemon runs elsewhere.",
+    # Absence is the SHIPPED posture on the deb lane (the headless build
+    # reads no chat model and the conffile carries no driving-LLM knob) —
+    # a WARNING there nagged every daemon boot about a knob the package
+    # deliberately does not set. Keep a quiet pointer for dev checkouts,
+    # where the driving-LLM health probe is a live concern.
+    logger.info(
+        "OLLAMA_BASE_URL unset — driving-LLM/health endpoint defaults to %s "
+        "(dev checkout knob; the deb conffile intentionally omits it; "
+        "embeddings are independent: EMBED_URL/EMBED_MODEL).",
         OLLAMA_BASE_URL,
     )
 CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")

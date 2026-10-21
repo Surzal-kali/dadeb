@@ -84,9 +84,11 @@ WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
   Jina-style keyed providers. Shipped empty.
 
 **OLLAMA_BASE_URL**
-: Driving-LLM endpoint (health probe + client reference) — loopback or LAN
-  only, never a cloud LLM API. No longer used for embeddings (EMBED_URL
-  took over; the two lanes are decoupled).
+: Dev-checkout driving-LLM endpoint only (registry boot probe; the deb
+  conffile deliberately does not carry it — the headless build reads no
+  chat model, and embeddings resolve their own `EMBED_URL`). If your
+  Ollama daemon runs off-host, this stays a checkout-`.env` knob —
+  loopback or LAN only, never a cloud LLM API.
 
 **GATEWAY_API_KEY**
 : Arms X-API-Key/Bearer auth over the REST + /mcp surface. Shipped empty;

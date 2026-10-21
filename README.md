@@ -72,7 +72,7 @@ curl -s 127.0.0.1:5000/health
 ```
 
 Configure via `/etc/daharness/daharness.env` (**daharness.env(5)** — day-one
-set: `OLLAMA_BASE_URL`, `EMBED_URL` if not Ollama native, `GATEWAY_API_KEY`
+set: `EMBED_URL` if not Ollama native, `GATEWAY_API_KEY`
 when you want the gateway authenticated). The wrapper `daharness` is also the
 CLI: `daharness doctor [provider]` grades lanes with remediation instead of
 false "down" reports.
@@ -98,7 +98,7 @@ budgets, and retention story is **daharness-safety(7)**.
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -e ".[web,jupyter,dev]"   # core runtime + optional lanes + test deps
-cp .env.example .env                  # annotated key list; set OLLAMA_BASE_URL etc.
+cp .env.example .env                  # annotated key list; set EMBED_URL etc.
 python -m daharness.core              # index the tool registry (--clear to wipe)
 python bootstrap.py --daemon          # Brain, ZAP, MSF MCP, API gateway
 pytest tests/                         # registry + dispatch suite
@@ -189,7 +189,8 @@ web-session identity) need no extra CLI installs.
 >
 > **You MUST use a locally-hosted model** (Ollama, llama.cpp, a self-managed
 > vLLM) as the driving model for engagements involving live third-party
-> targets. Keep `OLLAMA_BASE_URL` and `EMBED_URL` pointed at loopback/LAN
+> targets. Keep the driving-LLM endpoint and `EMBED_URL` pointed at
+> loopback/LAN
 > infrastructure you control. A cloud embeddings API is target-data egress
 > too — the embed endpoint receives the text being embedded, and memory
 > contents carry finding material.
