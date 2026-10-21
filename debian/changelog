@@ -1,5 +1,16 @@
 daharness (0.1.0+pkg5) kali; urgency=high
 
+  * doctor: the masscan probe graded the doctor lane's own SOCK_RAW
+    attempt and could lie both ways — a setcap'd binary (cap_net_raw+ep)
+    got "may fail at launch, not at probe" while the setcap'd launch runs
+    fine from an unprivileged lane, and a privileged probe could
+    green-light a scan lane it can't see. It now grades the way
+    run_masscan actually launches (root euid, lane SOCK_RAW creatable, or
+    an exec-effective cap_net_raw file capability decoded from the
+    binary's security.capability xattr), names the deciding source in the
+    reason, carries the per-source evidence in extra, and scopes the
+    unavailable verdict to the doctor lane instead of overclaiming.
+    (VM 2026-10-20)
   * doctor hard gate: `daharness doctor` (and the framework_doctor tool)
     now REFUSES lanes that do not share the framework state root — root,
     the root's owner, or a member of its group only (rc 77, message names

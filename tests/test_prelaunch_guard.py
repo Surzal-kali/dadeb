@@ -10,6 +10,7 @@ closed ports.
 
 import shutil
 import socket
+import struct
 
 import pytest
 
@@ -388,6 +389,136 @@ def test_doctor_jadx_probe_uses_workspace_root(monkeypatch, tmp_path):
     rec = fstat._check_jadx()
     assert rec["available"] is True
     assert str(empty_ws / "apk") in rec["reason"]
+
+
+@pytest.fixture
+def masscan_on_path(monkeypatch):
+    """Doctor sees masscan on PATH without depending on its install."""
+    monkeypatch.setattr(
+        "auxiliaries.framework_status._check_path",
+        lambda cmd: {"available": True, "reason": "/usr/bin/masscan",
+                     "remediation": ""},
+    )
+    monkeypatch.setattr(
+        "auxiliaries.framework_status.shutil.which",
+        lambda cmd: "/usr/bin/masscan",
+    )
+
+
+def test_masscan_probe_grades_setcapd_binary_capable(monkeypatch, masscan_on_path):
+    """A setcap'd binary launches from an unprivileged lane: the probe that
+    graded its own denied SOCK_RAW attempt reported 'may fail at launch,
+    not at probe' for a scan that would actually have run."""
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 1000)
+    monkeypatch.setattr(fstat, "_process_raw_socket_ok", lambda: False)
+    monkeypatch.setattr(
+        fstat, "_read_file_cap_net_raw",
+        lambda path: {"revision": 3, "effective_flag": True,
+                      "cap_net_raw": True, "size": 24},
+    )
+    rec = fstat._check_masscan()
+    assert rec["available"] is True
+    assert "cap_net_raw" in rec["reason"]
+    assert "denied" in rec["reason"]        # lane probe failure is stated
+    assert rec["extra"]["lane_sock_raw"] is False
+    assert rec["extra"]["file_caps"]["cap_net_raw"] is True
+
+
+def test_masscan_probe_lane_socket_inherited(monkeypatch, masscan_on_path):
+    """When the lane can create SOCK_RAW, launched subprocesses inherit it —
+    the reason must name that source, not imply a hidden mismatch."""
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 1000)
+    monkeypatch.setattr(fstat, "_process_raw_socket_ok", lambda: True)
+    monkeypatch.setattr(
+        fstat, "_read_file_cap_net_raw",
+        lambda path: {"decode_error": "no file capability applied (not setcap'd)"},
+    )
+    rec = fstat._check_masscan()
+    assert rec["available"] is True
+    assert "SOCK_RAW" in rec["reason"] and "inherit" in rec["reason"]
+
+
+def test_masscan_probe_root_lane(monkeypatch, masscan_on_path):
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 0)
+    monkeypatch.setattr(fstat, "_process_raw_socket_ok", lambda: False)
+    monkeypatch.setattr(
+        fstat, "_read_file_cap_net_raw",
+        lambda path: {"decode_error": "no file capability applied (not setcap'd)"},
+    )
+    rec = fstat._check_masscan()
+    assert rec["available"] is True
+    assert "root" in rec["reason"]
+
+
+def test_masscan_probe_no_privilege_scopes_to_lane(monkeypatch, masscan_on_path):
+    """No privilege anywhere on this lane: the verdict says the scan fails
+    from THIS lane, never the old 'may fail at launch, not at probe' that
+    its own failed probe contradicted."""
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    monkeypatch.setattr(os_mod, "geteuid", lambda: 1000)
+    monkeypatch.setattr(fstat, "_process_raw_socket_ok", lambda: False)
+    monkeypatch.setattr(
+        fstat, "_read_file_cap_net_raw",
+        lambda path: {"decode_error": "no file capability applied (not setcap'd)"},
+    )
+    rec = fstat._check_masscan()
+    assert rec["available"] is False
+    assert "not at probe" not in rec["reason"]
+    assert "from this lane" in rec["reason"]
+    assert "uid 1000" in rec["reason"]
+    assert "sudo setcap cap_net_raw+ep" in rec["remediation"]
+
+
+def test_parse_cap_xattr_setcapd_ep_is_effective():
+    """cap_net_raw+ep (rev 3): permitted bit 13 plus the effective flag is
+    an exec-time-capable grant."""
+    from auxiliaries.framework_status import _parse_cap_xattr
+    blob = struct.pack("<6I", 0x03000001, 1 << 13, 0, 0, 0, 1000)
+    dec = _parse_cap_xattr(blob)
+    assert dec["cap_net_raw"] is True
+    assert dec["cap_net_raw_in_permitted"] is True
+    assert dec["effective_flag"] is True
+    assert dec["revision"] == 3
+
+
+def test_parse_cap_xattr_bare_p_grant_is_inert():
+    """``setcap cap_net_raw+p`` stores the bit but never reaches the
+    effective set for an unprivileged exec — the probe must not upgrade it."""
+    from auxiliaries.framework_status import _parse_cap_xattr
+    blob = struct.pack("<4I", 0x02000000, 1 << 13, 0, 0)
+    dec = _parse_cap_xattr(blob)
+    assert dec["cap_net_raw"] is False
+    assert dec["cap_net_raw_in_permitted"] is True
+    assert dec["effective_flag"] is False
+
+
+def test_parse_cap_xattr_other_cap_is_not_net_raw():
+    """Only bit 13 counts: cap_net_bind_service+ep grades as not raw-capable."""
+    from auxiliaries.framework_status import _parse_cap_xattr
+    blob = struct.pack("<6I", 0x03000001, 1 << 10, 0, 0, 0, 1000)
+    dec = _parse_cap_xattr(blob)
+    assert dec["cap_net_raw"] is False
+
+
+def test_parse_cap_xattr_rev1_and_junk():
+    """Rev1 12-byte blobs decode; garbage sizes fail loudly, not by being
+    silently read as 'no caps'."""
+    from auxiliaries.framework_status import _parse_cap_xattr
+    rev1 = _parse_cap_xattr(struct.pack("<3I", 0x01000001, 1 << 13, 0))
+    assert rev1["cap_net_raw"] is True and rev1["revision"] == 1
+    junk = _parse_cap_xattr(struct.pack("<2I", 0x02000001, 1 << 13))
+    assert "decode_error" in junk
 
 
 def test_print_doctor_sudo_hint_on_permission_error(monkeypatch, capsys):

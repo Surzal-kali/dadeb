@@ -16,12 +16,14 @@ point in a session to verify the harness is alive.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import socket
+import struct
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from constants import framework_tool, resolve_workspace_root, brain_socket_path
 from utils.snapshot_cache import get_snapshot_store
@@ -327,24 +329,129 @@ def _check_jadx() -> Dict[str, Any]:
             "remediation": f"create {APK_TARGETS_ROOT} or set JADX_APK_TARGETS_ROOT"}
 
 
+# run_masscan launches the masscan BINARY as a plain subprocess, so scan
+# capability rides the binary (file caps) or the launching lane (root euid /
+# ambient caps) — not the doctor process's own SOCK_RAW probe.  Grading the
+# probe lane lied in both directions: a setcap'd binary got "may fail at
+# launch" while the setcap'd launch runs fine from an unprivileged lane, and
+# a privileged probe could green-light a scan lane it can't see.
+
+# Linux security.capability xattr (uapi/linux/capability.h): little-endian
+# u32s — magic_etc (revision in the top byte, VFS_CAP_FLAGS_EFFECTIVE in
+# bit 0), then permitted/inheritable pairs; rev 3 appends rootid.
+_CAP_XATTR_SIZES = (12, 20, 24)   # XATTR_CAPS_SZ_1/2/3
+_VFS_CAP_REVISIONS = (1, 2, 3)
+_CAP_NET_RAW_BIT = 13
+_CAP_EFFECTIVE_FLAG = 0x000001
+
+
+def _parse_cap_xattr(blob: bytes) -> Dict[str, Any]:
+    """Decode a security.capability blob into exec-time-relevant facts.
+
+    A file capability reaches the effective set at exec only when the
+    kernel's effective flag rides the blob — ``setcap cap_net_raw+ep``,
+    not a bare ``+p`` grant (that one is stored but inert for
+    unprivileged callers).
+    """
+    if len(blob) % 4 or len(blob) < 12:
+        return {"size": len(blob),
+                "decode_error": f"unexpected blob size {len(blob)}"}
+    words = struct.unpack("<%dI" % (len(blob) // 4), blob)
+    magic_etc = words[0]
+    revision = (magic_etc >> 24) & 0xFF
+    if revision not in _VFS_CAP_REVISIONS:
+        return {"size": len(blob), "magic": f"0x{magic_etc:08x}",
+                "decode_error": f"unrecognized revision {revision}"}
+    net_raw = bool(words[1] & (1 << _CAP_NET_RAW_BIT))
+    effective = bool(magic_etc & _CAP_EFFECTIVE_FLAG)
+    return {"size": len(blob), "revision": revision,
+            "effective_flag": effective,
+            "cap_net_raw_in_permitted": net_raw,
+            "cap_net_raw": net_raw and effective}
+
+
+def _read_file_cap_net_raw(path: str) -> Dict[str, Any]:
+    """Exec-effective cap_net_raw evidence carried by the BINARY itself."""
+    try:
+        return _parse_cap_xattr(os.getxattr(path, "security.capability"))
+    except OSError as exc:
+        if exc.errno == errno.ENODATA:
+            return {"decode_error": "no file capability applied (not setcap'd)"}
+        return {"decode_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _process_raw_socket_ok() -> bool:
+    """Can a subprocess launched from THIS lane open a raw socket?
+
+    Children inherit the launching lane's effective caps, so a plain
+    subprocess launch is capable whenever this process (root or ambient
+    caps) can open SOCK_RAW.  When this probe is denied, the launch can
+    still be capable through file capabilities on the binary — the setcap
+    case this lane must not grade as broken.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        s.close()
+        return True
+    except (PermissionError, OSError):
+        return False
+
+
+def _masscan_launch_capability(euid: int, lane_raw: bool,
+                               file_caps: Dict[str, Any]) -> Tuple[bool, str]:
+    """Grade masscan's LAUNCH from the privilege sources the launch uses.
+
+    Returns ``(capable, reason)``; the reason names the deciding source so
+    the report never claims a launch failure the evidence doesn't support.
+    """
+    setcap_capable = bool(file_caps.get("cap_net_raw"))
+    if setcap_capable and (lane_raw or euid == 0):
+        return True, ("masscan on PATH; binary carries a setcap'd "
+                      "cap_net_raw and this lane can also open SOCK_RAW")
+    if setcap_capable:
+        return True, ("masscan on PATH; binary carries a setcap'd "
+                      "cap_net_raw — subprocess launches scan fine even "
+                      "though this lane's own SOCK_RAW probe is denied "
+                      "(file caps ride the binary, not the lane)")
+    if lane_raw:
+        return True, ("masscan on PATH; this lane can create SOCK_RAW "
+                      "(launched subprocesses inherit it)")
+    if euid == 0:
+        return True, ("masscan on PATH; running as root (uid 0) — "
+                      "raw sockets creatable")
+    return False, (
+        f"masscan on PATH but no raw-socket privilege on this lane: uid {euid} "
+        "can't create SOCK_RAW and the binary carries no cap_net_raw file "
+        "capability — a scan launched from this lane fails at launch; if "
+        "scans launch from a different lane, grade that one "
+        "(sudo daharness doctor)")
+
+
 def _check_masscan() -> Dict[str, Any]:
-    """masscan + raw-socket capability (classic doctor-worthy runtime trap)."""
+    """masscan + raw-socket capability, graded on the LAUNCH path.
+
+    The old probe graded the doctor process's own SOCK_RAW attempt and
+    reported "may fail at launch, not at probe" while the probe itself had
+    failed — the honest question is whether a plain-subprocess ``masscan``
+    launch can open a raw socket: root euid, a SOCK_RAW-capable lane, or an
+    exec-effective cap_net_raw file capability on the binary.  Per-source
+    evidence rides in ``extra``.
+    """
     m = _check_path("masscan")
     if not m["available"]:
         return m
-    raw_ok = False
-    try:
-        import socket as _s
-        s = _s.socket(_s.AF_INET, _s.SOCK_RAW, _s.IPPROTO_TCP)
-        s.close()
-        raw_ok = True
-    except (PermissionError, OSError):
-        raw_ok = False
-    if raw_ok:
-        return {**m, "available": True, "reason": "masscan on PATH; SOCK_RAW creatable"}
-    return {**m, "available": False,
-            "reason": "masscan on PATH but raw sockets are not permitted under current doctor namespace — masscan may fail at launch, not at probe",
-            "remediation": "run under root/CAP_NET_RAW (sudo setcap cap_net_raw+ep $(which masscan))"}
+    path = shutil.which("masscan") or "masscan"
+    euid = os.geteuid()
+    lane_raw = _process_raw_socket_ok()
+    file_caps = _read_file_cap_net_raw(path)
+    capable, reason = _masscan_launch_capability(euid, lane_raw, file_caps)
+    extra = {"euid": euid, "lane_sock_raw": lane_raw, "file_caps": file_caps}
+    if capable:
+        return {**m, "available": True, "reason": reason, "extra": extra}
+    return {**m, "available": False, "reason": reason, "extra": extra,
+            "remediation": ("sudo setcap cap_net_raw+ep $(which masscan); "
+                            "or run the lane as root / grant it CAP_NET_RAW "
+                            "(systemd AmbientCapabilities=CAP_NET_RAW)")}
 
 
 def _check_msf() -> Dict[str, Any]:
