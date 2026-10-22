@@ -31,6 +31,7 @@ fi
 chown daharness:daharness "$STATE_ROOT"
 chmod 2770 "$STATE_ROOT"
 
+
 # Ghost-uid reconcile (2026-10-21 VM round-trip): dpkg purge keeps
 # /var/lib/daharness (operator work product), but dpkg ALSO deletes the
 # system user — so a reinstall mints a NEW uid under the SAME state root.
