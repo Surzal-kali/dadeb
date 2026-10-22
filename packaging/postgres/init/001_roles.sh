@@ -11,10 +11,16 @@
 # harness_operator may run engagement.purge().
 set -e
 
-HARNESS_DB_OPERATOR_PASSWORD="${HARNESS_DB_OPERATOR_PASSWORD:-harness_operator_change_me}"
-HARNESS_DB_BRAIN_PASSWORD="${HARNESS_DB_BRAIN_PASSWORD:-harness_brain_change_me}"
-HARNESS_DB_GATEWAY_PASSWORD="${HARNESS_DB_GATEWAY_PASSWORD:-harness_gateway_change_me}"
-HARNESS_DB_REPL_PASSWORD="${HARNESS_DB_REPL_PASSWORD:-harness_repl_change_me}"
+# Naming contract = pg.env / .env.example / utils/engagement.py:
+# HARNESS_DB_PASSWORD_<LANE>. The legacy HARNESS_DB_<LANE>_PASSWORD spellings
+# are accepted as a fallback for callers predating the rename (this is what
+# shipped daharness-pg run_roles_script() used to pass): whichever name a
+# caller populates wins, and an empty set falls to the baked-in defaults —
+# never silently to placeholders when the operator env carries real values.
+HARNESS_DB_PASSWORD_OPERATOR="${HARNESS_DB_PASSWORD_OPERATOR:-${HARNESS_DB_OPERATOR_PASSWORD:-harness_operator_change_me}}"
+HARNESS_DB_PASSWORD_BRAIN="${HARNESS_DB_PASSWORD_BRAIN:-${HARNESS_DB_BRAIN_PASSWORD:-harness_brain_change_me}}"
+HARNESS_DB_PASSWORD_GATEWAY="${HARNESS_DB_PASSWORD_GATEWAY:-${HARNESS_DB_GATEWAY_PASSWORD:-harness_gateway_change_me}}"
+HARNESS_DB_PASSWORD_REPL="${HARNESS_DB_PASSWORD_REPL:-${HARNESS_DB_REPL_PASSWORD:-harness_repl_change_me}}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     -- Operator session: the only role allowed to run engagement.purge().
@@ -37,10 +43,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     END
     \$\$;
 
-    ALTER ROLE harness_operator PASSWORD '$HARNESS_DB_OPERATOR_PASSWORD';
-    ALTER ROLE brain_lane       PASSWORD '$HARNESS_DB_BRAIN_PASSWORD';
-    ALTER ROLE gateway_lane     PASSWORD '$HARNESS_DB_GATEWAY_PASSWORD';
-    ALTER ROLE repl_lane        PASSWORD '$HARNESS_DB_REPL_PASSWORD';
+    ALTER ROLE harness_operator PASSWORD '$HARNESS_DB_PASSWORD_OPERATOR';
+    ALTER ROLE brain_lane       PASSWORD '$HARNESS_DB_PASSWORD_BRAIN';
+    ALTER ROLE gateway_lane     PASSWORD '$HARNESS_DB_PASSWORD_GATEWAY';
+    ALTER ROLE repl_lane        PASSWORD '$HARNESS_DB_PASSWORD_REPL';
 
     -- Connect rights on this database (init scripts run after the db exists).
     GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO harness_operator, brain_lane, gateway_lane, repl_lane;

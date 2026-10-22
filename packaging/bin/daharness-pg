@@ -73,11 +73,15 @@ cluster_major() {
 }
 
 run_roles_script() {
-	POSTGRES_USER=postgres POSTGRES_DB="$DBNAME" \
-	HARNESS_DB_OPERATOR_PASSWORD="$PW_OPERATOR" \
-	HARNESS_DB_BRAIN_PASSWORD="$PW_BRAIN" \
-	HARNESS_DB_GATEWAY_PASSWORD="$PW_GATEWAY" \
-	HARNESS_DB_REPL_PASSWORD="$PW_REPL" \
+	# Password env names = the pg.env / .env.example / engagement.py spelling
+	# (HARNESS_DB_PASSWORD_<LANE>) — must match the 001_roles.sh readers, and
+	# PGPORT is pinned explicitly so the roles script can never land on the
+	# default-port cluster regardless of call ordering.
+	POSTGRES_USER=postgres POSTGRES_DB="$DBNAME" PGPORT="$PORT" \
+	HARNESS_DB_PASSWORD_OPERATOR="$PW_OPERATOR" \
+	HARNESS_DB_PASSWORD_BRAIN="$PW_BRAIN" \
+	HARNESS_DB_PASSWORD_GATEWAY="$PW_GATEWAY" \
+	HARNESS_DB_PASSWORD_REPL="$PW_REPL" \
 	runuser -u postgres -- bash "$INIT_DIR/001_roles.sh"
 }
 

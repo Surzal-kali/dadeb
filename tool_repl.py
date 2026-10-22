@@ -61,7 +61,22 @@ from pathlib import Path
 # pristine behavior) and idempotent, so wrapper-armed lanes (sitecustomize
 # already inserted vendor via PYTHONPATH) insert nothing.
 _vendor = str(Path(__file__).resolve().parent / "vendor")
-if Path(_vendor).is_dir() and _vendor not in sys.path:
+# Interpreter-compat gate — see tree-root sitecustomize.py. The closure's
+# C-extensions carry the packaging interpreter's cp-tag (pydantic_core's
+# cp314-only binary killed this exact kernelspec lane on the dockered
+# jupyter's py3.13). Arm only when this interpreter can actually load the
+# closure; otherwise fall through to the environment's own site-packages.
+_armable = True
+if Path(_vendor).is_dir():
+    _tag = f"cpython-{sys.version_info[0]}{sys.version_info[1]}"
+    for _so in Path(_vendor).rglob("*.so"):
+        if _so.name.endswith(".abi3.so"):
+            continue
+        _cp = next((p for p in _so.name.split(".") if p.startswith("cpython-")), "")
+        if _cp and not _cp.startswith(_tag + "-"):
+            _armable = False
+            break
+if _armable and _vendor not in sys.path:
     sys.path.insert(0, _vendor)
 
 # Make project root importable (same as before the split — this file stays the
