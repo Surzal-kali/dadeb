@@ -21,6 +21,14 @@
 # schemas/tables/functions are IF NOT EXISTS / stable REPLACE), then
 # rewrites pg.env from live state. Clusters created here are autostart:
 # after a reboot postgresql.service brings them up.
+#
+# HARNESS_DB_HOST in pg.env is the lane's client endpoint AND — on every
+# re-init — the bind the cluster opens: 0.0.0.0/::/'*' → listen '*' in a
+# managed conf.d file + a managed pg_hba.conf block (RFC1918, scram) for
+# the lane roles; 127.0.0.1/localhost → the Debian loopback default, any
+# previous override removed; anything else → pinned bind. A HARNESS_DB_PORT
+# other than :5433 points the lane at a foreign server and leaves the
+# local cluster's bind untouched.
 set -u
 
 CLUSTER=daharness
@@ -37,7 +45,9 @@ usage() {
 daharness-pg — engagement-cobweb Postgres lane (optional; deb profile)
 
   daharness-pg init     provision/repair the dedicated cluster + harness db
-                        + lane roles; write /etc/daharness/pg.env
+                        + lane roles; mirror pg.env's HARNESS_DB_HOST into
+                        the cluster bind (+ pg_hba lane block for container
+                        lanes); write /etc/daharness/pg.env
   daharness-pg start    start the 'daharness' cluster
   daharness-pg stop     stop the 'daharness' cluster (journal lane degrades
                         to SQLite stores — nothing is lost except PG-only
@@ -76,6 +86,95 @@ run_sql() {
 		--dbname="$DBNAME" -f "$1"
 }
 
+# Socket-only readiness probe (PGPORT pins the .s.PGSQL.$PORT socket) —
+# immune to whatever listen_addresses the cluster carries.
+wait_ready() {
+	i=0
+	while ! pg_isready -q -p "$PORT" 2>/dev/null; do
+		i=$((i + 1)); [ "$i" -gt 20 ] && return 1
+		sleep 1
+	done
+	return 0
+}
+
+# pg_hba managed block: one scram line per RFC1918 block, comma-jointed
+# lane roles. on = strip + rewrite, off = strip only (loopback bind).
+apply_lane_hba() { # <cluster confdir> on|off
+	local conf="$1/pg_hba.conf" on="$2" fown fmode
+	[ -f "$conf" ] || { err "missing $conf"; return 1; }
+	fown=$(stat -c '%U:%G' "$conf")
+	fmode=$(stat -c '%a' "$conf")
+	HBA_CHANGED=0
+	grep -q '^# BEGIN daharness-pg managed' "$conf" && HBA_CHANGED=1
+	sed -i '/^# BEGIN daharness-pg managed/,/^# END daharness-pg managed/d' "$conf" \
+		|| { err "cannot rewrite $conf"; return 1; }
+	if [ "$on" = on ]; then
+		HBA_CHANGED=1
+		[ "$(tail -n 1 "$conf" | wc -c)" -gt 1 ] && printf '\n' >> "$conf"
+		printf '%s\n' \
+			"# BEGIN daharness-pg managed — lane roles via scram-sha-256 (daharness-pg(1))" \
+			"host ${DBNAME} repl_lane,gateway_lane,brain_lane,harness_operator 172.16.0.0/12 scram-sha-256" \
+			"host ${DBNAME} repl_lane,gateway_lane,brain_lane,harness_operator 10.0.0.0/8 scram-sha-256" \
+			"host ${DBNAME} repl_lane,gateway_lane,brain_lane,harness_operator 192.168.0.0/16 scram-sha-256" \
+			"# END daharness-pg managed" >> "$conf" \
+			|| { err "cannot append lane block to $conf"; return 1; }
+	fi
+	# sed -i re-creates the inode as root:root — restore the original
+	# owner/mode so the postgres process can still read the file.
+	chown "$fown" "$conf" 2>/dev/null
+	chmod "$fmode" "$conf" 2>/dev/null
+	return 0
+}
+
+# Mirror pg.env's HARNESS_DB_HOST into the cluster: bind + lane hba.
+apply_lane_bind() { # <major> <db host whose port == this cluster's>
+	local major="$1" host="${2:-127.0.0.1}" confdir conf want hba_on
+	confdir="/etc/postgresql/$major/$CLUSTER"
+	conf="$confdir/conf.d/daharness-pg.conf"
+	: "${BIND_CHG:=0}"
+	: "${HBA_CHANGED:=0}"
+	case "$host" in
+		0.0.0.0|::|'*') want='*' ;;
+		127.0.0.1|localhost|::1) want="" ;;
+		*) want="$host" ;;
+	esac
+	if [ -n "$want" ]; then
+		BIND_APPLIED=$want
+		mkdir -p "$confdir/conf.d" 2>/dev/null
+		{
+			echo "# managed by daharness-pg(1) — mirrors HARNESS_DB_HOST in ${PG_ENV}"
+			echo "listen_addresses = '$want'"
+		} > "$conf.new"
+		if cmp -s "$conf.new" "$conf"; then
+			rm -f "$conf.new"
+		else
+			mv "$conf.new" "$conf" && chmod 0644 "$conf" && BIND_CHG=1
+		fi
+		hba_on=on
+	else
+		BIND_APPLIED="127.0.0.1"
+		if [ -f "$conf" ]; then
+			rm -f "$conf" && BIND_CHG=1
+			echo "bind override removed — cluster back on the Debian default bind"
+		fi
+		hba_on=off
+	fi
+	apply_lane_hba "$confdir" "$hba_on" || return 1
+	if [ "$BIND_CHG" = 1 ]; then
+		if [ -n "$want" ]; then
+			echo "rebinding cluster ${major}/${CLUSTER} to listen_addresses = ${want} (restart) ..."
+		else
+			echo "reverting ${major}/${CLUSTER} to the Debian default localhost bind (restart) ..."
+		fi
+		pg_ctlcluster "$major" "$CLUSTER" restart || { err "cluster restart failed"; return 1; }
+		wait_ready || { err "cluster not ready after restart"; return 1; }
+	elif [ "$HBA_CHANGED" = 1 ]; then
+		pg_ctlcluster "$major" "$CLUSTER" reload >/dev/null 2>&1 \
+			|| err "pg_hba reload skipped (cluster reload failed)"
+	fi
+	return 0
+}
+
 cmd_init() {
 	need_root init
 	for tool in pg_createcluster pg_ctlcluster psql createdb; do
@@ -107,11 +206,7 @@ cmd_init() {
 	export PGPORT="$PORT"
 
 	# pg_createcluster --start usually races its own readiness; wait briefly.
-	i=0
-	while ! pg_isready -q -h 127.0.0.1 -p "$PORT" 2>/dev/null; do
-		i=$((i + 1)); [ "$i" -gt 20 ] && die "cluster did not become ready on :${PORT} (check pg_lsclusters)"
-		sleep 1
-	done
+	wait_ready || die "cluster did not become ready on :${PORT} (check pg_lsclusters)"
 
 	# Database before the bundle (001's GRANT CONNECT references it).
 	# A CONNECT failure must die, not masquerade as "database missing"
@@ -125,13 +220,14 @@ cmd_init() {
 		echo "created database '${DBNAME}'"
 	fi
 
-	# Lane passwords: reuse pg.env if it already carries all four, else mint.
+	# Lane knobs + passwords: source pg.env when present, reuse what it
+	# carries (operator endpoint edits included), mint what it lacks.
 	if [ -f "$PG_ENV" ]; then
 		# shellcheck disable=SC1090
 		. "$PG_ENV"
 		if [ "${HARNESS_DB_PASSWORD_OPERATOR:-}" ] && [ "${HARNESS_DB_PASSWORD_BRAIN:-}" ] \
 			&& [ "${HARNESS_DB_PASSWORD_GATEWAY:-}" ] && [ "${HARNESS_DB_PASSWORD_REPL:-}" ]; then
-			echo "reusing existing lane passwords from ${PG_ENV}"
+			echo "reusing existing lane knobs + passwords from ${PG_ENV}"
 		fi
 	fi
 	PW_OPERATOR=${HARNESS_DB_PASSWORD_OPERATOR:-$(gen_hex)}
@@ -140,6 +236,17 @@ cmd_init() {
 	PW_REPL=${HARNESS_DB_PASSWORD_REPL:-$(gen_hex)}
 	: "${PW_OPERATOR:?gen_hex failed}" "${PW_BRAIN:?gen_hex failed}" \
 		"${PW_GATEWAY:?gen_hex failed}" "${PW_REPL:?gen_hex failed}"
+	DB_HOST="${HARNESS_DB_HOST:-127.0.0.1}"
+	DB_PORT="${HARNESS_DB_PORT:-$PORT}"
+
+	# The lane endpoint doubles as the cluster bind: mirror it in before
+	# the bundle (loopback keeps the Debian default; a foreign-port pg.env
+	# touches nothing local).
+	if [ "$DB_PORT" = "$PORT" ]; then
+		apply_lane_bind "$MAJOR" "$DB_HOST" || die "cluster bind wiring failed"
+	else
+		echo "pg.env points the lane at a foreign server (HARNESS_DB_PORT=${DB_PORT}, not :${PORT}) — local cluster bind untouched"
+	fi
 
 	echo "running init bundle (roles, schemas, functions, operator ACL) ..."
 	run_roles_script || die "001_roles.sh failed (bundle output above)"
@@ -153,8 +260,12 @@ cmd_init() {
 		echo "# Sourced by the systemd units (EnvironmentFile=-) and by operator"
 		echo "# shells that run the REPL (. ${PG_ENV}). Rotate: move this file"
 		echo "# aside, re-run init, restart daharness units."
-		echo "HARNESS_DB_HOST=127.0.0.1"
-		echo "HARNESS_DB_PORT=${PORT}"
+		echo "# HARNESS_DB_HOST doubles as the cluster bind — re-run init to apply"
+		echo "# an edit: 127.0.0.1 (default) keeps the Debian loopback bind;"
+		echo "# 0.0.0.0 binds every interface (listen '*') plus a managed lane"
+		echo "# pg_hba block, so container lanes reach the host at 172.28.0.1:${PORT}."
+		echo "HARNESS_DB_HOST=${DB_HOST}"
+		echo "HARNESS_DB_PORT=${DB_PORT}"
 		echo "HARNESS_DB_NAME=${DBNAME}"
 		echo "HARNESS_DB_PASSWORD_OPERATOR=${PW_OPERATOR}"
 		echo "HARNESS_DB_PASSWORD_BRAIN=${PW_BRAIN}"
@@ -166,16 +277,36 @@ cmd_init() {
 	chmod 0640 "${PG_ENV}.new"
 	mv "${PG_ENV}.new" "$PG_ENV"
 
+	# Banner endpoint + probe host resolve off the applied bind.
+	case "${BIND_APPLIED:-127.0.0.1}" in
+		'*')
+			bind_txt="0.0.0.0:${PORT} (listen '*', managed hba for lane roles)"
+			hint="  container lanes reach it at the workbench bridge gateway 172.28.0.1:${PORT}"
+			probe_host=127.0.0.1
+			;;
+		127.0.0.1)
+			bind_txt="127.0.0.1:${PORT} (host lanes only)"
+			hint=""
+			probe_host=127.0.0.1
+			;;
+		*)
+			bind_txt="${BIND_APPLIED}:${PORT} (pinned bind)"
+			hint=""
+			probe_host="$BIND_APPLIED"
+			;;
+	esac
+
 	cat <<EOF
 engagement-Postgres lane is up:
-  cluster ${MAJOR}/${CLUSTER} on 127.0.0.1:${PORT}, database ${DBNAME}
+  cluster ${MAJOR}/${CLUSTER} on ${bind_txt}, database ${DBNAME}
+${hint}
   lane knobs written to ${PG_ENV} (root:daharness 0640)
   restart the daharness units to pick them up:
     sudo systemctl restart daharness daharness-kernel
   reboot-safe: the cluster is autostart (postgresql.service).
-  probe:
+  probe (host lane):
     PGPASSWORD=\$(grep ^HARNESS_DB_PASSWORD_REPL ${PG_ENV} | cut -d= -f2) \\
-      psql -h 127.0.0.1 -p ${PORT} -U repl_lane -d ${DBNAME} -c 'select 1'
+      psql -h ${probe_host} -p ${PORT} -U repl_lane -d ${DBNAME} -c 'select 1'
 EOF
 }
 
@@ -202,10 +333,17 @@ cmd_status() {
 		echo "cluster '${CLUSTER}': not provisioned (lane off; SQLite stores active)"
 		return 0
 	fi
-	if pg_isready -q -h 127.0.0.1 -p "$PORT" 2>/dev/null; then
-		echo "listening on 127.0.0.1:${PORT}: ready"
+	MAJOR=$(cluster_major)
+	conf="/etc/postgresql/${MAJOR}/${CLUSTER}/conf.d/daharness-pg.conf"
+	if [ -f "$conf" ]; then
+		echo "bind: $(sed -n "s/^listen_addresses *= *//p" "$conf" | head -1 | tr -d "'")"
 	else
-		echo "listening on 127.0.0.1:${PORT}: NOT ready"
+		echo "bind: not wired — Debian default localhost bind (pg.env mirror)"
+	fi
+	if pg_isready -q -p "$PORT" 2>/dev/null; then
+		echo "unix socket .s.PGSQL.${PORT}: ready"
+	else
+		echo "unix socket .s.PGSQL.${PORT}: NOT ready"
 	fi
 	if [ -f "$PG_ENV" ]; then
 		echo "knobs: ${PG_ENV} present ($(stat -c '%U:%a' "$PG_ENV" 2>/dev/null))"

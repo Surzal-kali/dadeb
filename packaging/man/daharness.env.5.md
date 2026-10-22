@@ -117,10 +117,19 @@ HARNESS_DB_PASSWORD_*)**
   (operator/brain/gateway/repl roles) — to `/etc/daharness/pg.env`,
   which the systemd units source via a tolerant `EnvironmentFile=-`
   line and operator shells source for the REPL. Editing the lane onto a
-  server daharness-pg did not provision belongs in pg.env (an explicit
-  HARNESS_DB_HOST wins over the built-in candidate list), or in the
-  environment of the shell that runs the harness — never in
-  *daharness.env*.
+  server daharness-pg did not provision belongs in pg.env (a
+  HARNESS_DB_PORT other than the cluster's 5433 points the lane at a
+  foreign server; a specific non-wildcard HARNESS_DB_HOST pins the
+  client endpoint), or in the environment of the shell that runs the
+  harness — never in *daharness.env*. Within pg.env HARNESS_DB_HOST
+  also drives the dedicated cluster's own bind on the next
+  `daharness-pg init`: 127.0.0.1 (the default) keeps the cluster on
+  host loopback, while 0.0.0.0/`*` re-binds it to every interface
+  (listen `*`) and manages an *pg_hba.conf* block — scram, RFC1918 —
+  for the four lane roles, after which container-lane clients reach
+  the host at the workbench-bridge gateway (172.28.0.1) through the
+  built-in candidate list (loopback first, then the gateway) that the
+  wildcard leaves intact.
 
 # BOARD AUTH KNOBS
 

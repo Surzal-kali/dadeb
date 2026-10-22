@@ -172,18 +172,23 @@ def _lane_role() -> str:
 
 
 def _host_candidates() -> List[str]:
-    """Postgres endpoints to try, ordered. Explicit ``HARNESS_DB_HOST`` wins
-    (single candidate). Default order is lane-safe in this stack's topology:
-    the compose service name 'postgres' (container lanes on the workbench
-    network resolve it; host-lane processes fail the lookup instantly) then
-    the host-published loopback ('127.0.0.1', the host lane's reach). The
-    workbench bridge IP '172.28.0.20' is a pinned-subnet fallback for lanes
-    that never see DNS.
+    """Postgres endpoints to try, ordered. An explicit ``HARNESS_DB_HOST``
+    pins the single candidate — except the wildcard bind values
+    (``0.0.0.0``/``::``/``*``): a wildcard is what the operator sets in
+    pg.env when ``daharness-pg init`` binds the host-native cluster to
+    every interface, and it names no client endpoint, so the built-in
+    order stands — '127.0.0.1' (host lanes hit on the first try; container
+    lanes fail it instantly against the host-native cluster) then
+    '172.28.0.1' (the workbench-bridge gateway, how every published
+    container lane reaches the host's listen socket; the managed hba block
+    the same init wires lets the lane roles in). The compose-era 'postgres'
+    service name and its pinned 172.28.0.20 IP retired 2026-10-21 with the
+    compose postgres service.
     """
     explicit = os.getenv("HARNESS_DB_HOST", "").strip()
-    if explicit:
+    if explicit and explicit not in ("0.0.0.0", "::", "*"):
         return [explicit]
-    return ["postgres", "127.0.0.1", "172.28.0.20"]
+    return ["127.0.0.1", "172.28.0.1"]
 
 
 def lane_name() -> str:

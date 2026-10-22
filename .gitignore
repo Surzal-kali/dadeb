@@ -70,3 +70,4 @@ todo.md
 framework_tools.pyi
 framework_tools.py
 .ipynb_checkpoints/
+.vscode/settings.json

@@ -30,8 +30,21 @@ cluster cannot collide with msf's port.
 - runs the shipped init bundle (roles + password ALTERs, schemas,
   SECURITY DEFINER `engagement.purge()`, operator registry ACL) from
   `/usr/share/daharness/postgres/init/` with `-v ON_ERROR_STOP=1`;
-- writes resolved knobs to `/etc/daharness/pg.env`
-  (HARNESS_DB_HOST/PORT/NAME plus one
+- mirrors the operator's HARNESS_DB_HOST from pg.env into the cluster
+  bind: unset, 127.0.0.1 or localhost keeps the Debian-default loopback
+  bind (removing any earlier override); `0.0.0.0`, `::` or `*` re-binds
+  via `listen_addresses = '*'` in
+  `/etc/postgresql/<maj>/daharness/conf.d/daharness-pg.conf` and manages
+  an *pg_hba.conf* block (`BEGIN/END daharness-pg managed`) admitting the
+  four lane roles from RFC1918 space with scram-sha-256 — container lanes
+  then reach the host at the workbench-bridge gateway, `172.28.0.1:5433`.
+  Any other value pins the bind to that address; a HARNESS_DB_PORT other
+  than 5433 means the lane targets a foreign server, so the local
+  cluster's bind is left untouched. A changed bind restarts the cluster;
+  a hba-only change reloads it;
+- rewrites resolved knobs to `/etc/daharness/pg.env`
+  (HARNESS_DB_HOST/PORT/NAME — host and port re-read from an existing
+  pg.env so operator edits survive — plus one
   HARNESS_DB_PASSWORD_{OPERATOR,BRAIN,GATEWAY,REPL} per lane role),
   mode 0640 root:daharness — the systemd units read it via a tolerant
   `EnvironmentFile=-` line, and an operator shell sources it before
@@ -39,7 +52,10 @@ cluster cannot collide with msf's port.
 
 `init` is idempotent: it reuses lane passwords already recorded in
 pg.env, re-runs the bundle (roles are IF NOT EXISTS; schemas/functions
-are CREATE IF NOT EXISTS) and rewrites pg.env from live state. Lane
+are CREATE IF NOT EXISTS) and rewrites pg.env from live state. Re-running
+`init` is also how an edited pg.env takes effect — a HARNESS_DB_HOST edit
+lands as a cluster re-bind (with restart) at the next `init`; no
+postgresql.conf hand-editing is needed or wanted. Lane
 passwords are 128-bit random hex minted at first init; **rotate** by
 moving pg.env aside, re-running `init`, and restarting the daharness
 units.
@@ -56,14 +72,19 @@ host selection honor the HARNESS_DB_* environment knobs documented in
 **start** / **stop** — start/stop the dedicated cluster
 (*pg_ctlcluster*; requires root).
 
-**status** — cluster presence, readiness on 127.0.0.1:5433, and whether
-pg.env is in place. Works as any user.
+**status** — cluster presence, the wired bind (or the Debian loopback
+default), socket readiness on :5433, and whether pg.env is in place.
+Works as any user.
 
 # FILES
 
 `/etc/daharness/pg.env` — generated lane knobs (not a package conffile:
 it survives upgrades; `apt purge` collects it — `init` re-mints it
 losslessly).
+
+`/etc/postgresql/<major>/daharness/conf.d/daharness-pg.conf` — the bind
+mirror written while pg.env's HARNESS_DB_HOST is non-loopback (deleted
+again when the operator returns the lane to loopback).
 
 `/usr/share/daharness/postgres/init/001_roles.sh`,
 `002_schemas.sql`, `003_functions.sql`,
