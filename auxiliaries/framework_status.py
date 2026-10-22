@@ -557,6 +557,23 @@ def _check_chroma() -> Dict[str, Any]:
     return rec
 
 
+def _pg_host_candidates() -> List[str]:
+    """Postgres endpoints to probe, ordered — mirrors utils.engagement's
+    _host_candidates so the doctor and the engagement lane resolve the
+    cluster the same way. An explicit HARNESS_DB_HOST pins the single
+    candidate (except the wildcard binds 0.0.0.0/::/* which name no
+    client endpoint); the default order is 127.0.0.1 (host lanes hit on
+    the first try) then 172.28.0.1 (the workbench-bridge gateway, how
+    every published container lane reaches the host-native cluster).
+    The compose-era 'postgres' service name retired 2026-10-21 with the
+    compose postgres service.
+    """
+    explicit = os.getenv("HARNESS_DB_HOST", "").strip()
+    if explicit and explicit not in ("0.0.0.0", "::", "*"):
+        return [explicit]
+    return ["127.0.0.1", "172.28.0.1"]
+
+
 def _check_postgres() -> Dict[str, Any]:
     """Engagement-cobweb Postgres lane (deb wrapper: daharness-pg, :5433).
 
@@ -565,19 +582,31 @@ def _check_postgres() -> Dict[str, Any]:
     never run (no pg.env), provisioned but stopped — so the remediation
     line always names the command the operator can copy verbatim
     (daharness-pg init / start), matching the wrapper's own usage text.
+
+    Host resolution mirrors utils.engagement._host_candidates so the
+    doctor sees the same cluster the engagement lane does: host lanes hit
+    127.0.0.1; container lanes (jupyter/code-server) reach the
+    host-native cluster through the workbench-bridge gateway
+    172.28.0.1. Before this alignment the doctor hardcoded 127.0.0.1 and
+    reported postgres down from every container even when the cluster
+    was healthy — the last framework_doctor false-down in the stack.
     """
     import shutil
     import socket as _socket
 
     port = int(os.getenv("HARNESS_DB_PORT", "5433"))
     env_file = os.getenv("DAHARNESS_PG_ENV", "/etc/daharness/pg.env")
-    host = "127.0.0.1"
+    candidates = _pg_host_candidates()
     up = False
-    try:
-        with _socket.create_connection((host, port), timeout=1.0):
-            up = True
-    except OSError:
-        pass
+    host = candidates[0]
+    for cand in candidates:
+        try:
+            with _socket.create_connection((cand, port), timeout=1.0):
+                up = True
+                host = cand
+                break
+        except OSError:
+            pass
 
     base: Dict[str, Any] = {"provider": "postgres", "remediation": ""}
     if up:
@@ -615,7 +644,7 @@ def _check_postgres() -> Dict[str, Any]:
     base["available"] = False
     base["reason"] = (
         f"cluster provisioned (pg.env present) but not answering on "
-        f"{host}:{port}"
+        f"{port} (tried {', '.join(candidates)})"
     )
     base["remediation"] = (
         "sudo daharness-pg start (init re-runs idempotently to repair)"

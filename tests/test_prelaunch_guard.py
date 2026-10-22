@@ -306,6 +306,44 @@ def test_postgres_provisioned_but_down(pg_port, pg_env_path, monkeypatch):
     assert "daharness-pg start" in rec["remediation"]
 
 
+def test_postgres_up_answers_via_gateway(tcp_listener, pg_env_path, monkeypatch):
+    """Container-lane path: HARNESS_DB_HOST pins the workbench-bridge
+    gateway (172.28.0.1) — the doctor must probe that candidate, not the
+    hardcoded 127.0.0.1 it used before alignment. tcp_listener binds
+    127.0.0.1, so point HARNESS_DB_HOST back at loopback to simulate the
+    gateway being reachable; this verifies the explicit-host pin is
+    honored (the bug was the doctor ignoring it)."""
+    monkeypatch.setenv("HARNESS_DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("HARNESS_DB_PORT", str(tcp_listener))
+    rec = _check_postgres()
+    assert rec["available"] is True
+    assert "answering on 127.0.0.1" in rec["reason"]
+
+
+def test_postgres_up_falls_back_to_gateway(tcp_listener, pg_env_path, monkeypatch):
+    """Default order (no HARNESS_DB_HOST): 127.0.0.1 first, then
+    172.28.0.1. A listener on 127.0.0.1 answers on the first candidate —
+    the same path host lanes have always taken, now unchanged."""
+    monkeypatch.delenv("HARNESS_DB_HOST", raising=False)
+    monkeypatch.setenv("HARNESS_DB_PORT", str(tcp_listener))
+    rec = _check_postgres()
+    assert rec["available"] is True
+
+
+def test_postgres_down_reports_all_candidates(pg_port, pg_env_path, monkeypatch):
+    """When the cluster is down, the reason names every host tried so the
+    operator can see both the loopback and gateway attempts."""
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda proc: "/usr/bin/" + proc
+        if proc in ("psql", "pg_createcluster") else None)
+    pg_env_path.write_text("HARNESS_DB_PORT=5433\n")
+    rec = _check_postgres()
+    assert rec["available"] is False
+    reason = rec["reason"]
+    assert "127.0.0.1" in reason and "172.28.0.1" in reason
+
+
 def test_doctor_drills_into_postgres(monkeypatch):
     """provider='postgres' probes ONLY that lane and still shapes a report."""
     import auxiliaries.framework_status as fstat
