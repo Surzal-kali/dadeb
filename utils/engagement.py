@@ -239,7 +239,9 @@ def connect(*, role: Optional[str] = None, force: bool = False):
 
     user = role
     password = _password_for(role)
-    port = os.getenv("HARNESS_DB_PORT", "5432")
+    # 5433 = the deb's dedicated 'daharness' cluster (daharness-pg); 5432 is
+    # canonically msfdb's 'main' cluster and must never be the fallthrough.
+    port = os.getenv("HARNESS_DB_PORT", "5433")
     dbname = os.getenv("HARNESS_DB_NAME", "harness")
     conn = None
     last_exc: Exception | None = None

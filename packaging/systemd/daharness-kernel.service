@@ -13,6 +13,9 @@ Group=daharness
 UMask=0007
 RuntimeDirectory=daharness
 RuntimeDirectoryMode=0770
+# Preserve the tmpfs across restarts — same reason as the daemon unit
+# (workbench lanes bind /run/daharness PATH-identically).
+RuntimeDirectoryPreserve=restart
 StateDirectory=daharness
 # 2770 = group-write + setgid: group-share inheritance for operator-written
 # state (see the daemon unit's comment; 0750 left the group read-only).

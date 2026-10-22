@@ -71,3 +71,5 @@ framework_tools.pyi
 framework_tools.py
 .ipynb_checkpoints/
 .vscode/settings.json
+dabooks/* 
+#i just wanna code who the hell invented code review/freeze? 

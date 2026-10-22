@@ -16,6 +16,12 @@ UMask=0007
 # /run/daharness (tmpfs) — brain.sock home; group-shareable to operator CLIs
 RuntimeDirectory=daharness
 RuntimeDirectoryMode=0770
+# Preserve the tmpfs across restarts: workbench lanes bind /run/daharness
+# PATH-identically — a restart that re-created the tmpfs leaves those binds
+# pinned to a dead generation (empty dir / brain.sock ENOENT inside, observed
+# 2026-10-21). A full stop/start still recreates it: `docker compose up -d
+# --force-recreate jupyter code-server` afterwards.
+RuntimeDirectoryPreserve=restart
 # /var/lib/daharness — WORKSPACE_ROOT for the system profile. 2770:
 # group-write + SETGID so files the operator shell creates at the root
 # (ids.db, cookie_jar.db) inherit the daharness group — a plain r-x mode
