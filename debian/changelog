@@ -1,3 +1,32 @@
+daharness (0.1.0+pkg13) kali; urgency=high
+
+  * Hotfix: tree-root sitecustomize.py referenced `_vendor` without
+    defining it — the definition line was dropped during the pkg12
+    compatibility-gate patch, and the same broken copy rode the pkg12
+    tarball/deb. Every python process with the tree on PYTHONPATH (all five
+    /usr/bin wrappers, the kernel unit, the daemon) printed
+    "Error in sitecustomize ... NameError: name '_vendor' is not defined"
+    at startup, the vendor/ prepend never happened, and the daemon's
+    top-level `import chromadb` failed -> systemctl exit-1 restart loop
+    (observed live 2026-10-21 21:13, restart counter climbing).
+    - sitecustomize.py: define `_vendor` (mirrors the kernelspec-lane twin
+      in tool_repl.py) and make the final insert inert when vendor/ is
+      absent — dev trees keep pristine behavior, matching the file's own
+      stated contract.
+    - tool_repl.py: same inert-absent guard on its inline arm (both
+      carriers now refuse to prepend a nonexistent vendor dir; prior
+      behavior prepended the dead path and violated the contract). The
+      pkg12 gate's "foreign-tag .so -> don't arm" scan itself is
+      unchanged.
+    - Guard rails: tests/test_vendor_arming.py already pinned both rules —
+      test_sitecustomize_prepends_vendor failed on the NameError and
+      test_tool_repl_arm_is_inert_without_vendor on the dead-path insert.
+      pkg12 shipped because that suite is not wired into the build; the
+      two tests are green again (2 passed, 1 design-skipped on dev lane)
+      and the suite must be run before every upload.
+
+ -- daharness packaging <operator@localhost>  Wed, 21 Oct 2026 21:20:00 -0600
+
 daharness (0.1.0+pkg12) kali; urgency=high
 
   * Memory lane: tool discovery no longer dies on the deb with sqlite

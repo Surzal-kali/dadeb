@@ -107,4 +107,9 @@ def test_sql_bundle_has_no_shell_style_comments():
 
 def test_client_probe_footer_uses_lane_port():
     text = _text()
-    assert "-h 127.0.0.1 -p ${PORT}" in text   # passworded TCP probe
+    # Passworded TCP probe in the init banner's heredoc: the bind-aware
+    # lane resolves probe_host itself (127.0.0.1 for loopback/'*' binds,
+    # the pinned bind otherwise) but the lane port must stay explicit
+    # inline — the whole point is "never the libpq default :5432".
+    assert "psql -h ${probe_host} -p ${PORT} -U repl_lane" in text
+    assert "probe_host=127.0.0.1" in text   # loopback + '*' binds probe loopback

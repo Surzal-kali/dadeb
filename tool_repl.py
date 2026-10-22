@@ -76,7 +76,7 @@ if Path(_vendor).is_dir():
         if _cp and not _cp.startswith(_tag + "-"):
             _armable = False
             break
-if _armable and _vendor not in sys.path:
+if _armable and Path(_vendor).is_dir() and _vendor not in sys.path:
     sys.path.insert(0, _vendor)
 
 # Make project root importable (same as before the split — this file stays the

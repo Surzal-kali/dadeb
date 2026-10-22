@@ -20,6 +20,7 @@ from pathlib import Path
 # cp314 deb landed. Arm the lane only when THIS interpreter can load the
 # closure: every extension either carries this interpreter's tag, is abi3
 # (stable ABI, any supported interpreter), or is a tagless support lib.
+_vendor = Path(__file__).resolve().parent / "vendor"
 _armable = True
 if _vendor.is_dir():
     _tag = f"cpython-{sys.version_info[0]}{sys.version_info[1]}"
@@ -30,7 +31,7 @@ if _vendor.is_dir():
         if _cp and not _cp.startswith(_tag + "-"):
             _armable = False
             break
-if _armable:
+if _armable and _vendor.is_dir():
     _v = str(_vendor)
     if _v not in sys.path:
         sys.path.insert(0, _v)

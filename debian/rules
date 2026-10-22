@@ -13,6 +13,16 @@ TREE_DIRS := daharness utils auxiliaries payloads listeners evasion replkit test
 override_dh_auto_build:
 	gcc -shared -o listeners/plugins/frameit.so -fPIC listeners/plugins/frameit.c
 
+# Arming gate (pkg13 lesson): a broken sitecustomize.py arm reached pkg12
+# — the `_vendor` NameError rode every /usr/bin wrapper's PYTHONPATH and
+# the vendor prepend silently died until the daemon flapped systemctl
+# exit-1 restarts. tests/test_vendor_arming.py pins both carriers of the
+# arm (sitecustomize + tool_repl shim); run it HERE so a broken arm fails
+# the build before it becomes a deb. Dev-tree lane: no vendor/ present by
+# design, so this stays fast and needs no wheel closure.
+override_dh_auto_test:
+	python3 -m pytest tests/test_vendor_arming.py -q
+
 override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness
 	# Vendored-wheel lane (decided 2026-10-20): chromadb ships IN the deb —
