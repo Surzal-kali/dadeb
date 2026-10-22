@@ -19,7 +19,7 @@ import shlex
 # ``scope search`` / ``scope on``. Values double as the tooltip
 # (display_meta) in the completer's dropdown (replkit.completer).
 SCOPE_SUBCOMMANDS = {
-    "on": "arm the gate: on <handle> [--platform P] [--no-strict]",
+    "on": "arm the gate: on <handle> [--platform P] [--no-strict] [--ip-boundary] [--refresh]",
     "off": "disarm — lab mode, tools unrestricted",
     "status": "armed state, asset counts, manifest_age_s",
     "add-ip": "add-ip <ip> [<hostname>] — bless a resolved in-scope IP",
@@ -39,9 +39,10 @@ SCOPE_SEARCH_FLAGS = {
     "--json": "print the raw result dict",
 }
 SCOPE_ON_FLAGS = {
-    "--platform": "h1|bugcrowd|intigriti (default h1)",
+    "--platform": "h1|bugcrowd|intigriti|<custom> (default h1)",
     "--no-strict": "unconfirmed targets warn instead of refuse",
     "--ip-boundary": "hostname/manifest assets must resolve into the blessed IP set (lab drift guard)",
+    "--refresh": "force a fresh board fetch (board lanes only; lab manifests are files)",
 }
 
 
@@ -90,12 +91,13 @@ def _scope_command(rest: str):
 
     if sub == "on":
         if len(parts) < 2:
-            print("  Usage: scope on <handle> [--platform h1|bugcrowd|intigriti|<custom>] [--no-strict] [--ip-boundary]")
+            print("  Usage: scope on <handle> [--platform h1|bugcrowd|intigriti|<custom>] [--no-strict] [--ip-boundary] [--refresh]")
             return
         handle = parts[1]
         platform = "h1"
         strict = True
         ip_boundary = False
+        refresh = False
         i = 2
         while i < len(parts):
             tok = parts[i]
@@ -104,6 +106,12 @@ def _scope_command(rest: str):
                 i += 1
             elif tok == "--ip-boundary":
                 ip_boundary = True
+                i += 1
+            elif tok == "--refresh":
+                refresh = True
+                i += 1
+            elif tok.startswith("--refresh="):
+                refresh = tok.split("=", 1)[1].strip().lower() in ("1", "true", "yes", "on")
                 i += 1
             elif tok == "--platform" and i + 1 < len(parts) and not parts[i + 1].startswith("--"):
                 platform = parts[i + 1]
@@ -114,7 +122,7 @@ def _scope_command(rest: str):
             else:
                 print(f"  Ignoring unknown flag: {tok}")
                 i += 1
-        res = scope_gate.arm(handle, platform, strict, ip_boundary=ip_boundary)
+        res = scope_gate.arm(handle, platform, strict, ip_boundary=ip_boundary, refresh=refresh)
 
     elif sub == "off":
         res = scope_gate.disarm()

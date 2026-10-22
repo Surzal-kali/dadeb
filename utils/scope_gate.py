@@ -617,40 +617,66 @@ def _spec_to_checkable(spec: str) -> Tuple[Optional[str], bool]:
 # Operator control surface — called from the Tool REPL only (not agent tools)
 # --------------------------------------------------------------------------- #
 
+_BOARD_PLATFORMS = ("h1", "bugcrowd", "intigriti")
+
+
 def arm(
     handle: str,
     platform: str = "h1",
     strict: bool = True,
     ip_boundary: bool = False,
+    refresh: bool = False,
 ) -> Dict[str, Any]:
     """Arm the scope gate against a program's manifest.
 
     Ensures the manifest is cached first (fetches via load_program_scope if
-    missing) so the gate has something to match against.  Returns an
-    ``{ok, ...}`` summary; ``ok=False`` with an ``error`` when the manifest
-    can't be loaded (refuses to arm blind).
+    missing, or fetches fresh when ``refresh`` is set — board lanes only;
+    custom platforms are operator-authored files, never fetched) so the gate
+    has something to match against.  Returns an ``{ok, ...}`` summary;
+    ``ok=False`` with an ``error`` when the manifest can't be loaded
+    (refuses to arm blind).
     """
     handle = (handle or "").strip()
     platform = (platform or "h1").strip().lower()
     if not handle:
         return {"ok": False, "error": "handle is required: scope on <handle> [--platform ...]"}
+    board = platform in _BOARD_PLATFORMS
 
     manifest = _load_manifest(handle, platform)   # test-overridable seam
     if manifest is None:
         from auxiliaries.program_scope import _load_cache, load_program_scope
-        manifest = _load_cache(handle, platform)
-        if manifest is None:
-            manifest = load_program_scope(handle, refresh=False, platform=platform)
+        if board:
+            manifest = load_program_scope(handle, refresh=bool(refresh), platform=platform)
+        else:
+            # Custom platform (e.g. lab): the only source is the
+            # operator-authored file — the board lane can never know it, so
+            # don't ask it (asking buried a useless "unknown platform" error
+            # under the manifest-missing message below).
+            manifest = _load_cache(handle, platform)
     if not manifest or (
         isinstance(manifest, dict)
         and manifest.get("status") == "error"
         and not manifest.get("in_scope")
     ):
+        from auxiliaries.program_scope import _scope_cache_path
+        if board:
+            remedy = (
+                "run load_program_scope first "
+                f"(or 'scope on {handle} --platform {platform} --refresh')"
+            )
+        else:
+            remedy = (
+                "expected operator-authored manifest at "
+                f"{_scope_cache_path(handle, platform)} — named "
+                "<platform>_<handle>.json (the seeded lab template "
+                "lab_local-lab.json is platform 'lab' + handle 'local-lab', "
+                "armed with 'scope on local-lab --platform lab')"
+            )
         return {
             "ok": False,
             "error": (
-                f"no scope manifest for {handle!r}/{platform}; "
-                f"run load_program_scope first (or load_program_scope --refresh)."
+                f"no scope manifest for handle {handle!r}, platform {platform!r}; "
+                f"{remedy}"
             ),
         }
 

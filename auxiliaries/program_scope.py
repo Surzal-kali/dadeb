@@ -1184,7 +1184,7 @@ def load_program_scope(handle: str = "crypto", refresh: bool = False,
         manifest, err = _build_manifest(handle)
     if err:
         # Fall back to cache if the live fetch failed but we have one.
-        cached = _load_cache(handle)
+        cached = _load_cache(handle, platform)
         if cached:
             cached["_cache"] = "stale-fallback"
             cached["_warning"] = f"live fetch failed ({err}); serving cached copy"

@@ -47,7 +47,9 @@ root's `scope/` dir at install and keeps a copy at
 are named `<platform>_<handle>.json` under `WORKSPACE_ROOT/scope/` — arm a
 custom one with `scope on <handle> --platform <platform>`; a fresh
 operator-authored manifest can be armed off rip without knowing the JSON
-layout.
+layout. `scope on` also accepts `--refresh` (fresh board fetch; custom/lab
+manifests are plain files — the arm error names the exact path it looked
+for, in plain `handle`/`platform` terms).
 
 ## where it enforces
 

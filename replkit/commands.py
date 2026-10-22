@@ -109,7 +109,7 @@ Tool REPL commands:
                          sha256(), pp() available as bare names.
                          Envelope helpers: find(r,'key'), pluck(r,'ip'), grep(r,'admin'),
                          keys(r), scratch('scratch:ref', filter='8080').
-  scope on <handle> [--platform h1|bugcrowd|intigriti|<custom>] [--no-strict] [--ip-boundary]
+  scope on <handle> [--platform h1|bugcrowd|intigriti|<custom>] [--no-strict] [--ip-boundary] [--refresh]
                          Arm the packet-scope gate (send_packet refuses
                          out-of-scope destinations; operator-only, not exposed
                          to the agent). 'scope off' disarms (lab mode).
