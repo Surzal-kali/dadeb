@@ -1,3 +1,24 @@
+daharness (0.1.0+pkg15) kali; urgency=medium
+
+  * Rescind the customs service-identity guard (2026-10-23):
+    - framework_doctor itself runs on the Brain, so the is_service_home()
+      guard made the doctor report customs clean from the in-process
+      fallback (Brain down) and broken from the Brain (Brain up) — a
+      split-brain that tracked the socket, not the customs dir
+    - Removed is_service_home() and the /var/lib/ guard from
+      dacustoms_dir(); removed the service_home_guard step from
+      dacustoms_finder.finder_status(); removed the service_home_guard
+      remediation branch from _check_customs
+    - DACUSTOMS_DIR is now pinned in daharness.env on the deb profile
+      (default /var/lib/daharness/dacustoms, group-readable via 2770
+      setgid) so the service-user Brain and the operator shell resolve
+      the same path; BRAIN_DACUSTOMS escape hatch removed (never
+      implemented in code)
+    - systemd unit sets PYTHONDONTWRITEBYTECODE=1 unconditionally
+    - postinst creates /var/lib/daharness/dacustoms + seeds __init__.py
+
+ -- systempackage <root@kali>  Thu, 23 Oct 2026 14:00:00 +0000
+
 daharness (0.1.0+pkg14) kali; urgency=medium
 
   * Modernize typing imports for Python 3.12+ floor (pyupgrade + ruff):
@@ -27,20 +48,6 @@ daharness (0.1.0+pkg14) kali; urgency=medium
     - postinst echoes the mkdir+touch readiness hint
     - Brain inclusion is opt-in via BRAIN_DACUSTOMS=1 (off by default:
       the deb Brain runs as a service user, not the operator)
-  * Rescind the customs service-identity guard (2026-10-23):
-    - framework_doctor itself runs on the Brain, so the is_service_home()
-      guard made the doctor report customs clean from the in-process
-      fallback (Brain down) and broken from the Brain (Brain up) — a
-      split-brain that tracked the socket, not the customs dir
-    - Removed is_service_home() and the /var/lib/ guard from
-      dacustoms_dir(); removed the service_home_guard step from
-      dacustoms_finder.finder_status(); removed the service_home_guard
-      remediation branch from _check_customs
-    - DACUSTOMS_DIR is now pinned in daharness.env on the deb profile
-      (default /var/lib/daharness/dacustoms, group-readable via 2770
-      setgid) so the service-user Brain and the operator shell resolve
-      the same path; BRAIN_DACUSTOMS escape hatch removed (never
-      implemented in code)
 
  -- systempackage <root@kali>  Wed, 22 Oct 2026 12:00:00 +0000
 
