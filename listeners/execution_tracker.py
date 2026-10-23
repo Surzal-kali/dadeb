@@ -23,13 +23,12 @@ read_logs). Every kill is logged with session attribution.
 
 import asyncio
 import contextvars
-import json
 import logging
 import os
 import signal
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:
     import psutil
@@ -57,12 +56,12 @@ def _descendants(pid: int) -> set:
         except Exception:
             pass
     try:
-        ppid: Dict[int, int] = {}
+        ppid: dict[int, int] = {}
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
                 continue
             try:
-                with open(f"/proc/{entry}/stat", "r") as fh:
+                with open(f"/proc/{entry}/stat") as fh:
                     after = fh.read().rsplit(") ", 1)[-1].split()
                 ppid[int(entry)] = int(after[1])
             except (OSError, IndexError, ValueError):
@@ -84,7 +83,7 @@ class ExecutionTracker:
     """Registry of the Brain's running tool executions."""
 
     def __init__(self) -> None:
-        self._running: Dict[str, Dict[str, Any]] = {}
+        self._running: dict[str, dict[str, Any]] = {}
         self._counter = 0
         self._lock = threading.Lock()
 
@@ -127,7 +126,7 @@ class ExecutionTracker:
 
     # --- views --------------------------------------------------------------
 
-    def list_executions(self) -> Dict[str, Any]:
+    def list_executions(self) -> dict[str, Any]:
         now = time.time()
         executions = []
         for exec_id, info in sorted(self._running.items()):
@@ -150,7 +149,7 @@ class ExecutionTracker:
         exec_id: str,
         force: bool = False,
         reason: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Kill one tracked execution. Returns a verdict envelope.
 
         - async execution: Task.cancel() (precise).
@@ -178,7 +177,7 @@ class ExecutionTracker:
                 ),
             }
 
-        verdict: Dict[str, Any] = {
+        verdict: dict[str, Any] = {
             "exec_id": exec_id,
             "tool_id": info["tool_id"],
             "cancelled": False,

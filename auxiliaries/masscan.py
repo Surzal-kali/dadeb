@@ -46,8 +46,7 @@ import os
 import shlex
 import socket
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 from constants import framework_tool
 from utils.background_job import launch_job, poll_job, terminate_job, register_verdict_parser
 
@@ -58,7 +57,7 @@ from utils.background_job import launch_job, poll_job, terminate_job, register_v
 # the launch/poll contract (conf files, resume state, sharding, echo/regress
 # test modes, alternate payload sources, etc.).  Each entry maps a bare flag
 # name to whether it consumes the next argv token as a value.
-_DENYLIST: Dict[str, bool] = {
+_DENYLIST: dict[str, bool] = {
     "-c": True,
     "--conf": True,
     "--resume": False,
@@ -90,15 +89,15 @@ _OWNED_FLAGS = {
 }
 
 
-def _strip_denied(tokens: List[str]) -> Tuple[List[str], List[str]]:
+def _strip_denied(tokens: list[str]) -> tuple[list[str], list[str]]:
     """Remove denylisted + owned flags from a token list.
 
     Returns ``(clean, dropped)`` where ``dropped`` is a list of the raw
     tokens that were removed (flag + its value where applicable) for the
     warning message.
     """
-    clean: List[str] = []
-    dropped: List[str] = []
+    clean: list[str] = []
+    dropped: list[str] = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -129,7 +128,7 @@ def _strip_denied(tokens: List[str]) -> Tuple[List[str], List[str]]:
 
 # --- adapter / self-exclude detection ---------------------------------------
 
-def _detect_local_ip() -> Optional[str]:
+def _detect_local_ip() -> str | None:
     """Best-effort local IP via a UDP connect to the default route.
 
     Mirrors the trick used in :mod:`listeners.collaborator`.  Returns the
@@ -147,7 +146,7 @@ def _detect_local_ip() -> Optional[str]:
         s.close()
 
 
-def _get_iface_ip(iface: str) -> Optional[str]:
+def _get_iface_ip(iface: str) -> str | None:
     """Resolve the primary IPv4 address bound to a named interface.
 
     Uses ``ip -o -4 addr show <iface>`` and parses the first ``inet`` token.
@@ -178,7 +177,7 @@ def _get_iface_ip(iface: str) -> Optional[str]:
     return None
 
 
-def _resolve_adapter(adapter: Optional[str]) -> Optional[str]:
+def _resolve_adapter(adapter: str | None) -> str | None:
     """Resolve the masscan adapter/interface (``-e``) at call time.
 
     Precedence: ``adapter`` parameter > ``$MASSCAN_ADAPTER`` (masscan-
@@ -195,14 +194,14 @@ def _resolve_adapter(adapter: Optional[str]) -> Optional[str]:
     )
 
 
-def _default_self_exclude() -> Optional[str]:
+def _default_self_exclude() -> str | None:
     """The IP/CIDR to ``--exclude`` by default (the scanner's own host)."""
     return os.getenv("MASSCAN_SELF_EXCLUDE") or _detect_local_ip()
 
 
 # --- truncated-JSON-tolerant parser -----------------------------------------
 
-def _scan_json_objects(text: str) -> List[Dict[str, Any]]:
+def _scan_json_objects(text: str) -> list[dict[str, Any]]:
     """Extract complete ``{ ... }`` JSON objects from (possibly truncated) text.
 
     masscan's ``-oJ`` writes a JSON array: a leading ``[``, one object per
@@ -213,7 +212,7 @@ def _scan_json_objects(text: str) -> List[Dict[str, Any]]:
     incomplete record.  It therefore yields every host whose record was
     fully written, regardless of how the process ended.
     """
-    objects: List[Dict[str, Any]] = []
+    objects: list[dict[str, Any]] = []
     i = 0
     n = len(text)
     while i < n:
@@ -259,7 +258,7 @@ def _scan_json_objects(text: str) -> List[Dict[str, Any]]:
     return objects
 
 
-def _parse_masscan_json(out_path: str) -> Optional[Dict[str, Any]]:
+def _parse_masscan_json(out_path: str) -> dict[str, Any] | None:
     """Parse masscan's ``-oJ`` output file with truncation tolerance.
 
     Returns ``{"hosts": [...], "open_port_count": N, "hosts_with_open": N,
@@ -268,7 +267,7 @@ def _parse_masscan_json(out_path: str) -> Optional[Dict[str, Any]]:
     interrupted before clean exit).
     """
     try:
-        with open(out_path, "r", errors="replace") as fh:
+        with open(out_path, errors="replace") as fh:
             text = fh.read()
     except OSError:
         return None
@@ -278,13 +277,13 @@ def _parse_masscan_json(out_path: str) -> Optional[Dict[str, Any]]:
     truncated = not text.rstrip().endswith("]")
     records = _scan_json_objects(text)
 
-    hosts: List[Dict[str, Any]] = []
+    hosts: list[dict[str, Any]] = []
     open_port_count = 0
     for rec in records:
         ip = rec.get("ip")
         ts = rec.get("timestamp")
         ports = rec.get("ports") or []
-        port_entries: List[Dict[str, Any]] = []
+        port_entries: list[dict[str, Any]] = []
         for p in ports:
             if not isinstance(p, dict):
                 continue
@@ -322,7 +321,7 @@ def _parse_masscan_json(out_path: str) -> Optional[Dict[str, Any]]:
 
 def _parse_masscan_verdict(out_path: str):
     """Build a verdict_parser closure bound to the job's JSON output file."""
-    def _parser(_log_text: str) -> Dict[str, Any]:
+    def _parser(_log_text: str) -> dict[str, Any]:
         parsed = _parse_masscan_json(out_path)
         if parsed:
             return parsed
@@ -339,7 +338,7 @@ def _parse_masscan_verdict(out_path: str):
 # the JSON output file from the log text, parse it, or return a minimal
 # verdict.  The live closure (set at launch time) is preferred via the
 # in-process _JOBS entry; this only runs after a restart/reconstruction.
-def _masscan_fallback_verdict(log_text: str) -> Dict[str, Any]:
+def _masscan_fallback_verdict(log_text: str) -> dict[str, Any]:
     import re as _re
     m = _re.search(r"-oJ\s+(\S+\.json)", log_text)
     if m:
@@ -379,13 +378,13 @@ register_verdict_parser("masscan", _masscan_fallback_verdict)
 )
 def run_masscan(
     target: str,
-    ports: Optional[str] = None,
-    rate: Optional[int] = None,
-    adapter: Optional[str] = None,
-    flags: Optional[str] = None,
-    exclude: Optional[str] = None,
-    options: Optional[str] = None,
-) -> Dict[str, Any]:
+    ports: str | None = None,
+    rate: int | None = None,
+    adapter: str | None = None,
+    flags: str | None = None,
+    exclude: str | None = None,
+    options: str | None = None,
+) -> dict[str, Any]:
     """Launch masscan against ``target`` and return immediately.
 
     masscan runs as a detached background subprocess writing JSON to a
@@ -438,7 +437,7 @@ def run_masscan(
     ports = (ports or "80").strip() or "80"
 
     # --- rate ------------------------------------------------------------
-    rate_warn: Optional[str] = None
+    rate_warn: str | None = None
     if rate is not None:
         try:
             rate = int(rate)
@@ -477,8 +476,8 @@ def run_masscan(
     # reflected the default-route interface (e.g. 10.10.10.1 on enp92s0)
     # regardless of the -e <iface> flag — masscan then used the wrong NIC's
     # IP as source, silently breaking scans on multi-interface hosts.
-    adapter_ip: Optional[str] = None
-    adapter_warn: Optional[str] = None
+    adapter_ip: str | None = None
+    adapter_warn: str | None = None
     if adapter_iface:
         adapter_ip = _get_iface_ip(adapter_iface)
         if adapter_ip:
@@ -513,7 +512,7 @@ def run_masscan(
     dropped = list(d1) + list(d2)
 
     # --- build argv (owned flags first, escape-hatch options last) -------
-    command: List[str] = ["masscan", target, "-p", ports]
+    command: list[str] = ["masscan", target, "-p", ports]
 
     if rate is not None:
         command += ["--rate", str(rate)]
@@ -553,7 +552,7 @@ def run_masscan(
     job["adapter_ip"] = adapter_ip
     job["adapter_iface"] = adapter_iface
     job["output_file"] = out_path
-    notes: List[str] = []
+    notes: list[str] = []
     if rate_warn:
         notes.append(rate_warn)
     if adapter_warn:
@@ -577,7 +576,7 @@ def run_masscan(
     next_hints=["masscan_status", "run_nmap", "report_finding"],
     untrusted_target=True,
 )
-def masscan_status(job_id: str) -> Dict[str, Any]:
+def masscan_status(job_id: str) -> dict[str, Any]:
     """Poll the progress of a scan launched by ``run_masscan``.
 
     Reads the job's JSON output file (tolerant of truncation) and log,
@@ -598,7 +597,7 @@ def masscan_status(job_id: str) -> Dict[str, Any]:
     "captured so far can still be read via masscan_status(job_id).",
     next_hints=["masscan_status"],
 )
-def masscan_cancel(job_id: str) -> Dict[str, Any]:
+def masscan_cancel(job_id: str) -> dict[str, Any]:
     """Terminate a masscan scan launched by ``run_masscan``.
 
     Args:

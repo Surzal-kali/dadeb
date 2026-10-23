@@ -16,7 +16,7 @@ import sys
 import threading
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import chromadb
 import httpx
@@ -107,7 +107,7 @@ class OllamaEmbeddingFunction(embedding_functions.EmbeddingFunction):
         self.model_name = model_name or embed_model()
         self.embed_url = embed_url.rstrip("/") if embed_url else resolve_embed_url()
 
-    async def __call__(self, texts: List[str]) -> List[List[float]]:
+    async def __call__(self, texts: list[str]) -> list[list[float]]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 self.embed_url,
@@ -126,7 +126,7 @@ class ToolRegistry(ExecutorMixin):
     def __init__(
         self,
         embedding_model: OllamaEmbeddingFunction,
-        rpc_servers: Optional[Dict[str, str]] = None,
+        rpc_servers: dict[str, str] | None = None,
     ):
         self.embedding_model = embedding_model
         self.rpc_registry = rpc_servers or {}
@@ -140,14 +140,14 @@ class ToolRegistry(ExecutorMixin):
         # @framework_tool methods (e.g. MetasploitClient, SMBScanner).
         # One instance per class per registry, so stateful clients keep
         # their process/handles across calls.
-        self._tool_instances: Dict[str, Any] = {}
+        self._tool_instances: dict[str, Any] = {}
         # Brain session-id mapping. The Brain wire protocol carries session_id
         # as a C int; non-numeric caller ids (agent_id) are
         # mapped to stable unique ints here so concurrent agents get isolated
         # Brain sessions (and thus isolated stateful tool instances on the
         # sidecar) instead of all sharing session 0. ``"0"`` is the default
         # shared session.
-        self._brain_session_map: Dict[str, int] = {}
+        self._brain_session_map: dict[str, int] = {}
         self._next_brain_session: int = 1
         self._brain_session_lock = threading.Lock()
 
@@ -165,7 +165,7 @@ class ToolRegistry(ExecutorMixin):
             raise ValueError(f"Invalid ToolManifest payload: {exc}") from exc
 
     @staticmethod
-    def _resolve_script_path(script_path: Union[str, Path]) -> Path:
+    def _resolve_script_path(script_path: str | Path) -> Path:
         candidate = Path(script_path)
         if not candidate.is_absolute():
             candidate = (FRAMEWORK_ROOT / candidate).resolve()
@@ -224,7 +224,7 @@ class ToolRegistry(ExecutorMixin):
 
         return parse_embed_response(payload)[0]
 
-    async def register_tool(self, manifest: Union[ToolManifest, List[ToolManifest]]):
+    async def register_tool(self, manifest: ToolManifest | list[ToolManifest]):
         manifests = manifest if isinstance(manifest, list) else [manifest]
         results = []
         for m in manifests:
@@ -346,7 +346,7 @@ class ToolRegistry(ExecutorMixin):
             # Pull kwargs we care about.
             kw = {k.arg: k.value for k in node.keywords if k.arg}
 
-            def const_str(key: str) -> Optional[str]:
+            def const_str(key: str) -> str | None:
                 v = kw.get(key)
                 return (
                     v.value
@@ -395,7 +395,7 @@ class ToolRegistry(ExecutorMixin):
         return profile
 
     def discover_local_tools(
-        self, root: Optional[str | Path] = None, include_tests: bool = False
+        self, root: str | Path | None = None, include_tests: bool = False
     ):
         """Discover Python modules and mint ToolManifests from their docstrings/argparse.
 
@@ -495,7 +495,7 @@ class ToolRegistry(ExecutorMixin):
                     mod = importlib.import_module(module_name)
 
                     # Candidates: (tool_id, function, is_method)
-                    candidates: List[tuple] = []
+                    candidates: list[tuple] = []
                     for name, obj in inspect.getmembers(mod):
                         # Module-level @framework_tool functions — only those
                         # DEFINED in this module, not imported from elsewhere.
@@ -556,7 +556,7 @@ class ToolRegistry(ExecutorMixin):
                             if is_method and idx == 0 and p_name in ("self", "cls"):
                                 continue  # bound at launch time via a class instance
                             p_type = annotation_to_schema_type(p_param.annotation)
-                            prop_def: Dict[str, Any] = {
+                            prop_def: dict[str, Any] = {
                                 "type": p_type,
                                 "description": param_docs.get(
                                     p_name, f"Parameter {p_name}"
@@ -641,7 +641,7 @@ class ToolRegistry(ExecutorMixin):
     # add to the imports at the top
 
     async def bootstrap_registry(
-        self, root: Optional[str | Path] = None, include_tests: bool = False
+        self, root: str | Path | None = None, include_tests: bool = False
     ):
         """Discover local tools and ingest tools from known MCP servers."""
         # Discover and register local tools
@@ -656,7 +656,7 @@ class ToolRegistry(ExecutorMixin):
         print(f"[bootstrap] Complete! Total tools registered: {total}")
         return total
 
-    async def find_tool_by_id(self, tool_id: str) -> Optional[ToolManifest]:
+    async def find_tool_by_id(self, tool_id: str) -> ToolManifest | None:
         """Retrieve a tool manifest by its module_id."""
         if not tool_id or not tool_id.strip():
             return None
@@ -728,7 +728,7 @@ class ToolRegistry(ExecutorMixin):
             pass
         return ()
 
-    async def find_tools(self, user_intent: str, top_k: int = 5) -> List[ToolManifest]:
+    async def find_tools(self, user_intent: str, top_k: int = 5) -> list[ToolManifest]:
         """Semantic search using ChromaDB's HNSW index, returning up to `top_k` manifests."""
         if not user_intent or not user_intent.strip():
             return []
@@ -749,7 +749,7 @@ class ToolRegistry(ExecutorMixin):
         if not metadatas or not documents or not metadatas[0] or not documents[0]:
             return []
 
-        manifests: List[ToolManifest] = []
+        manifests: list[ToolManifest] = []
         for i, (best_id, meta, doc, dist) in enumerate(
             zip(ids, metadatas[0], documents[0], distances), 1
         ):
@@ -820,7 +820,7 @@ class ToolRegistry(ExecutorMixin):
         )
         return best
 
-    def describe_manifest(self, manifest: ToolManifest, lean: bool = False) -> Dict[str, Any]:
+    def describe_manifest(self, manifest: ToolManifest, lean: bool = False) -> dict[str, Any]:
         """Full (non-sanitized) view of a manifest for LLM clients and the API path.
 
         When lean=True, returns only the fields the model needs to
@@ -871,10 +871,10 @@ class ToolRegistry(ExecutorMixin):
         }
 
     def validate_arguments(
-        self, manifest: ToolManifest, arguments: Dict[str, Any]
-    ) -> List[str]:
+        self, manifest: ToolManifest, arguments: dict[str, Any]
+    ) -> list[str]:
         """Soft-check arguments against the manifest's JSON-schema-ish parameters."""
-        warnings: List[str] = []
+        warnings: list[str] = []
         params = manifest.parameters or {}
         if isinstance(params, dict):
             properties = params.get("properties")
@@ -892,8 +892,8 @@ class ToolRegistry(ExecutorMixin):
         return warnings
 
     def normalize_handle_argument(
-        self, manifest: ToolManifest, arguments: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, manifest: ToolManifest, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         """Tolerate legacy ``session_id`` arguments on tools that now take a
         typed ``handle``.
 
@@ -918,8 +918,8 @@ class ToolRegistry(ExecutorMixin):
         return arguments
 
     def validate_handle_argument(
-        self, manifest: ToolManifest, arguments: Dict[str, Any]
-    ) -> Optional[str]:
+        self, manifest: ToolManifest, arguments: dict[str, Any]
+    ) -> str | None:
         """Return ``None`` if the tool's ``handle`` argument is acceptable,
         otherwise a human-readable reason string suitable for a ``ModelRetry``.
 

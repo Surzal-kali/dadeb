@@ -60,7 +60,7 @@ blocking-calls convention.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import requests
@@ -84,14 +84,14 @@ _TOKEN_SCAN_LIMIT = 262144  # extract tokens from at most this much body
 
 
 def _merge_headers(
-    base: Optional[Dict[str, str]],
-    extra: Optional[Dict[str, str]],
+    base: dict[str, str] | None,
+    extra: dict[str, str] | None,
     host: str = "",
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Sticky UA + caller headers, emitted in the identity family's
     canonical browser order (evasion/webshape profiles own the order)."""
     profile = sticky_profile(host)
-    merged: Dict[str, str] = {"User-Agent": profile["ua"]}
+    merged: dict[str, str] = {"User-Agent": profile["ua"]}
     if base:
         merged.update({str(k): str(v) for k, v in base.items()})
     if extra:
@@ -100,11 +100,11 @@ def _merge_headers(
 
 
 def _build_session(
-    profile: Dict[str, Any],
+    profile: dict[str, Any],
     method: str,
     caller_ua_override: bool = False,
     files_present: bool = False,
-) -> Tuple[Any, Dict[str, Any]]:
+) -> tuple[Any, dict[str, Any]]:
     """Transport chooser for one identity, resolved ONCE per call.
 
     Returns ``(session, fingerprint)``.  The impersonated path is the
@@ -121,7 +121,7 @@ def _build_session(
     upload lane (curl_cffi's ``files``-shaped API is not wired; honest
     fallback, envelope note).
     """
-    fingerprint: Dict[str, Any] = {
+    fingerprint: dict[str, Any] = {
         "mode": impersonation_mode(),
         "impersonated": False,
         "backend": "python-requests",
@@ -129,7 +129,7 @@ def _build_session(
         "reason": None,
     }
 
-    def _off(reason: str) -> Tuple[Any, Dict[str, Any]]:
+    def _off(reason: str) -> tuple[Any, dict[str, Any]]:
         fingerprint["reason"] = reason
         return requests.Session(), fingerprint
 
@@ -159,7 +159,7 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def _form_encode(data: Any) -> Tuple[str, Dict[str, str]]:
+def _form_encode(data: Any) -> tuple[str, dict[str, str]]:
     """Normalise a ``data`` argument to ``(form_string, original_dict)``.
 
     Dict -> urlencoded string (kept separately for name lookups);
@@ -179,12 +179,12 @@ def _form_encode(data: Any) -> Tuple[str, Dict[str, str]]:
 
 
 def _csrf_inject(
-    host: str, data: Any, json_data: Any, headers: Dict[str, str]
-) -> Optional[Dict[str, Any]]:
+    host: str, data: Any, json_data: Any, headers: dict[str, str]
+) -> dict[str, Any] | None:
     """Best-effort CSRF injection for a POST. Returns what was injected."""
     jar = get_jar()
     csrf = jar.csrf_for(host)
-    injected: Dict[str, Any] = {"form_field": None, "header": None}
+    injected: dict[str, Any] = {"form_field": None, "header": None}
     if csrf.get("header_value"):
         headers.setdefault("X-CSRFToken", csrf["header_value"])
         headers.setdefault("X-CSRF-TOKEN", csrf["header_value"])
@@ -209,7 +209,7 @@ def _csrf_inject(
     return injected if (injected["form_field"] or injected["header"]) else None
 
 
-def _title_of(text: str) -> Optional[str]:
+def _title_of(text: str) -> str | None:
     import re
 
     m = re.search(r"<title[^>]*>(.*?)</title>", text or "", re.IGNORECASE | re.DOTALL)
@@ -224,7 +224,7 @@ def _do_session_request(
     *,
     data: Any = None,
     json_data: Any = None,
-    headers: Optional[Dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
     insecure: bool = False,
     timeout: float = 15.0,
     max_hops: int = 5,
@@ -233,7 +233,7 @@ def _do_session_request(
     extract_tokens: bool = True,
     csrf: bool = False,
     files: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Shared engine: jar-apply -> gated request -> jar-persist -> envelope."""
     jar = get_jar()
     host = _host_of(url)
@@ -260,7 +260,7 @@ def _do_session_request(
         # overrides baked into the template's positions.  Jar cookies ride
         # as a ready-made Cookie header (the jar's RFC 6265 matcher), not
         # through requests' cookie-store API.
-        applied: List[str] = []
+        applied: list[str] = []
         cookie_hdr = jar.cookie_header(url)
         if cookie_hdr:
             merged["Cookie"] = cookie_hdr
@@ -319,7 +319,7 @@ def _do_session_request(
             text = resp.text[: _TOKEN_SCAN_LIMIT]
         except Exception:  # noqa: BLE001 - decode issues shouldn't kill the call
             text = ""
-    tokens_extracted: List[Dict[str, str]] = []
+    tokens_extracted: list[dict[str, str]] = []
     if extract_tokens:
         for t in extract_csrf_tokens(text, dict(resp.headers)):
             jar.store_token(
@@ -329,7 +329,7 @@ def _do_session_request(
             tokens_extracted.append(t)
 
     domain_state = jar.list_state(host)
-    envelope: Dict[str, Any] = {
+    envelope: dict[str, Any] = {
         "status": "Success",
         "method": (method or "GET").upper(),
         "url": url,
@@ -373,7 +373,7 @@ def _do_session_request(
     return envelope
 
 
-def _session_digest(result: Dict[str, Any]) -> Dict[str, str]:
+def _session_digest(result: dict[str, Any]) -> dict[str, str]:
     """Result-projection digest: state transitions, not page bodies."""
     if result.get("status") != "Success":
         return {"summary": f"failed: {result.get('error', 'unknown')}", "row_hint_format": ""}
@@ -440,8 +440,8 @@ def session_get(
     timeout: float = 12.0,
     body_limit: int = 4096,
     follow_redirects: bool = True,
-    headers: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """GET ``url`` carrying jar state; persist cookies; extract CSRF tokens.
 
     Args:
@@ -494,8 +494,8 @@ def session_post(
     timeout: float = 15.0,
     body_limit: int = 4096,
     follow_redirects: bool = True,
-    headers: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """POST ``url`` with jar state + auto-injected CSRF token.
 
     Args:
@@ -548,8 +548,8 @@ def session_request(
     timeout: float = 15.0,
     body_limit: int = 4096,
     follow_redirects: bool = True,
-    headers: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Jar-aware request with any HTTP method.
 
     Args:
@@ -603,16 +603,16 @@ def session_upload(
     url: str,
     file_path: str,
     file_field: str = "file",
-    file_name: Optional[str] = None,
-    content_type: Optional[str] = None,
-    data: Optional[Dict[str, Any]] = None,
+    file_name: str | None = None,
+    content_type: str | None = None,
+    data: dict[str, Any] | None = None,
     auto_csrf: bool = True,
     insecure: bool = False,
     timeout: float = 30.0,
     body_limit: int = 4096,
     follow_redirects: bool = True,
-    headers: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """POST ``url`` carrying jar state; persist cookies; extract CSRF tokens.
 
     Args:
@@ -668,7 +668,7 @@ def session_upload(
     ctype = content_type or mimetypes.guess_type(part_name)[0] or "application/octet-stream"
     files = {file_field: (part_name, blob, ctype)}
 
-    form: Dict[str, Any] = dict(data) if isinstance(data, dict) else (data or {})
+    form: dict[str, Any] = dict(data) if isinstance(data, dict) else (data or {})
     if not isinstance(form, dict):
         # Odd shapes (string body) can't merge with multipart parts — the
         # CSRF field would land as a raw body string and break the encoding.

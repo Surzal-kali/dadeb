@@ -26,7 +26,7 @@ prompt reads EOF instead of blocking.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from constants import framework_tool
 from utils.background_job import launch_job, poll_job, terminate_job, register_verdict_parser
@@ -51,7 +51,7 @@ _HYDRA_SUMMARY_RE = re.compile(
 )
 
 
-def _parse_hydra_verdict(log_text: str) -> Dict[str, Any]:
+def _parse_hydra_verdict(log_text: str) -> dict[str, Any]:
     """Best-effort summary from hydra's text output.
 
     Returns a dict with:
@@ -66,7 +66,7 @@ def _parse_hydra_verdict(log_text: str) -> Dict[str, Any]:
     Conservative: only matches hydra's standard ``host: ... login: ...
     password: ...`` found-format and ``[ATTEMPT] ... N of M`` progress lines.
     """
-    credentials: List[Dict[str, str]] = []
+    credentials: list[dict[str, str]] = []
     seen_pairs = set()
     for line in log_text.splitlines():
         m = _HYDRA_FOUND_RE.match(line.strip())
@@ -82,7 +82,7 @@ def _parse_hydra_verdict(log_text: str) -> Dict[str, Any]:
                     }
                 )
 
-    attempts: Dict[str, Any] = {"done": None, "total": None}
+    attempts: dict[str, Any] = {"done": None, "total": None}
     for line in log_text.splitlines():
         am = _HYDRA_ATTEMPT_RE.search(line)
         if am:
@@ -109,7 +109,7 @@ register_verdict_parser("hydra", _parse_hydra_verdict)
 _HYDRA_CRED_FLAGS = {"-l", "-L", "-p", "-P", "-C", "-x"}
 
 
-def _has_credential_source(opt_list: List[str]) -> bool:
+def _has_credential_source(opt_list: list[str]) -> bool:
     """True if ``options`` already names a hydra credential source.
 
     hydra needs at least one of ``-l``/``-L`` (login), ``-p``/``-P``
@@ -126,7 +126,7 @@ def _has_credential_source(opt_list: List[str]) -> bool:
     return False
 
 
-def _inject_default_credentials(opt_list: List[str]) -> tuple[List[str], Dict[str, Any]]:
+def _inject_default_credentials(opt_list: list[str]) -> tuple[list[str], dict[str, Any]]:
     """Inject default login + password lists when no cred source is set.
 
     Returns the (possibly extended) argv list and a meta dict describing
@@ -135,7 +135,7 @@ def _inject_default_credentials(opt_list: List[str]) -> tuple[List[str], Dict[st
     ``error`` key so ``run_hydra`` can fail loudly with a pointer to
     ``list_wordlists`` instead of letting hydra produce a cryptic message.
     """
-    meta: Dict[str, Any] = {"default_creds_used": False}
+    meta: dict[str, Any] = {"default_creds_used": False}
     if _has_credential_source(opt_list):
         return opt_list, meta
 
@@ -166,7 +166,7 @@ def _inject_default_credentials(opt_list: List[str]) -> tuple[List[str], Dict[st
     "returns immediately with a job ID for later retrieval.",
     next_hints=["hydra_status"],
 )
-def run_hydra(target: str, options: str = "") -> Dict[str, Any]:
+def run_hydra(target: str, options: str = "") -> dict[str, Any]:
     """Launch hydra against ``target`` and return immediately.
 
     Hydra runs as a detached background subprocess writing to a per-job log
@@ -229,7 +229,7 @@ def run_hydra(target: str, options: str = "") -> Dict[str, Any]:
     return job
 
 
-def _hydra_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _hydra_status_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Digest adapter for ``hydra_status`` — cracked creds + progress only.
 
     The full hydra log (thousands of attempt lines) is stored in scratch;
@@ -306,7 +306,7 @@ def _hydra_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
     next_hints=["hydra_status", "report_finding"],
     result_digest=lambda r: _hydra_status_digest(r),
 )
-def hydra_status(job_id: str) -> Dict[str, Any]:
+def hydra_status(job_id: str) -> dict[str, Any]:
     """Poll the progress of a run launched by ``run_hydra``.
 
     Reads the job's log file, checks whether the subprocess is still alive,
@@ -327,7 +327,7 @@ def hydra_status(job_id: str) -> Dict[str, Any]:
     "taking too long, is no longer needed, or was launched by mistake.",
     next_hints=["hydra_status"],
 )
-def hydra_cancel(job_id: str) -> Dict[str, Any]:
+def hydra_cancel(job_id: str) -> dict[str, Any]:
     """Terminate a Hydra run launched by ``run_hydra``.
 
     Sends SIGTERM to the background subprocess (escalating to SIGKILL if it

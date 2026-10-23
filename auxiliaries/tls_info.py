@@ -24,7 +24,7 @@ import socket
 import ssl
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -46,7 +46,7 @@ def _days_left(not_after: datetime) -> int:
     return int((not_after - datetime.now(timezone.utc)).total_seconds() // 86400)
 
 
-def _parse_cert(der: bytes) -> Dict[str, Any]:
+def _parse_cert(der: bytes) -> dict[str, Any]:
     cert = x509.load_der_x509_certificate(der)
     subject = cert.subject
     issuer = cert.issuer
@@ -64,7 +64,7 @@ def _parse_cert(der: bytes) -> Dict[str, Any]:
         return ", ".join(parts)
     not_after = cert.not_valid_after_utc
     not_before = cert.not_valid_before_utc
-    sans: List[str] = []
+    sans: list[str] = []
     try:
         ext = cert.extensions.get_extension_for_oid(
             ExtensionOID.SUBJECT_ALTERNATIVE_NAME
@@ -98,11 +98,11 @@ def _parse_cert(der: bytes) -> Dict[str, Any]:
     }
 
 
-def _sweep_protocols(host: str, port: int) -> Dict[str, Any]:
+def _sweep_protocols(host: str, port: int) -> dict[str, Any]:
     """Try each TLS version; record accepted/refused + the live cipher."""
-    accepted: List[str] = []
-    refused: List[str] = []
-    best: Dict[str, Any] = {}
+    accepted: list[str] = []
+    refused: list[str] = []
+    best: dict[str, Any] = {}
     for label, enum_version in _SWEEP_VERSIONS:
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -143,7 +143,7 @@ def tls_info(
     target: str,
     port: int = 443,
     insecure: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """TLS handshake + certificate report for ``target:port``.
 
     Args:
@@ -191,7 +191,7 @@ def tls_info(
             "target": target,
             "port": port,
         }
-    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+    except (TimeoutError, ConnectionRefusedError, OSError) as e:
         return {
             "status": "Failed",
             "error": f"TLS connect failed: {type(e).__name__}: {e}",

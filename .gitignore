@@ -73,3 +73,4 @@ framework_tools.py
 .vscode/settings.json
 dabooks/* 
 #i just wanna code who the hell invented code review/freeze? 
+*.db*

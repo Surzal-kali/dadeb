@@ -31,7 +31,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import resolve_workspace_root
 
@@ -45,10 +45,10 @@ def _state_path() -> Path:
     return resolve_workspace_root() / "engagement" / ".armed_engagement.json"
 
 
-_ARMED_CACHE: Dict[str, Any] = {"mtime": None, "state": None}
+_ARMED_CACHE: dict[str, Any] = {"mtime": None, "state": None}
 
 
-def _write_state(state: Dict[str, Any]) -> None:
+def _write_state(state: dict[str, Any]) -> None:
     """Atomic state write (scope_gate convention: stage + os.replace, so a
     crash never leaves a torn file that would parse as disarmed)."""
     p = _state_path()
@@ -60,7 +60,7 @@ def _write_state(state: Dict[str, Any]) -> None:
     _ARMED_CACHE["state"] = state
 
 
-def current() -> Optional[Dict[str, Any]]:
+def current() -> dict[str, Any] | None:
     """The armed engagement dict ({slug, roe_note, armed_at}), or None.
 
     Mtime-checked so a REPL write is picked up by a separate process (Brain,
@@ -86,7 +86,7 @@ def current() -> Optional[Dict[str, Any]]:
     return state
 
 
-def current_slug() -> Optional[str]:
+def current_slug() -> str | None:
     """The armed engagement slug, or None (rows written while unarmed carry
     NULL engagement — they still journal, they're just not cobwebbed)."""
     st = current()
@@ -96,7 +96,7 @@ def current_slug() -> Optional[str]:
     return slug or None
 
 
-def arm(slug: str, roe_note: str = "") -> Dict[str, Any]:
+def arm(slug: str, roe_note: str = "") -> dict[str, Any]:
     """Arm an engagement. Called ONLY from the REPL (operator authority)."""
     slug = slug.strip()
     if not slug:
@@ -123,14 +123,14 @@ def disarm() -> None:
 # ─── Postgres lane connection (lazy, cached, degrade-silently) ───────────────
 
 _RECONNECT_BACKOFF_S = 30.0
-_DB: Dict[str, Any] = {
+_DB: dict[str, Any] = {
     "conn": None,
     "down_until": 0.0,     # monotonic — skip attempts while inside the window
     "connected_as": None,  # lane role name of the cached connection
     "warned": False,       # one-time absence warning
 }
 
-_INFERRED_LANE: Optional[str] = None
+_INFERRED_LANE: str | None = None
 
 
 def _infer_lane_from_entrypoint() -> str:
@@ -171,7 +171,7 @@ def _lane_role() -> str:
     return _infer_lane_from_entrypoint()
 
 
-def _host_candidates() -> List[str]:
+def _host_candidates() -> list[str]:
     """Postgres endpoints to try, ordered. An explicit ``HARNESS_DB_HOST``
     pins the single candidate — except the wildcard bind values
     (``0.0.0.0``/``::``/``*``): a wildcard is what the operator sets in
@@ -203,7 +203,7 @@ def db_down() -> bool:
     return time.monotonic() < _DB["down_until"]
 
 
-def connect(*, role: Optional[str] = None, force: bool = False):
+def connect(*, role: str | None = None, force: bool = False):
     """A live psycopg connection for the lane (or a named role), or None.
 
     Postgres absent / down / psycopg not installed → None, logged once at
@@ -313,7 +313,7 @@ def _ensure_engagement_row(slug: str, roe_note: str) -> None:
 # ─── Operator actions (run under harness_operator) ───────────────────────────
 
 
-def close_and_purge(slug: str) -> List[Tuple[str, int]]:
+def close_and_purge(slug: str) -> list[tuple[str, int]]:
     """Close + purge an engagement as the operator. The ONLY erasure path.
 
     Called from the REPL (``engagement purge <slug>``). Fails closed when the
@@ -364,7 +364,7 @@ def sweep() -> int:
         return -1
 
 
-def db_status() -> Dict[str, Any]:
+def db_status() -> dict[str, Any]:
     """Diagnostics for framework_doctor / REPL: is the lane connected, as
     which role, and what's armed."""
     conn = connect()

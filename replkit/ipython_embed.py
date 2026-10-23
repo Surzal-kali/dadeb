@@ -12,10 +12,7 @@ Terminal-lane sugar layered on IPython's ``InteractiveShellEmbed``:
 All env knobs here are the IPYTHON_* family from the monolith, unchanged.
 """
 
-from pathlib import Path
 import os
-import shlex
-from typing import Dict, List
 
 from replkit.ipython_ui import (
     _IPYTHON_COLORS,
@@ -30,7 +27,7 @@ from replkit.ipython_ui import (
 )
 
 
-def ipython_banner() -> List[str]:
+def ipython_banner() -> list[str]:
     """The startup help printed before the embedded shell takes over.
 
     Split out of the embed body so it stays testable without spawning
@@ -83,7 +80,7 @@ def ipython_banner() -> List[str]:
     return lines
 
 
-def run_embedded_ipython(manifests: List) -> None:
+def run_embedded_ipython(manifests: list) -> None:
     """Drop into interactive IPython with the framework namespace preloaded.
 
     Called from the REPL's ``ipython`` command (replkit.commands).  Runs in
@@ -147,7 +144,7 @@ def run_embedded_ipython(manifests: List) -> None:
         shell.highlighting_style_overrides = existing
         shell.refresh_style()
     except Exception:
-        pass
+        print("[toolbar] style overrides skipped (IPython version may not support this)")
 
     # ── Editor: nvim as the escape hatch ────────────────────────────────
     # F2 (always on in IPython) opens the current cell in $VISUAL/$EDITOR

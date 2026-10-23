@@ -23,14 +23,11 @@ domain before anything fires — only in-scope domains are ever queried.
 """
 
 from __future__ import annotations
-
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlencode
-
 import requests
-
 from constants import framework_tool
 
 # HARDCODED egress host. Nothing in this module can be pointed elsewhere;
@@ -72,7 +69,7 @@ def _validate_domain(domain: str) -> str:
 
 def _build_params(
     domain: str, limit: int, collapse: bool, statuscode: str
-) -> Dict[str, str]:
+) -> dict[str, str]:
     params = {
         "url": domain,
         "matchType": "domain",
@@ -87,16 +84,16 @@ def _build_params(
     return params
 
 
-def _parse_rows(rows: List[List[str]]) -> Dict[str, Any]:
+def _parse_rows(rows: list[list[str]]) -> dict[str, Any]:
     """CDX JSON = [header, row, row, ...]. Triage into buckets."""
-    buckets: Dict[str, List[str]] = {
+    buckets: dict[str, list[str]] = {
         "interesting_files": [],
         "param_urls": [],
         "admin_ish": [],
         "all": [],
     }
     seen: set = set()
-    timestamps: List[str] = []
+    timestamps: list[str] = []
     if not rows:
         return {k: [] for k in buckets} | {"oldest": None, "newest": None}
     header = [h.lower() for h in rows[0]]
@@ -150,7 +147,7 @@ def archived_urls(
     limit: int = 500,
     statuscode: str = "",
     collapse: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Query the Wayback CDX index for ``domain`` (passive, archived only).
 
     Makes ONE GET to ``web.archive.org/cdx/search/cdx`` with

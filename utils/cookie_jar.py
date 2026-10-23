@@ -51,7 +51,8 @@ import threading
 import time
 from http.cookiejar import Cookie as JarCookie
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
+from collections.abc import Iterable
 
 from constants import framework_tool, resolve_workspace_root
 
@@ -167,8 +168,8 @@ def _looks_csrf(name: str) -> bool:
 
 
 def extract_csrf_tokens(
-    html_text: str, headers: Optional[Dict[str, str]] = None
-) -> List[Dict[str, str]]:
+    html_text: str, headers: dict[str, str] | None = None
+) -> list[dict[str, str]]:
     """Pull CSRF tokens out of an HTML body and/or response headers.
 
     Returns a list of ``{"name", "value", "source"}`` dicts — ``source``
@@ -177,7 +178,7 @@ def extract_csrf_tokens(
     HTML-unescaped (template entities are common).  Bounded scan: only the
     first 512 KiB of body text is considered.
     """
-    out: List[Dict[str, str]] = []
+    out: list[dict[str, str]] = []
     text = (html_text or "")[:524288]
     for tag in _HIDDEN_INPUT_RX.findall(text):
         name_m = _INPUT_NAME_RX.search(tag)
@@ -211,7 +212,7 @@ def extract_csrf_tokens(
                     {"name": "csrf-token", "value": value, "source": f"header:{hname}"}
                 )
     # Stable order: framework-canonical form fields first, keep page order.
-    def _rank(t: Dict[str, str]) -> Tuple[int, str]:
+    def _rank(t: dict[str, str]) -> tuple[int, str]:
         name = t["name"]
         return (
             _CSRF_FIELD_NAMES.index(name) if name in _CSRF_FIELD_NAMES else 99,
@@ -263,7 +264,7 @@ class CookieJarStore:
     cross-process case (WAL where available).
     """
 
-    def __init__(self, db_path: Optional[Path] = None, ttl_hours: float = _TTL_HOURS) -> None:
+    def __init__(self, db_path: Path | None = None, ttl_hours: float = _TTL_HOURS) -> None:
         self.db_path = Path(db_path) if db_path else _db_path()
         self.ttl_seconds = max(0.0, float(ttl_hours)) * 3600.0
         self._lock = threading.RLock()
@@ -390,7 +391,7 @@ class CookieJarStore:
         return gone
 
     @staticmethod
-    def _row_to_cookie(row: Dict[str, Any]) -> JarCookie:
+    def _row_to_cookie(row: dict[str, Any]) -> JarCookie:
         """Row dict -> ``http.cookiejar.Cookie`` (requests-compatible)."""
         domain = row["domain"]
         return JarCookie(
@@ -420,12 +421,12 @@ class CookieJarStore:
         name: str,
         value: str,
         path: str = "/",
-        expires: Optional[float] = None,
+        expires: float | None = None,
         secure: bool = False,
         httponly: bool = False,
         domain_specified: bool = False,
         origin: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Upsert one cookie.  ``domain_specified=True`` marks a
         ``Domain=``-style cookie (leading-dot domain, subdomain-matching)."""
         domain = (domain or "").strip().lower()
@@ -455,11 +456,11 @@ class CookieJarStore:
 
     def store_response_cookies(
         self, cookies: Iterable[JarCookie], origin: str = ""
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Persist ``http.cookiejar.Cookie`` objects (a requests session's
         jar) into the store.  Returns per-cookie ``{name, domain, value,
         path, changed}`` summaries — ``changed`` marks new/updated rows."""
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         now = time.time()
         with self._lock:
             self._purge()
@@ -501,7 +502,7 @@ class CookieJarStore:
             self._conn.commit()
         return out
 
-    def cookies_for(self, host_or_url: str) -> List[JarCookie]:
+    def cookies_for(self, host_or_url: str) -> list[JarCookie]:
         """All live ``http.cookiejar.Cookie`` objects matching a host/URL
         (domain-matched; requests applies path rules when sending)."""
         host = _host_of(host_or_url)
@@ -514,7 +515,7 @@ class CookieJarStore:
                 "SELECT domain, name, value, path, expires, secure, httponly,"
                 " domain_specified FROM cookies"
             ).fetchall()
-        out: List[JarCookie] = []
+        out: list[JarCookie] = []
         for r in rows:
             if r[4] is not None and r[4] < now:
                 continue
@@ -527,10 +528,10 @@ class CookieJarStore:
             }))
         return out
 
-    def apply_to_session(self, session: Any, url: str) -> List[str]:
+    def apply_to_session(self, session: Any, url: str) -> list[str]:
         """Seed a ``requests.Session`` with every jar cookie matching
         ``url``'s host.  Returns the cookie names applied."""
-        names: List[str] = []
+        names: list[str] = []
         for c in self.cookies_for(url):
             try:
                 session.cookies.set_cookie(c)
@@ -539,7 +540,7 @@ class CookieJarStore:
                 continue
         return names
 
-    def cookie_header(self, url: str) -> Optional[str]:
+    def cookie_header(self, url: str) -> str | None:
         """Build a ready-to-send ``Cookie:`` header value for ``url``
         (domain- AND path-matched, expiry-honoured) — for feeding
         non-jar-aware tools (ffuf/sqlmap raw modes, ZAP reclient)."""
@@ -556,7 +557,7 @@ class CookieJarStore:
             rows = self._conn.execute(
                 "SELECT domain, name, value, path, expires FROM cookies"
             ).fetchall()
-        pairs: List[str] = []
+        pairs: list[str] = []
         for dom, name, value, cpath, expires in rows:
             if expires is not None and expires < now:
                 continue
@@ -565,13 +566,13 @@ class CookieJarStore:
             pairs.append(f"{name}={value}")
         return "; ".join(pairs) if pairs else None
 
-    def import_cookie_string(self, domain: str, cookie_header: str, origin: str = "") -> Dict[str, Any]:
+    def import_cookie_string(self, domain: str, cookie_header: str, origin: str = "") -> dict[str, Any]:
         """Parse a raw ``Cookie:``-style string (``a=1; b=2``) and store each
         pair for ``domain`` — the "cookies are just strings" on-ramp for
         values pasted from a browser or another tool."""
         domain = _host_of(domain) or (domain or "").strip().lower()
         pairs = re.split(r"\s*;\s*", (cookie_header or "").strip())
-        stored: List[str] = []
+        stored: list[str] = []
         for pair in pairs:
             if not pair or "=" not in pair:
                 continue
@@ -593,7 +594,7 @@ class CookieJarStore:
         token_type: str = "csrf",
         origin: str = "",
         context: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Upsert a named token string for a domain (latest wins)."""
         domain = _host_of(domain) or (domain or "").strip().lower()
         name = (name or "").strip()
@@ -615,7 +616,7 @@ class CookieJarStore:
             self._conn.commit()
         return {"stored": True, "domain": domain, "name": name, "token_type": token_type}
 
-    def tokens_for(self, domain: str) -> List[Dict[str, Any]]:
+    def tokens_for(self, domain: str) -> list[dict[str, Any]]:
         """All live tokens for a host (or, with ``domain=""``, everything)."""
         want = _host_of(domain) or (domain or "").strip().lower()
         with self._lock:
@@ -639,14 +640,14 @@ class CookieJarStore:
             for r in rows
         ]
 
-    def get_token(self, domain: str, name: str) -> Optional[str]:
+    def get_token(self, domain: str, name: str) -> str | None:
         """Latest value for one named token, or ``None``."""
         for t in self.tokens_for(domain):
             if t["name"] == name:
                 return t["value"]
         return None
 
-    def csrf_for(self, host_or_url: str) -> Dict[str, Any]:
+    def csrf_for(self, host_or_url: str) -> dict[str, Any]:
         """Best-effort CSRF pair for a host: the canonical form field
         (Django/Rails/Laravel order) plus a header token.
 
@@ -659,7 +660,7 @@ class CookieJarStore:
         # Form token: first csrf-typed token whose NAME is a real form field
         # (not the generic meta/header name "csrf-token"), preferring the
         # canonical field order extract_csrf_tokens ranked them by.
-        form: Optional[Dict[str, str]] = None
+        form: dict[str, str] | None = None
         for t in self.tokens_for(host):
             if t["token_type"] != "csrf":
                 continue
@@ -667,7 +668,7 @@ class CookieJarStore:
                 form = {"name": t["name"], "value": t["value"]}
                 break
         meta_header = self.get_token(host, "csrf-token")
-        cookie_val: Optional[str] = None
+        cookie_val: str | None = None
         for c in self.cookies_for(host):
             if (c.name or "").lower() in ("csrftoken", "csrf", "xcsrftoken", "xsrf-token"):
                 cookie_val = c.value
@@ -680,7 +681,7 @@ class CookieJarStore:
 
     # -- state / maintenance --------------------------------------------------
 
-    def list_state(self, domain: str = "") -> Dict[str, Any]:
+    def list_state(self, domain: str = "") -> dict[str, Any]:
         """Structured view of the jar: cookies + tokens (optionally scoped)."""
         want = _host_of(domain) or (domain or "").strip().lower()
         now = time.time()
@@ -719,7 +720,7 @@ class CookieJarStore:
 
     def clear(
         self, domain: str = "", clear_cookies: bool = True, clear_tokens: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Drop cookies and/or tokens — one host, or everything."""
         want = _host_of(domain) or (domain or "").strip().lower()
         gone_cookies = gone_tokens = 0
@@ -758,7 +759,7 @@ class CookieJarStore:
 
 # -- singleton ---------------------------------------------------------------
 
-_JAR: Optional[CookieJarStore] = None
+_JAR: CookieJarStore | None = None
 _JAR_LOCK = threading.Lock()
 
 
@@ -794,7 +795,7 @@ def get_jar() -> CookieJarStore:
     "across tools and processes, so state from any lane is visible here.",
     next_hints=["session_get to browse with this state", "jar_clear to wipe it"],
 )
-def jar_state(domain: str = "") -> Dict[str, Any]:
+def jar_state(domain: str = "") -> dict[str, Any]:
     """Show the jar's cookies + tokens (optionally scoped to one host).
 
     Args:
@@ -822,7 +823,7 @@ def jar_store_cookie(
     secure: bool = False,
     httponly: bool = False,
     origin: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Store one cookie (or a ``a=1; b=2`` multi-pair string) for a host.
 
     Args:
@@ -865,7 +866,7 @@ def jar_store_token(
     value: str,
     token_type: str = "bearer",
     origin: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Upsert a named token for a host (latest wins).
 
     Args:
@@ -893,7 +894,7 @@ def jar_store_token(
 )
 def jar_clear(
     domain: str = "", clear_cookies: bool = True, clear_tokens: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Clear jar state — one host or everything.
 
     Args:
@@ -913,7 +914,7 @@ def jar_clear(
     "works everywhere.",
     next_hints=["jar_state", "run_ffuf", "run_sqlmap"],
 )
-def jar_cookie_header(url: str) -> Dict[str, Any]:
+def jar_cookie_header(url: str) -> dict[str, Any]:
     """Return the ``Cookie:`` header value the jar would send for ``url``.
 
     Args:

@@ -51,7 +51,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urlparse
 
 from constants import framework_tool, resolve_workspace_root
@@ -70,14 +70,13 @@ try:
 except Exception:
     pass  # dotenv not installed or .env missing — silently degrade
 
-
 _H1_API = "https://api.hackerone.com/v1"
 _TIMEOUT = 30.0
 
 
 # --- credentials ------------------------------------------------------------
 
-def _h1_auth() -> Tuple[Optional[Tuple[str, str]], bool]:
+def _h1_auth() -> tuple[tuple[str, str] | None, bool]:
     """Return ((username, token), has_full_auth) for requests auth.
 
     ``has_full_auth`` is True only when both env vars are set — the
@@ -90,8 +89,8 @@ def _h1_auth() -> Tuple[Optional[Tuple[str, str]], bool]:
     return (None, False)
 
 
-def _get(path: str, *, params: Optional[Dict[str, Any]] = None,
-         auth: Optional[Any] = ...) -> Tuple[int, Any]:
+def _get(path: str, *, params: dict[str, Any] | None = None,
+         auth: Any | None = ...) -> tuple[int, Any]:
     """GET against the H1 Hacker API.  Returns (status, json).
 
     By default (``auth=...`` sentinel) the H1 Basic auth tuple is resolved
@@ -115,8 +114,8 @@ def _get(path: str, *, params: Optional[Dict[str, Any]] = None,
 
 # --- paginated fetch --------------------------------------------------------
 
-def _fetch_all_pages(path: str, *, params: Optional[Dict[str, Any]] = None,
-                     max_pages: int = 100) -> Tuple[int, List[Dict[str, Any]], Optional[str]]:
+def _fetch_all_pages(path: str, *, params: dict[str, Any] | None = None,
+                     max_pages: int = 100) -> tuple[int, list[dict[str, Any]], str | None]:
     """Follow pagination links for a list endpoint.
 
     Returns (status, items, error).  H1 list endpoints wrap items in
@@ -127,7 +126,7 @@ def _fetch_all_pages(path: str, *, params: Optional[Dict[str, Any]] = None,
     if "page[size]" not in params:
         params["page[size]"] = 100
     page = int(params.get("page[number]", 1))
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     for _ in range(max_pages):
         params["page[number]"] = page
         status, body = _get(path, params=params)
@@ -179,7 +178,7 @@ def _scope_cache_path(handle: str, platform: str = "h1") -> Path:
     return d / f"{name}.json"
 
 
-def _build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
+def _build_manifest(handle: str) -> tuple[dict[str, Any], str | None]:
     """Fetch all H1 scope data for ``handle`` and assemble the manifest dict."""
     auth, has_auth = _h1_auth()
     if not has_auth:
@@ -191,8 +190,8 @@ def _build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
     if err:
         return ({}, f"structured_scopes: {err}")
 
-    in_scope: List[Dict[str, Any]] = []
-    out_of_scope_assets: List[Dict[str, Any]] = []
+    in_scope: list[dict[str, Any]] = []
+    out_of_scope_assets: list[dict[str, Any]] = []
     for it in scopes:
         a = it.get("attributes", {})
         entry = {
@@ -267,7 +266,7 @@ _BC_UA = "Mozilla/5.0"  # UA verified against live endpoints Sept 2026
 _UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 
-def _bc_get(url: str, *, accept: str = "application/json") -> Tuple[int, Any]:
+def _bc_get(url: str, *, accept: str = "application/json") -> tuple[int, Any]:
     """Anonymous GET against bugcrowd.com. Returns (status, parsed-json-or-text)."""
     import requests
 
@@ -281,7 +280,7 @@ def _bc_get(url: str, *, accept: str = "application/json") -> Tuple[int, Any]:
     return (r.status_code, r.text)
 
 
-def _bc_fetch_engagement_page(handle: str) -> Tuple[int, str]:
+def _bc_fetch_engagement_page(handle: str) -> tuple[int, str]:
     """Fetch the public engagement page (follows /<handle> -> /engagements/<handle>)."""
     import requests
 
@@ -291,7 +290,7 @@ def _bc_fetch_engagement_page(handle: str) -> Tuple[int, str]:
     return (r.status_code, r.text)
 
 
-def _bc_brief_url(handle: str, page_html: str) -> Optional[str]:
+def _bc_brief_url(handle: str, page_html: str) -> str | None:
     """Derive the brief-version-document JSON URL from an engagement page.
 
     Primary: the page's self-documenting ``data-api-endpoints`` attribute
@@ -314,7 +313,7 @@ def _bc_brief_url(handle: str, page_html: str) -> Optional[str]:
     return None
 
 
-def _bc_target_entry(t: Dict[str, Any], group: Dict[str, Any]) -> Dict[str, Any]:
+def _bc_target_entry(t: dict[str, Any], group: dict[str, Any]) -> dict[str, Any]:
     """Map one Bugcrowd target onto the H1-shaped asset-entry schema."""
     name = (t.get("name") or "").strip()
     ident, note = name, None
@@ -360,7 +359,7 @@ def _bc_target_entry(t: Dict[str, Any], group: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-def _bc_build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
+def _bc_build_manifest(handle: str) -> tuple[dict[str, Any], str | None]:
     """Fetch a public Bugcrowd engagement brief anonymously; H1-shaped manifest."""
     st, page = _bc_fetch_engagement_page(handle)
     if st != 200:
@@ -377,8 +376,8 @@ def _bc_build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
     if not isinstance(scope, list) or not scope:
         return ({}, "brief JSON has no data.scope target groups — unsupported layout")
     b = data.get("brief") or {}
-    in_scope: List[Dict[str, Any]] = []
-    out_of_scope_assets: List[Dict[str, Any]] = []
+    in_scope: list[dict[str, Any]] = []
+    out_of_scope_assets: list[dict[str, Any]] = []
     for g in scope:
         is_in = bool(g.get("inScope"))
         for t in (g.get("targets") or []):
@@ -429,7 +428,7 @@ def _bc_build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
 _INTI_API = "https://api.intigriti.com/external/researcher"
 
 # Intigriti domain type (value string) → H1-shaped asset_type.
-_INTI_DOMAIN_TYPE_MAP: Dict[str, str] = {
+_INTI_DOMAIN_TYPE_MAP: dict[str, str] = {
     "URL": "URL",
     "Android": "ANDROID",
     "IOS": "IOS",
@@ -441,17 +440,17 @@ _INTI_DOMAIN_TYPE_MAP: Dict[str, str] = {
 _inti_unmapped_type_logged: bool = False
 
 
-def _inti_auth() -> Optional[str]:
+def _inti_auth() -> str | None:
     """Return the Intigriti PAT bearer token, or None if not configured."""
     return os.getenv("INTIGRITI_API_TOKEN")
 
 
-def _inti_get(path: str, *, params: Optional[Dict[str, Any]] = None) -> Tuple[int, Any]:
+def _inti_get(path: str, *, params: dict[str, Any] | None = None) -> tuple[int, Any]:
     """GET against the Intigriti Researcher API with Bearer auth."""
     import requests
 
     token = _inti_auth()
-    headers: Dict[str, str] = {"Accept": "application/json"}
+    headers: dict[str, str] = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     r = requests.get(f"{_INTI_API}{path}", params=params, headers=headers,
@@ -463,7 +462,7 @@ def _inti_get(path: str, *, params: Optional[Dict[str, Any]] = None) -> Tuple[in
     return (r.status_code, body)
 
 
-def _inti_resolve_handle(handle: str) -> Tuple[Optional[str], Optional[str]]:
+def _inti_resolve_handle(handle: str) -> tuple[str | None, str | None]:
     """Resolve a program ``handle`` to its GUID ``programId``.
 
     Intigriti's detail endpoint requires a GUID, not a handle, so we page
@@ -492,7 +491,7 @@ def _inti_resolve_handle(handle: str) -> Tuple[Optional[str], Optional[str]]:
                   f"first record keys: {available_keys})")
 
 
-def _inti_map_domain(d: Dict[str, Any]) -> Dict[str, Any]:
+def _inti_map_domain(d: dict[str, Any]) -> dict[str, Any]:
     """Map one Intigriti ``DomainViewModel`` onto the H1-shaped asset schema."""
     global _inti_unmapped_type_logged
     dtype = (d.get("type") or {}).get("value") or "Other"
@@ -532,7 +531,7 @@ def _inti_map_domain(d: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _inti_build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
+def _inti_build_manifest(handle: str) -> tuple[dict[str, Any], str | None]:
     """Fetch a program's scope + rules of engagement from the Intigriti
     Researcher API and assemble an H1-shaped manifest.
 
@@ -561,8 +560,8 @@ def _inti_build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
     # Step 3: extract domains (versioned blob → content list)
     domains_version = body.get("domains") or {}
     domains = domains_version.get("content") or []
-    in_scope: List[Dict[str, Any]] = []
-    out_of_scope_assets: List[Dict[str, Any]] = []
+    in_scope: list[dict[str, Any]] = []
+    out_of_scope_assets: list[dict[str, Any]] = []
     for d in domains:
         entry = _inti_map_domain(d)
         (in_scope if entry.get("eligible_for_submission")
@@ -620,7 +619,7 @@ def _inti_build_manifest(handle: str) -> Tuple[Dict[str, Any], Optional[str]]:
     return (manifest, None)
 
 
-def _write_scope_file(manifest: Dict[str, Any]) -> Optional[str]:
+def _write_scope_file(manifest: dict[str, Any]) -> str | None:
     """Write amass-compatible ``.scope`` from DOMAIN/WILDCARD/URL assets.
 
     Returns the path written, or None if nothing applicable.  Format matches
@@ -628,14 +627,14 @@ def _write_scope_file(manifest: Dict[str, Any]) -> Optional[str]:
     ``example.com`` (domain + subdomains), ``api.example.com`` (exact),
     ``#`` comments.  URL assets are reduced to their host.
     """
-    patterns: List[str] = []
+    patterns: list[str] = []
 
     def _hostlike(s: str) -> bool:
         # Skip policy prose ("Any host verified to be owned by Tesla...") —
         # only wildcard/host-shaped identifiers belong in the amass filter.
         return bool(re.match(r"^(\*\.)?[a-z0-9]([a-z0-9*._-]*[a-z0-9])?$", s.strip(), re.I))
 
-    def _scope_pattern(atype: str, ident: str) -> Optional[str]:
+    def _scope_pattern(atype: str, ident: str) -> str | None:
         """Return the amass-filter pattern for one asset, or None to skip.
 
         For DOMAIN/WILDCARD the identifier is already host-shaped, so the
@@ -692,7 +691,7 @@ def _write_scope_file(manifest: Dict[str, Any]) -> Optional[str]:
     return str(scope_path)
 
 
-def _save_cache(handle: str, manifest: Dict[str, Any], platform: str = "h1") -> str:
+def _save_cache(handle: str, manifest: dict[str, Any], platform: str = "h1") -> str:
     # Cache write is best-effort: a successful live fetch must not die just
     # because the cache dir is unwritable (callers ignore this return).
     try:
@@ -706,7 +705,7 @@ def _save_cache(handle: str, manifest: Dict[str, Any], platform: str = "h1") -> 
         return ""
 
 
-def _load_cache(handle: str, platform: str = "h1") -> Optional[Dict[str, Any]]:
+def _load_cache(handle: str, platform: str = "h1") -> dict[str, Any] | None:
     p = _scope_cache_path(handle, platform)
     if not p.is_file():
         return None
@@ -771,7 +770,7 @@ _CUSTOM_UA_RE = re.compile(
 )
 
 
-def _parse_prose_testing_reqs(text: str) -> Dict[str, Any]:
+def _parse_prose_testing_reqs(text: str) -> dict[str, Any]:
     """Best-effort extraction of testing requirements from prose text.
 
     Scans policy / instruction / brief-description text for rate-limit,
@@ -784,7 +783,7 @@ def _parse_prose_testing_reqs(text: str) -> Dict[str, Any]:
     """
     if not text:
         return {}
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
 
     # --- Rate limit ---
     for rx in (_RATE_RE, _RATE_RE_ALT):
@@ -825,7 +824,7 @@ def _resolve_username(platform: str) -> str:
     return os.getenv("RESEARCHER_USERNAME", "")
 
 
-def get_scan_config(handle: str, platform: str = "h1") -> Optional[Dict[str, Any]]:
+def get_scan_config(handle: str, platform: str = "h1") -> dict[str, Any] | None:
     """Resolve a program's testing requirements into concrete, injectable
     scan configuration for ffuf / ZAP / amass.
 
@@ -875,7 +874,7 @@ def get_scan_config(handle: str, platform: str = "h1") -> Optional[Dict[str, Any
     return None
 
 
-def get_armed_scan_config() -> Optional[Dict[str, Any]]:
+def get_armed_scan_config() -> dict[str, Any] | None:
     """Resolve scan config from the OPERATOR-ARMED scope state (no args).
 
     Reads ``scope/.armed_packet_scope.json`` — the same file-backed state the
@@ -902,7 +901,7 @@ def get_armed_scan_config() -> Optional[Dict[str, Any]]:
     return get_scan_config(handle, platform)
 
 
-def _normalise_rate(raw: Any) -> Optional[int]:
+def _normalise_rate(raw: Any) -> int | None:
     """Coerce a rate value to int or None (0 / None / negative → None)."""
     if raw is None:
         return None
@@ -913,8 +912,8 @@ def _normalise_rate(raw: Any) -> Optional[int]:
     return r if r > 0 else None
 
 
-def _get_scan_config_intigriti(manifest: Dict[str, Any],
-                               handle: str) -> Optional[Dict[str, Any]]:
+def _get_scan_config_intigriti(manifest: dict[str, Any],
+                               handle: str) -> dict[str, Any] | None:
     """Intigriti: structured testing_requirements from the API."""
     tr = manifest.get("testing_requirements") or {}
     ua_raw = tr.get("user_agent")
@@ -924,7 +923,7 @@ def _get_scan_config_intigriti(manifest: Dict[str, Any],
         return None  # program mandates no custom UA / header / rate
 
     username = os.getenv("INTIGRITI_USERNAME", "")
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
 
     def _resolve_placeholders(raw: str) -> str:
         s = raw or ""
@@ -954,8 +953,8 @@ def _get_scan_config_intigriti(manifest: Dict[str, Any],
     }
 
 
-def _get_scan_config_h1(manifest: Dict[str, Any],
-                        handle: str) -> Dict[str, Any]:
+def _get_scan_config_h1(manifest: dict[str, Any],
+                        handle: str) -> dict[str, Any]:
     """HackerOne: default identification header + best-effort prose parsing.
 
     H1's Traffic Identification docs recommend ``X-HackerOne-Research:
@@ -965,16 +964,16 @@ def _get_scan_config_h1(manifest: Dict[str, Any],
     custom headers, custom UA).
     """
     username = os.getenv("H1_API_USERNAME", "")
-    headers: Dict[str, str] = {}
-    rate: Optional[int] = None
-    sources: List[str] = ["platform-default"]
+    headers: dict[str, str] = {}
+    rate: int | None = None
+    sources: list[str] = ["platform-default"]
 
     # --- Default: H1-recommended identification header -------------------
     if username:
         headers["X-HackerOne-Research"] = username
 
     # --- Best-effort: scan policy + instructions for explicit reqs -------
-    prose_parts: List[str] = [manifest.get("policy") or ""]
+    prose_parts: list[str] = [manifest.get("policy") or ""]
     for a in manifest.get("in_scope", []):
         inst = a.get("instruction")
         if inst:
@@ -1007,8 +1006,8 @@ def _get_scan_config_h1(manifest: Dict[str, Any],
     }
 
 
-def _get_scan_config_bugcrowd(manifest: Dict[str, Any],
-                              handle: str) -> Dict[str, Any]:
+def _get_scan_config_bugcrowd(manifest: dict[str, Any],
+                              handle: str) -> dict[str, Any]:
     """Bugcrowd: default UA suffix + best-effort prose parsing.
 
     Bugcrowd has no platform-wide identification header.  Community
@@ -1018,9 +1017,9 @@ def _get_scan_config_bugcrowd(manifest: Dict[str, Any],
     """
     username = (os.getenv("BUGCROWD_USERNAME", "")
                 or os.getenv("H1_API_USERNAME", ""))
-    headers: Dict[str, str] = {}
-    rate: Optional[int] = None
-    sources: List[str] = ["platform-default"]
+    headers: dict[str, str] = {}
+    rate: int | None = None
+    sources: list[str] = ["platform-default"]
 
     # --- Default: researcher-identifying UA suffix ------------------------
     if username:
@@ -1070,7 +1069,7 @@ def _is_ip(s: str) -> bool:
         return False
 
 
-def _match_asset(target: str, asset: Dict[str, Any]) -> bool:
+def _match_asset(target: str, asset: dict[str, Any]) -> bool:
     """Test whether ``target`` falls under one in-scope asset."""
     atype = (asset.get("asset_type") or "").upper()
     ident = (asset.get("asset_identifier") or "").strip()
@@ -1118,7 +1117,7 @@ def _match_asset(target: str, asset: Dict[str, Any]) -> bool:
     return ident.lower() in t.lower()
 
 
-def _find_match(target: str, assets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _find_match(target: str, assets: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Find the best-matching asset for ``target``.
 
     Two passes so a specific asset (URL with a path, IP, CIDR, app id,
@@ -1155,7 +1154,7 @@ def _find_match(target: str, assets: List[Dict[str, Any]]) -> Optional[Dict[str,
     next_hints=["check_scope", "check_reportable", "subdomain_enum"],
 )
 def load_program_scope(handle: str = "crypto", refresh: bool = False,
-                       platform: str = "h1") -> Dict[str, Any]:
+                       platform: str = "h1") -> dict[str, Any]:
     """Fetch (or load cached) program scope for ``handle``.
 
     Args:
@@ -1225,7 +1224,7 @@ def _enumval(v: Any) -> Any:
     return v.get("value") if isinstance(v, dict) else v
 
 
-def _h1_search_programs(query: str, limit: int) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+def _h1_search_programs(query: str, limit: int) -> tuple[list[dict[str, Any]], str | None, bool]:
     """Client-side keyword match over the H1 program index (10 pages × 100).
 
     Returns ``(rows, error, truncated)``.  Matching is substring on name+handle
@@ -1237,10 +1236,10 @@ def _h1_search_programs(query: str, limit: int) -> Tuple[List[Dict[str, Any]], O
         return [], ("auth_required: set H1_API_USERNAME and H1_API_TOKEN "
                     "(generate at hackerone.com → Settings → API Tokens)"), False
     kw = query.lower()
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     truncated = False
     for page in range(1, 11):
-        params: Dict[str, Any] = {"page[size]": 100, "page[number]": page}
+        params: dict[str, Any] = {"page[size]": 100, "page[number]": page}
         status, body = _get("/hackers/programs", params=params)
         if status != 200 or not isinstance(body, dict):
             err = None
@@ -1267,7 +1266,7 @@ def _h1_search_programs(query: str, limit: int) -> Tuple[List[Dict[str, Any]], O
     return rows, None, truncated
 
 
-def _inti_search_programs(query: str, limit: int) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+def _inti_search_programs(query: str, limit: int) -> tuple[list[dict[str, Any]], str | None, bool]:
     """Client-side keyword match over the Intigriti program list (10 × 500).
 
     Returns ``(rows, error, truncated)``.  Requires ``INTIGRITI_API_TOKEN``.
@@ -1277,7 +1276,7 @@ def _inti_search_programs(query: str, limit: int) -> Tuple[List[Dict[str, Any]],
                     "(generate at app.intigriti.com → Settings → "
                     "Personal access tokens)"), False
     kw = query.lower()
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     truncated = False
     offset = 0
     for _ in range(10):
@@ -1306,7 +1305,7 @@ def _inti_search_programs(query: str, limit: int) -> Tuple[List[Dict[str, Any]],
     return rows, None, truncated
 
 
-def _bc_probe_program(handle: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _bc_probe_program(handle: str) -> tuple[dict[str, Any] | None, str | None]:
     """Anonymous exact-handle probe of a Bugcrowd engagement page.
 
     This lane has no public program-list API, so 'search' degenerates to an
@@ -1324,11 +1323,11 @@ def _bc_probe_program(handle: str) -> Tuple[Optional[Dict[str, Any]], Optional[s
     }, None
 
 
-def _summarize_manifest_assets(manifest: Dict[str, Any], cap: int = 100) -> Dict[str, Any]:
+def _summarize_manifest_assets(manifest: dict[str, Any], cap: int = 100) -> dict[str, Any]:
     """Compact bounty-relevant summary of a manifest (search_programs --assets)."""
     in_assets = manifest.get("in_scope") or []
     bounty_elig = sum(1 for a in in_assets if a.get("eligible_for_bounty"))
-    detail_hist: Dict[str, int] = {}
+    detail_hist: dict[str, int] = {}
     rows = []
     for a in in_assets[:cap]:
         detail = a.get("max_severity") or a.get("inti_tier") or a.get("reference") or ""
@@ -1373,7 +1372,7 @@ def _summarize_manifest_assets(manifest: Dict[str, Any], cap: int = 100) -> Dict
 )
 def search_programs(query: str = "", platform: str = "all", limit: int = 10,
                     with_assets: bool = False, handle: str = "",
-                    refresh: bool = False) -> Dict[str, Any]:
+                    refresh: bool = False) -> dict[str, Any]:
     """Search board program listings by keyword (discovery, not verdicts).
 
     Args:
@@ -1395,9 +1394,9 @@ def search_programs(query: str = "", platform: str = "all", limit: int = 10,
     if platform in ("h1", "intigriti") and not (query or "").strip():
         return {"ok": False, "error": f"query is required for the {platform} lane"}
 
-    rows: List[Dict[str, Any]] = []
-    lane_errors: Dict[str, str] = {}
-    lane_truncated: Dict[str, bool] = {}
+    rows: list[dict[str, Any]] = []
+    lane_errors: dict[str, str] = {}
+    lane_truncated: dict[str, bool] = {}
     if platform == "bugcrowd":
         probe, err = _bc_probe_program(handle.strip())
         if err:
@@ -1417,7 +1416,7 @@ def search_programs(query: str = "", platform: str = "all", limit: int = 10,
                 rows.extend(lane_rows)
                 lane_truncated[lane] = tr
 
-    res: Dict[str, Any] = {
+    res: dict[str, Any] = {
         "ok": bool(rows) or not lane_errors,
         "query": query,
         "platform": platform,
@@ -1431,7 +1430,7 @@ def search_programs(query: str = "", platform: str = "all", limit: int = 10,
     if not rows and lane_errors:
         res["ok"] = False
     if with_assets and rows:
-        assets: Dict[str, Any] = {}
+        assets: dict[str, Any] = {}
         for row in rows[:3]:
             key = f"{row['platform']}/{row.get('handle')}"
             if not row.get("handle"):
@@ -1458,7 +1457,7 @@ def search_programs(query: str = "", platform: str = "all", limit: int = 10,
     "(from cache or live) if not already loaded.",
     next_hints=["run_nmap", "run_ffuf", "run_masscan", "zap_open_url"],
 )
-def check_scope(target: str, handle: str, platform: str = "h1") -> Dict[str, Any]:
+def check_scope(target: str, handle: str, platform: str = "h1") -> dict[str, Any]:
     """Test ``target`` against the loaded scope manifest for ``handle``.
 
     Args:
@@ -1496,7 +1495,7 @@ def check_scope(target: str, handle: str, platform: str = "h1") -> Dict[str, Any
         }
     match = _find_match(target, in_assets)
     if match:
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "target": target,
             "in_scope": True,
             "matched_asset": match,
@@ -1541,7 +1540,7 @@ def check_scope(target: str, handle: str, platform: str = "h1") -> Dict[str, Any
     next_hints=["report_finding", "program_hacktivity"],
 )
 def check_reportable(category_or_cwe: str, handle: str,
-                     platform: str = "h1") -> Dict[str, Any]:
+                     platform: str = "h1") -> dict[str, Any]:
     """Test a finding category/CWE against the program's exclusion + weakness rules.
 
     Args:
@@ -1629,7 +1628,7 @@ def check_reportable(category_or_cwe: str, handle: str,
     "and reporter username.",
     next_hints=["check_reportable", "report_finding"],
 )
-def program_hacktivity(handle: str = "crypto", query: str = "", limit: int = 25) -> Dict[str, Any]:
+def program_hacktivity(handle: str = "crypto", query: str = "", limit: int = 25) -> dict[str, Any]:
     """Fetch a program's hacktivity feed (dedup aid).
 
     The public hacktivity endpoint is a live feed sorted newest-first by
@@ -1691,7 +1690,7 @@ def program_hacktivity(handle: str = "crypto", query: str = "", limit: int = 25)
                 f"do NOT read 0 as 'no dupes'"
             )
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "handle": handle,
         "status": "ok",
         "count": len(reports),

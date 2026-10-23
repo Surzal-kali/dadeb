@@ -91,7 +91,7 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urlparse
 
 from constants import resolve_workspace_root
@@ -121,14 +121,14 @@ class ScopeGateError(Exception):
 # In-process mtime cache so a running Brain notices a REPL-side change
 # without re-reading the file on every call.  One stat per call is fine for
 # scan/packet volumes (dozens, not k/s).
-_CACHE: Dict[str, Any] = {"mtime": None, "state": None}
+_CACHE: dict[str, Any] = {"mtime": None, "state": None}
 
 
 # --------------------------------------------------------------------------- #
 # State file I/O
 # --------------------------------------------------------------------------- #
 
-def _write_state(state: Dict[str, Any]) -> None:
+def _write_state(state: dict[str, Any]) -> None:
     """Atomic state write: stage to a ``.tmp`` sibling then ``os.replace``,
     so a crash mid-write can never leave a truncated / half-armed state file
     (a torn state file would parse as disarmed — fail-open)."""
@@ -141,7 +141,7 @@ def _write_state(state: Dict[str, Any]) -> None:
     _CACHE["state"] = state
 
 
-def _load_state() -> Optional[Dict[str, Any]]:
+def _load_state() -> dict[str, Any] | None:
     """Return the armed-state dict, or None when disarmed (no file).
 
     Mtime-checked so a REPL write is picked up by a separate process (Brain)
@@ -167,7 +167,7 @@ def _load_state() -> Optional[Dict[str, Any]]:
     return state
 
 
-def _load_manifest(handle: str, platform: str) -> Optional[Dict[str, Any]]:
+def _load_manifest(handle: str, platform: str) -> dict[str, Any] | None:
     """Lazy import + cache load — keeps program_scope (and its deps) out of
     every importer's module load time."""
     from auxiliaries.program_scope import _load_cache
@@ -214,7 +214,7 @@ def _is_hyphen_range(text: str) -> bool:
         or (left.isdigit() and right.isdigit())
 
 
-def _reverse_dns(ip: str, timeout: float = 2.0) -> List[str]:
+def _reverse_dns(ip: str, timeout: float = 2.0) -> list[str]:
     """PTR-lookup an IP, returning lowercased hostnames.  Capped at 2s so a
     slow/broken resolver never pins a scan.  Failure → empty list, which the
     gate treats as 'unconfirmed'."""
@@ -262,7 +262,7 @@ def _is_gated_target(ip: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-def _resolved_ips(host: str, timeout: float = 2.0) -> List[str]:
+def _resolved_ips(host: str, timeout: float = 2.0) -> list[str]:
     """Forward-resolve a hostname to its CURRENT IP set (bounded).
 
     Used only by the optional ``--ip-boundary`` tier: a hostname asset passes
@@ -273,7 +273,7 @@ def _resolved_ips(host: str, timeout: float = 2.0) -> List[str]:
     (refused, fail-closed).
     """
 
-    def _resolve() -> List[str]:
+    def _resolve() -> list[str]:
         infos = socket.getaddrinfo(host, None)
         return sorted({info[4][0] for info in infos})
 
@@ -290,7 +290,7 @@ def _resolved_ips(host: str, timeout: float = 2.0) -> List[str]:
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
-def _check_one(checkable: Optional[str], state: Dict[str, Any]) -> Tuple[bool, str]:
+def _check_one(checkable: str | None, state: dict[str, Any]) -> tuple[bool, str]:
     """Verdict for a single hostname or IP against the armed scope.
 
     ``checkable`` may be ``None`` (unparseable) — refused under strict,
@@ -314,7 +314,7 @@ def _check_one(checkable: Optional[str], state: Dict[str, Any]) -> Tuple[bool, s
 
     ip_boundary = bool(state.get("ip_boundary"))
     # Tier 1: operator-blessed allowlist (IPs; authoritative, CDN-safe).
-    allowlist: Dict[str, str] = state.get("allowlist") or {}
+    allowlist: dict[str, str] = state.get("allowlist") or {}
     if checkable in allowlist:
         host = allowlist.get(checkable) or ""
         return True, f"in operator allowlist ({host})" if host else "in operator allowlist"
@@ -335,7 +335,7 @@ def _check_one(checkable: Optional[str], state: Dict[str, Any]) -> Tuple[bool, s
     # the hostname->IP mapping explicitly via add_host (REPL-only); the gate
     # never resolves DNS for it - the operator's assertion IS the authority.
     # Keys are stored lowercased, trailing dot stripped; compare the same way.
-    blessed_hosts: Dict[str, str] = state.get("blessed_hosts") or {}
+    blessed_hosts: dict[str, str] = state.get("blessed_hosts") or {}
     _hkey = checkable.lower().rstrip(".")
     stale_vhost_ip = ""
     if _hkey in blessed_hosts:
@@ -436,7 +436,7 @@ def _check_one(checkable: Optional[str], state: Dict[str, Any]) -> Tuple[bool, s
     return True, f"WARNING: {checkable} not confirmed in-scope (non-strict); proceeding"
 
 
-def _check_broad(spec: str, state: Dict[str, Any]) -> Tuple[bool, str]:
+def _check_broad(spec: str, state: dict[str, Any]) -> tuple[bool, str]:
     """Verdict for a broad CIDR / hyphen-range target.
 
     A broad range can't be attributed host-by-host (a /24 reverse-DNS is 256
@@ -507,7 +507,7 @@ def _expand_comma_shorthand(raw: str) -> str:
     run_nmap, while the gate gets fully-qualified targets to validate.
     """
 
-    def _expand(match: "re.Match[str]") -> str:
+    def _expand(match: re.Match[str]) -> str:
         anchor = match.group(0).split(",")[0]
         prefix = anchor.rsplit(".", 1)[0]
         followers = re.findall(r",(\d{1,3})", match.group(0))
@@ -519,7 +519,7 @@ def _expand_comma_shorthand(raw: str) -> str:
         raw,
     )
 
-def check_send(dst_ip: Optional[str]) -> Tuple[bool, str]:
+def check_send(dst_ip: str | None) -> tuple[bool, str]:
     """Verdict for a single packet destination IP (packetcraft).
 
     ``dst_ip`` is the destination extracted from the crafted packet
@@ -535,7 +535,7 @@ def check_send(dst_ip: Optional[str]) -> Tuple[bool, str]:
     return _check_one(dst_ip, state)
 
 
-def check_scan(target: Optional[str]) -> Tuple[bool, str]:
+def check_scan(target: str | None) -> tuple[bool, str]:
     """Verdict for a scan-tool target (nmap/masscan/ffuf/hydra/ZAP).
 
     Handles URL, bare hostname, IP, CIDR, hyphen-range, and whitespace/comma
@@ -568,7 +568,7 @@ def check_scan(target: Optional[str]) -> Tuple[bool, str]:
             if s.strip()
         ]
 
-    warnings: List[str] = []
+    warnings: list[str] = []
     for spec in specs:
         checkable, broad = _spec_to_checkable(spec)
         if broad:
@@ -588,7 +588,7 @@ def check_scan(target: Optional[str]) -> Tuple[bool, str]:
     return True, summary
 
 
-def _spec_to_checkable(spec: str) -> Tuple[Optional[str], bool]:
+def _spec_to_checkable(spec: str) -> tuple[str | None, bool]:
     """Reduce one target spec to a (checkable_hostname_or_ip, is_broad_range).
 
     ``is_broad_range`` is True for CIDRs wider than /32 and hyphen-ranges,
@@ -626,7 +626,7 @@ def arm(
     strict: bool = True,
     ip_boundary: bool = False,
     refresh: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Arm the scope gate against a program's manifest.
 
     Ensures the manifest is cached first (fetches via load_program_scope if
@@ -706,7 +706,7 @@ def arm(
     }
 
 
-def disarm() -> Dict[str, Any]:
+def disarm() -> dict[str, Any]:
     """Disarm the gate (lab mode — tools unrestricted)."""
     p = _state_path()
     if p.exists():
@@ -719,7 +719,7 @@ def disarm() -> Dict[str, Any]:
     return {"ok": True, "disarmed": True, "message": "scope gate DISARMED (lab mode)."}
 
 
-def add_ip(ip: str, hostname: str = "") -> Dict[str, Any]:
+def add_ip(ip: str, hostname: str = "") -> dict[str, Any]:
     """Bless an IP into the operator allowlist (authoritative, CDN-safe).
 
     Use this after confirming via recon (amass/dns forward-resolution) that
@@ -764,7 +764,7 @@ def add_ip(ip: str, hostname: str = "") -> Dict[str, Any]:
     }
 
 
-def add_host(hostname: str, ip: str) -> Dict[str, Any]:
+def add_host(hostname: str, ip: str) -> dict[str, Any]:
     """Bless a hostname into the operator's blessed-host list (vhost support).
 
     For lanes whose connect target is a Host header (ZAP raw send), the gate
@@ -817,7 +817,7 @@ def add_host(hostname: str, ip: str) -> Dict[str, Any]:
     }
 
 
-def remove_host(hostname: str) -> Dict[str, Any]:
+def remove_host(hostname: str) -> dict[str, Any]:
     """Remove a blessed hostname (REPL authority, same as add_host)."""
     state = _load_state()
     if state is None:
@@ -831,7 +831,7 @@ def remove_host(hostname: str) -> Dict[str, Any]:
     return {"ok": True, "hostname": key, "blessed_hosts": dict(blessed)}
 
 
-def remove_ip(ip: str) -> Dict[str, Any]:
+def remove_ip(ip: str) -> dict[str, Any]:
     """Unbless an IP.  Cascades: blessed hostnames mapped to the removed IP
     are purged too - a stale vhost blessing must not keep a dropped IP alive
     through the tier-1b hostname lane (2026-09-20 fuzz-C drift fix)."""
@@ -857,18 +857,18 @@ def remove_ip(ip: str) -> Dict[str, Any]:
     }
 
 
-def list_ips() -> Dict[str, Any]:
+def list_ips() -> dict[str, Any]:
     state = _load_state()
     if state is None:
         return {"ok": True, "armed": False, "allowlist": {}}
     return {"ok": True, "armed": True, "allowlist": state.get("allowlist") or {}}
 
 
-def status() -> Dict[str, Any]:
+def status() -> dict[str, Any]:
     state = _load_state()
     if state is None:
         return {"ok": True, "armed": False, "message": "disarmed (lab mode — tools unrestricted)"}
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "ok": True,
         "armed": True,
         "handle": state.get("handle"),

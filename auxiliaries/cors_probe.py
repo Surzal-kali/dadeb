@@ -27,7 +27,7 @@ Scope: both tools validate the URL through the operator-armed scope gate
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import requests
 
@@ -35,7 +35,7 @@ from constants import framework_tool
 
 _EVIL_ORIGIN = "https://evil.example.com"
 
-_SECURITY_HEADERS: Tuple[Tuple[str, str], ...] = (
+_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
     ("Content-Security-Policy", "CSP — script/style origin control"),
     ("Strict-Transport-Security", "HSTS — enforces https on repeat visits"),
     ("X-Frame-Options", "clickjacking control (or CSP frame-ancestors)"),
@@ -48,7 +48,7 @@ _SECURITY_HEADERS: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def _cors_verdict(acao: Optional[str], acac: Optional[str], origin_sent: str) -> Tuple[str, str]:
+def _cors_verdict(acao: str | None, acac: str | None, origin_sent: str) -> tuple[str, str]:
     """Pure verdict fn: (verdict, severity_hint) from response headers."""
     if not acao:
         return "no_access_control_allow_origin", "clean"
@@ -78,7 +78,7 @@ def _cors_verdict(acao: Optional[str], acac: Optional[str], origin_sent: str) ->
     )
 
 
-def _fetch(url: str, headers: Dict[str, str], insecure: bool, timeout: float = 10.0):
+def _fetch(url: str, headers: dict[str, str], insecure: bool, timeout: float = 10.0):
     """GET via utils.gated_http — in-scope redirects are followed hop-by-hop
     with per-hop gate validation; a hop to an out-of-scope host raises
     ScopeGateError (hard fail for these single-URL tools)."""
@@ -106,7 +106,7 @@ def check_cors(
     url: str,
     insecure: bool = False,
     timeout: float = 10.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Probe ``url`` with attacker origins and grade the CORS response.
 
     Args:
@@ -124,7 +124,7 @@ def check_cors(
         raise ScopeGateError(f"scope gate: {_sc_reason}")
 
     started = time.time()
-    probes: List[Dict[str, Any]] = []
+    probes: list[dict[str, Any]] = []
     for label, origin in (("evil-origin", _EVIL_ORIGIN), ("null-origin", "null")):
         try:
             r = _fetch(url, {"Origin": origin}, insecure, timeout)
@@ -176,7 +176,7 @@ def check_cors(
     }
 
 
-def worst_case_of(probes: List[Dict[str, Any]]) -> Dict[str, Any]:
+def worst_case_of(probes: list[dict[str, Any]]) -> dict[str, Any]:
     return max(
         probes,
         key=lambda p: {"reflects_arbitrary_origin_with_credentials": 3,
@@ -200,7 +200,7 @@ def check_security_headers(
     url: str,
     insecure: bool = False,
     timeout: float = 10.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """One GET to ``url``; audit standard hardening headers.
 
     Args:
@@ -225,8 +225,8 @@ def check_security_headers(
     except requests.exceptions.RequestException as e:
         return {"status": "Failed", "error": f"request failed: {type(e).__name__}", "url": url}
 
-    present: Dict[str, str] = {}
-    missing: List[Dict[str, str]] = []
+    present: dict[str, str] = {}
+    missing: list[dict[str, str]] = []
     for header, why in _SECURITY_HEADERS:
         value = r.headers.get(header)
         if value is not None:

@@ -10,9 +10,9 @@ REPL's legacy smoke-``sweep``; the table also feeds
 implicitly.
 """
 
-from typing import Any, Dict, Set
+from typing import Any
 
-SAFE_ARGS: Dict[str, Dict[str, Any]] = {
+SAFE_ARGS: dict[str, dict[str, Any]] = {
     "auxiliaries.nmap.run_nmap": {"target": "127.0.0.1", "options": "-Pn -p 22"},
     "auxiliaries.smb_scanner.SMBScanner.check_null_session": {"host": "127.0.0.1"},
     "auxiliaries.smb_scanner.run_smb_recon": {"host": "127.0.0.1"},
@@ -41,7 +41,7 @@ SAFE_ARGS: Dict[str, Dict[str, Any]] = {
 
 # Tools that require a live service and were skipped in legacy sweep mode;
 # still consulted safe-mode skips in the selftest macro.
-REQUIRES_SERVICE: Set[str] = {
+REQUIRES_SERVICE: set[str] = {
     "payloads.metasploiting.MetasploitClient.index_modules",
     "payloads.metasploiting.MetasploitClient.dispatch_metasploit",
     "payloads.metasploiting.MetasploitClient.get_options",

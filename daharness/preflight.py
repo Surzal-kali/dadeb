@@ -26,7 +26,7 @@ there is exactly one coercion implementation shared by every lane.
 import json
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,9 @@ MAX_ARG_ITEMS = int(os.getenv("PREFLIGHT_MAX_ARG_ITEMS", "256"))
 def rejection(
     tool_id: Any,
     error: str,
-    accepted: Optional[list] = None,
-    required: Optional[list] = None,
-) -> Dict[str, Any]:
+    accepted: list | None = None,
+    required: list | None = None,
+) -> dict[str, Any]:
     """Build a structured Rejection envelope."""
     return {
         "status": "Rejected",
@@ -67,7 +67,7 @@ def is_rejection(obj: Any) -> bool:
     )
 
 
-def format_rejection(env: Dict[str, Any]) -> str:
+def format_rejection(env: dict[str, Any]) -> str:
     """Human-readable one-liner for error channels (MCP isError, HTTP 422)."""
     return (
         f"{env.get('error', 'rejected')}"
@@ -76,7 +76,7 @@ def format_rejection(env: Dict[str, Any]) -> str:
     )
 
 
-def normalize_arguments(arguments: Any) -> Tuple[Optional[dict], Optional[dict]]:
+def normalize_arguments(arguments: Any) -> tuple[dict | None, dict | None]:
     """Parse/normalize ``arguments`` and enforce size caps.
 
     Returns ``(args_dict, None)`` on pass or ``(None, rejection_envelope)``.
@@ -292,7 +292,7 @@ def _coerce_arg_value(name: str, value: Any, schema_type: str) -> Any:
     return value
 
 
-def validate_against_manifest(args: dict, manifest: Any) -> Optional[dict]:
+def validate_against_manifest(args: dict, manifest: Any) -> dict | None:
     """Schema-level checks against the manifest's ``parameters`` schema.
 
     Returns None on pass or a rejection envelope. Checks, in order:

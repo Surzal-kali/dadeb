@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, List
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -52,7 +52,7 @@ _RECENCY_WEIGHT = float(os.getenv("MEMORY_RECENCY_WEIGHT", "0.35"))
 # OLLAMA_BASE_URL here independently of registry.py).
 
 
-def _embed(text: str) -> List[float]:
+def _embed(text: str) -> list[float]:
     """Synchronously embed a single text via the configured embed endpoint.
 
     Runs in a worker thread (the executor dispatches sync tools via
@@ -199,7 +199,7 @@ def recall_text(
     "exists here before using it. Returns sorted plain names (flat scheme, "
     "e.g. 'engagement', 'ops'); no prefix, no path separators."
 )
-def list_text_namespaces() -> List[str]:
+def list_text_namespaces() -> list[str]:
     """List all memory namespaces that exist in the vector store."""
     return _svc().list_namespaces()
 

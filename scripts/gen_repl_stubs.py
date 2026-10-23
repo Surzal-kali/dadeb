@@ -193,7 +193,7 @@ def _render_signature(manifest) -> str:
 
 # ── Stub generation ──────────────────────────────────────────────────────────
 
-def generate_pyi(alias_map: Dict[str, Any]) -> str:
+def generate_pyi(alias_map: dict[str, Any]) -> str:
     """Render the full .pyi text for one alias map."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     n = len(alias_map)

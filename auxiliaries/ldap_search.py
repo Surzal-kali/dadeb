@@ -55,8 +55,8 @@ import re
 import shlex
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional
-
+from typing import Any
+#TODO: HOLY CRAP DEPRACATION CENTRAL
 from constants import framework_tool
 from utils.scope_gate import check_scan, ScopeGateError
 
@@ -73,7 +73,7 @@ _LDAPSEARCH_TIMEOUT = float(os.getenv("LDAPSEARCH_TIMEOUT", "60"))
 _DEFAULT_SIZE_LIMIT = int(os.getenv("LDAPSEARCH_DEFAULT_SIZE_LIMIT", "500"))
 
 
-def _resolve_ldapsearch() -> Optional[str]:
+def _resolve_ldapsearch() -> str | None:
     """Locate the ldapsearch binary; None = not installed (caller reports)."""
     found = shutil.which("ldapsearch")
     if found and os.access(found, os.X_OK):
@@ -103,10 +103,10 @@ def _resolve_ldapsearch() -> Optional[str]:
 _B64_RE = re.compile(r"^[A-Za-z0-9+/]+=*$")
 
 
-def _unfold_ldif(text: str) -> List[str]:
+def _unfold_ldif(text: str) -> list[str]:
     """Unfold LDIF continuation lines (a line starting with space continues
     the previous line)."""
-    lines: List[str] = []
+    lines: list[str] = []
     for raw in text.splitlines():
         if raw.startswith(" "):
             if lines:
@@ -129,7 +129,7 @@ def _decode_value(value: str, is_base64: bool) -> str:
     return value
 
 
-def _parse_ldif(text: str) -> List[Dict[str, Any]]:
+def _parse_ldif(text: str) -> list[dict[str, Any]]:
     """Parse LDIF text into a list of entry dicts.
 
     Each entry is ``{"dn": str, "attributes": {name: [values]}}``.
@@ -140,8 +140,8 @@ def _parse_ldif(text: str) -> List[Dict[str, Any]]:
     import base64 as _b64
 
     lines = _unfold_ldif(text)
-    entries: List[Dict[str, Any]] = []
-    current: Optional[Dict[str, Any]] = None
+    entries: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
 
     for line in lines:
         if not line.strip():
@@ -212,7 +212,7 @@ def _build_argv(
     base_dn: str,
     scope: str,
     filter_str: str,
-    attributes: List[str],
+    attributes: list[str],
     bind_dn: str,
     bind_password: str,
     size_limit: int,
@@ -220,14 +220,14 @@ def _build_argv(
     extra_options: str,
     *,
     is_rootdse: bool = False,
-) -> List[str]:
+) -> list[str]:
     """Build the ldapsearch argv list (no shell, no interpolation)."""
     binary = _resolve_ldapsearch()
     if not binary:
         # Let the caller produce a clear error.
         binary = "ldapsearch"
 
-    argv: List[str] = [binary, "-x"]  # simple bind, always
+    argv: list[str] = [binary, "-x"]  # simple bind, always
 
     # Host and port.
     argv.extend(["-H", f"ldap://{host}:{int(port)}"])
@@ -279,7 +279,7 @@ def _build_argv(
     return argv
 
 
-def _run_ldapsearch(argv: List[str], timeout: float) -> Dict[str, Any]:
+def _run_ldapsearch(argv: list[str], timeout: float) -> dict[str, Any]:
     """Run ldapsearch and return a structured result dict.
 
     Never raises to the caller — errors are surfaced in the result envelope.
@@ -364,7 +364,7 @@ def _run_ldapsearch(argv: List[str], timeout: float) -> Dict[str, Any]:
 
 # --- result digest ----------------------------------------------------------
 
-def _ldap_search_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _ldap_search_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Digest adapter for ``ldap_search`` — entry count + DN list only.
 
     The full LDIF (which can be thousands of lines for a large directory) is
@@ -445,7 +445,7 @@ def ldap_search(
     size_limit: int = 0,
     timeout: float = 30.0,
     extra_options: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Search an LDAP directory via ``ldapsearch``.
 
     Binds (anonymously by default, or with credentials when ``bind_dn`` is
@@ -504,7 +504,7 @@ def ldap_search(
         }
 
     # Parse attributes (comma or space separated).
-    attr_list: List[str] = []
+    attr_list: list[str] = []
     if attributes and attributes.strip():
         attr_list = [a.strip() for a in re.split(r"[,\s]+", attributes.strip()) if a.strip()]
 
@@ -552,7 +552,7 @@ def ldap_rootdse(
     port: int = 389,
     timeout: float = 15.0,
     extra_options: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fetch the rootDSE from an LDAP server.
 
     The rootDSE is a special entry (base scope, empty base DN) that

@@ -13,7 +13,6 @@ object base when prompt_toolkit isn't installed (the module imports
 cleanly either way).
 """
 
-from typing import List
 
 from daharness.models import ToolManifest
 
@@ -45,10 +44,10 @@ class ToolReplCompleter(Completer if _PROMPT_TOOLKIT else object):
     # Commands whose first argument is a tool_id.
     TOOL_COMMANDS = {"run", "info", "resolve"}
 
-    def __init__(self, manifests: List[ToolManifest]):
+    def __init__(self, manifests: list[ToolManifest]):
         self.manifests = manifests
 
-    def refresh(self, manifests: List[ToolManifest]) -> None:
+    def refresh(self, manifests: list[ToolManifest]) -> None:
         self.manifests = manifests
 
     def get_completions(self, document, complete_event):

@@ -6,7 +6,7 @@ import threading
 import importlib
 import signal
 from pathlib import Path
-from typing import Dict, Optional, List, Any
+from typing import Any
 import socket
 import time
 
@@ -186,10 +186,10 @@ class FrameworkLoader:
     def __init__(self, framework_root: Path):
         self.framework_root = framework_root
         self.runner = AsyncBackgroundRunner()
-        self.active_tasks: List[Any] = []
+        self.active_tasks: list[Any] = []
         self.api_server = None   # uvicorn.Server, set by api_gateway.run()
         self.api_task = None     # the asyncio task wrapping start_api_server
-        self.tool_registry: Dict[str, tuple] = {}
+        self.tool_registry: dict[str, tuple] = {}
         self.packet_tool = None
         self.vector_registry = None
 
@@ -241,7 +241,7 @@ class FrameworkLoader:
                 with socket.create_connection((host, port), timeout=1):
                     logger.info("[+] RPC port %s:%s is now open.", host, port)
                     return True
-            except (ConnectionRefusedError, socket.timeout):
+            except (ConnectionRefusedError, TimeoutError):
                 await asyncio.sleep(1)
                 continue
         logger.warning("[!] RPC port %s:%s did not become available within %s seconds.", host, port, timeout)
@@ -601,7 +601,7 @@ class FrameworkLoader:
             else:
                 su = shutil.which("su") or "/usr/bin/su"
                 cmd = [su, launch_user.pw_name, "-s", "/bin/sh", "-c",
-                       " ".join(shlex.quote(a) for a in cmd)]
+                       shlex.join(cmd)]
                 logger.info(
                     "[+] (runuser unavailable; using su to drop ZAP to '%s')",
                     launch_user.pw_name,
@@ -990,7 +990,7 @@ class FrameworkLoader:
         if self.api_task is not None and not self.api_task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(self.api_task), timeout=3)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("[!] API server didn't shut down in 3s; will cancel its task")
             except asyncio.CancelledError:
                 pass
@@ -1011,7 +1011,7 @@ class FrameworkLoader:
             try:
                 await asyncio.wait_for(p.wait(), timeout=5)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("[!] Child pid %s didn't exit on SIGTERM; sending SIGKILL", p.pid)
             except ProcessLookupError:
                 return
@@ -1269,7 +1269,7 @@ def _stack_live_probes() -> dict:
     return probes
 
 
-def _systemctl_is_active(unit: str = "daharness.service") -> Optional[str]:
+def _systemctl_is_active(unit: str = "daharness.service") -> str | None:
     """'active' / 'activating' / 'inactive' / ... — None when systemctl itself
     is absent (dev tree on a non-managed box; there is nothing to ask)."""
     import shutil

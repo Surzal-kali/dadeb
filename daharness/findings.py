@@ -19,7 +19,6 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
 from uuid import uuid4
 from .models import Finding, Unknown
 from constants import resolve_workspace_root
@@ -82,7 +81,7 @@ def ensure_ids_db(db_path: str | None = None) -> Path:
 class FindingStore:
     """Append-only findings store backed by a SQLite table in ``ids.db``."""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         # Workspace-resolved default (never tree-relative: a hardcoded
         # __file__-derived path wrote ids.db INTO the deb package tree —
         # untracked residue that survives a purge; 2026-10-20 VM incident).
@@ -296,8 +295,8 @@ class FindingStore:
         # (gateway + secretary + MCP clients share ids.db) can compute the
         # same U-id; the PRIMARY KEY turns that into a loud IntegrityError
         # and we recount/retry.
-        last_exc: Optional[BaseException] = None
-        unknown: Optional[Unknown] = None
+        last_exc: BaseException | None = None
+        unknown: Unknown | None = None
         for _attempt in range(10):
             cur = self.conn.execute("SELECT COUNT(*) FROM unknowns")
             unknown_id = f"U-{cur.fetchone()[0] + 1:03d}"
@@ -356,11 +355,11 @@ class FindingStore:
 
     def unknowns(
         self,
-        status: Optional[str] = None,
-        domain: Optional[str] = None,
-        asset: Optional[str] = None,
+        status: str | None = None,
+        domain: str | None = None,
+        asset: str | None = None,
         include_closed: bool = True,
-    ) -> List[Unknown]:
+    ) -> list[Unknown]:
         """List unknowns, oldest first, optionally filtered.
 
         ``include_closed=False`` returns only open unknowns — the "what
@@ -380,7 +379,7 @@ class FindingStore:
             items = [u for u in items if u.status == "open"]
         return items
 
-    def get_unknown(self, unknown_id: str) -> Optional[Unknown]:
+    def get_unknown(self, unknown_id: str) -> Unknown | None:
         row = self.conn.execute(
             "SELECT * FROM unknowns WHERE id = ?", (unknown_id,)
         ).fetchone()
@@ -396,7 +395,7 @@ class FindingStore:
         status: str,
         resolution: str = "",
         resolved_by: str = "",
-    ) -> Optional[Unknown]:
+    ) -> Unknown | None:
         """Resolve/close an unknown.
 
         status: resolved (answered), wontfix (never pursuing), promoted
@@ -432,11 +431,11 @@ class FindingStore:
         title: str,
         severity: str,
         asset: str,
-        cwe: Optional[str] = None,
-        evidence: Optional[dict] = None,
-        repro: Optional[List[str]] = None,
-        tool_chain: Optional[List[str]] = None,
-        memory_ref: Optional[str] = None,
+        cwe: str | None = None,
+        evidence: dict | None = None,
+        repro: list[str] | None = None,
+        tool_chain: list[str] | None = None,
+        memory_ref: str | None = None,
     ) -> Finding:
         """Append a finding, auto-assigning an incremental ID and timestamp."""
         ts = datetime.now(timezone.utc).isoformat()
@@ -445,7 +444,7 @@ class FindingStore:
         # ids.db) can compute the same F-id; the PRIMARY KEY turns that
         # into a loud IntegrityError instead of a duplicate. Recount and
         # retry so the caller just gets their finding, slightly later.
-        last_exc: Optional[BaseException] = None
+        last_exc: BaseException | None = None
         for _attempt in range(10):
             cur = self.conn.execute("SELECT COUNT(*) FROM findings")
             finding_id = f"F-{cur.fetchone()[0] + 1:03d}"
@@ -494,7 +493,7 @@ class FindingStore:
 
     # -- read ---------------------------------------------------------------
 
-    def all(self) -> List[Finding]:
+    def all(self) -> list[Finding]:
         """Return all findings, oldest first (numeric ID order)."""
         # Sort by the integer portion of the ID (F-001 → 1, F-1000 → 1000)
         # so F-1000 doesn't sort before F-999 as it would lexicographically.
@@ -503,7 +502,7 @@ class FindingStore:
         ).fetchall()
         return [self._row_to_finding(r) for r in rows]
 
-    def get(self, finding_id: str) -> Optional[Finding]:
+    def get(self, finding_id: str) -> Finding | None:
         row = self.conn.execute(
             "SELECT * FROM findings WHERE id = ?", (finding_id,)
         ).fetchone()
@@ -517,10 +516,10 @@ class FindingStore:
         self,
         finding_id: str,
         status: str,
-        closed_by: Optional[str] = None,
-        closed_reason: Optional[str] = None,
-        superseded_by: Optional[str] = None,
-    ) -> Optional[Finding]:
+        closed_by: str | None = None,
+        closed_reason: str | None = None,
+        superseded_by: str | None = None,
+    ) -> Finding | None:
         """Update the lifecycle status of a finding.
 
         Args:
@@ -596,8 +595,8 @@ class FindingStore:
         self,
         old_id: str,
         new_id: str,
-        closed_by: Optional[str] = None,
-        reason: Optional[str] = None,
+        closed_by: str | None = None,
+        reason: str | None = None,
     ) -> dict:
         """Mark ``old_id`` as superseded by ``new_id``.
 
@@ -650,9 +649,9 @@ class FindingStore:
 
     def render_markdown(
         self,
-        severity: Optional[str] = None,
-        asset: Optional[str] = None,
-        status: Optional[str] = None,
+        severity: str | None = None,
+        asset: str | None = None,
+        status: str | None = None,
         include_closed: bool = True,
     ) -> str:
         """Render findings as a markdown report.
@@ -785,10 +784,10 @@ class FindingStore:
 
     def write_markdown(
         self,
-        output_dir: Optional[Path] = None,
-        severity: Optional[str] = None,
-        asset: Optional[str] = None,
-        status: Optional[str] = None,
+        output_dir: Path | None = None,
+        severity: str | None = None,
+        asset: str | None = None,
+        status: str | None = None,
         include_closed: bool = True,
     ) -> Path:
         """Render findings to markdown AND persist the report to disk.

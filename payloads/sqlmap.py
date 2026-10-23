@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from constants import framework_tool
 from utils.background_job import register_verdict_parser
@@ -46,21 +46,21 @@ from utils.background_job import register_verdict_parser
 # secretary can poll across turns. Capped to avoid unbounded growth in long
 # sessions; oldest finished jobs are evicted first.
 _MAX_JOBS = 64
-_JOBS: "Dict[str, Dict[str, Any]]" = {}
+_JOBS: Dict[str, Dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
 
 # Log directory for per-job sqlmap output. Created lazily.
 _LOG_DIR = os.getenv("SQLMAP_LOG_DIR", "/tmp")
 
 
-def _inject_batch(extra: List[str]) -> List[str]:
+def _inject_batch(extra: list[str]) -> list[str]:
     """Prepend/append ``--batch`` if the caller didn't already pass it."""
     if any(a in ("--batch", "-batch") or a.startswith("--batch=") for a in extra):
         return extra
     return extra + ["--batch"]
 
 
-def _parse_verdict(log_text: str) -> Dict[str, Any]:
+def _parse_verdict(log_text: str) -> dict[str, Any]:
     """Best-effort verdict from sqlmap's log output.
 
     Returns a dict with ``injectable`` (bool), ``dbms`` (str|None), and
@@ -108,7 +108,7 @@ register_verdict_parser("sqlmap", _parse_verdict)
     "the protocol directly and are faster, quieter and structured.",
     next_hints=["sqlmap_status"],
 )
-def run_sqlmap(target_url: str, options: str = "") -> Dict[str, Any]:
+def run_sqlmap(target_url: str, options: str = "") -> dict[str, Any]:
     """Launch sqlmap against ``target_url`` and return immediately.
 
     Lane note (2026-09-22): sqlmap = injection testing (attack verb). Direct
@@ -171,7 +171,7 @@ def run_sqlmap(target_url: str, options: str = "") -> Dict[str, Any]:
         start_new_session=True,
     )
 
-    entry: Dict[str, Any] = {
+    entry: dict[str, Any] = {
         "job_id": job_id,
         "target": target_url,
         "options": options,
@@ -225,7 +225,7 @@ def run_sqlmap(target_url: str, options: str = "") -> Dict[str, Any]:
             try:
                 fh.write(f"\n[sqlmap reaper] exceeded {cap:.0f}s wall-clock; terminated\n")
             except Exception:
-                pass
+                print(f"[sqlmap reaper] exceeded {cap:.0f}s wall-clock; terminated (failed to write to log)")
 
     t = threading.Thread(target=_reaper, args=(proc, log_fh, job_id), daemon=True)
     entry["_reaper"] = t
@@ -265,7 +265,7 @@ def run_sqlmap(target_url: str, options: str = "") -> Dict[str, Any]:
     "sqlmap itself stays the injection lane only.",
     next_hints=["sqlmap_status", "report_finding"],
 )
-def sqlmap_status(job_id: str) -> Dict[str, Any]:
+def sqlmap_status(job_id: str) -> dict[str, Any]:
     """Poll the status of a scan launched by ``run_sqlmap``.
 
     Reads the job's log file, checks whether the subprocess is still alive,
@@ -294,8 +294,8 @@ def sqlmap_status(job_id: str) -> Dict[str, Any]:
             "error": f"no sqlmap job with id {job_id!r} (it may have been evicted)",
         }
 
-    proc: Optional[subprocess.Popen] = entry.get("proc")
-    rc: Optional[int]
+    proc: subprocess.Popen | None = entry.get("proc")
+    rc: int | None
     if proc is not None:
         rc = proc.poll()
     else:
@@ -332,7 +332,7 @@ def sqlmap_status(job_id: str) -> Dict[str, Any]:
     else:
         status = "done"
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "job_id": job_id,
         "status": status,
         "exit_code": rc if rc is not None else None,
@@ -357,13 +357,13 @@ def sqlmap_status(job_id: str) -> Dict[str, Any]:
 
 def _read_log(path: str) -> str:
     try:
-        with open(path, "r", errors="replace") as f:
+        with open(path, errors="replace") as f:
             return f.read()
     except OSError:
         return ""
 
 
-def _reconstruct_job(job_id: str) -> Optional[Dict[str, Any]]:
+def _reconstruct_job(job_id: str) -> dict[str, Any] | None:
     """Rebuild a job entry from the disk sidecar when it's not in _JOBS.
 
     Used after a harness restart (or from a different process) so polls keep
@@ -393,11 +393,11 @@ def _reconstruct_job(job_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _terminate_job(entry: Dict[str, Any]) -> None:
+def _terminate_job(entry: dict[str, Any]) -> None:
     """Terminate a running sqlmap job: terminate() then kill() the live Popen,
     or, for a reconstructed job with only a pid, send SIGTERM/SIGKILL directly.
     """
-    proc: Optional[subprocess.Popen] = entry.get("proc")
+    proc: subprocess.Popen | None = entry.get("proc")
     if proc is not None:
         proc.terminate()
         try:
@@ -430,7 +430,7 @@ def _terminate_job(entry: Dict[str, Any]) -> None:
         pass
 
 
-def _pid_status(entry: Dict[str, Any]) -> Optional[int]:
+def _pid_status(entry: dict[str, Any]) -> int | None:
     """For a reconstructed job: return the process exit code if it has exited,
     or None if it's still running. Falls back to the log's ``ending`` marker
     when the pid is gone but we can't read an exit code.
@@ -453,7 +453,7 @@ def _pid_status(entry: Dict[str, Any]) -> Optional[int]:
     return 0 if "[*] ending @" in log_text else None
 
 
-def _tail(text: str, n: int) -> List[str]:
+def _tail(text: str, n: int) -> list[str]:
     lines = [ln for ln in text.splitlines() if ln.strip()]
     # Strip ANSI escape sequences sqlmap emits for its terminal cursor moves.
     ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -469,4 +469,4 @@ def _cleanup_job(job_id: str) -> None:
     try:
         entry["log_fh"].close()
     except Exception:
-        pass
+        print(f"[sqlmap cleanup] failed to close log file for job {job_id}")

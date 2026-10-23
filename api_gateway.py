@@ -22,7 +22,7 @@ except Exception:
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Any, Optional
+from typing import Any
 from starlette.routing import Route
 
 # Per-turn tool budget (utils/tool_budget.py) — see ToolRequest.turn_key.
@@ -224,64 +224,64 @@ logger = logging.getLogger(__name__)
 # Request models shared by the REST endpoints and the MCP tool wrappers.
 # ---------------------------------------------------------------------------
 class ToolRequest(BaseModel):
-    intent: Optional[str] = None
+    intent: str | None = None
     # When tool_id is supplied, skip semantic search and execute that exact
     # tool (the model picked it from a tools_search menu).  When only intent
     # is supplied, fall back to the legacy auto-resolve-and-execute path.
-    tool_id: Optional[str] = None
-    arguments: Optional[dict] = None
+    tool_id: str | None = None
+    arguments: dict | None = None
     # agent_id doubles as the Brain session id and scopes memory reads/writes.
     # Must be a TOP-LEVEL request field, NOT a tool argument (concurrent MCP
     # clients each pass their own; tool schemas stay clean).
-    agent_id: Optional[str] = None
+    agent_id: str | None = None
     # Result projection mode: "digest" (default — stores full result in
     # scratch, returns a compact summary + scratch_ref), "page" (bounded page
     # of list results + scratch_ref), "full" (raw result, no projection).
     # Small results (under ~2KB) always pass through in full regardless of
     # mode — only large outputs trigger projection.  This is an execution-
     # envelope field — it never reaches the tool body.
-    result_mode: Optional[str] = "large"
+    result_mode: str | None = "large"
     # Page-mode parameters (ignored unless result_mode="page").
-    page_offset: Optional[int] = 0
-    page_limit: Optional[int] = 50
+    page_offset: int | None = 0
+    page_limit: int | None = 50
     # Optional chat id for scratch ownership scoping.
-    chat_id: Optional[str] = None
+    chat_id: str | None = None
     # Per-turn tool budget key (utils/tool_budget.py). Each distinct value
     # starts a fresh budget (e.g. Open WebUI passes chat_id:message_id);
     # omit for a rolling per-agent counter with idle-TTL reset.
-    turn_key: Optional[str] = None
+    turn_key: str | None = None
 
 class ToolSearchRequest(BaseModel):
     intent: str
-    top_k: Optional[int] = 5
-    agent_id: Optional[str] = None
+    top_k: int | None = 5
+    agent_id: str | None = None
 
 class ToolLookupRequest(BaseModel):
     tool_id: str
 
 class MemorySearchRequest(BaseModel):
     namespace: str
-    query_text: Optional[str] = None
-    agent_id: Optional[str] = None
+    query_text: str | None = None
+    agent_id: str | None = None
 
 class MemoryRecallRequest(BaseModel):
     namespace: str
     query_embedding: list
-    limit: Optional[int] = 5
-    agent_id: Optional[str] = None
+    limit: int | None = 5
+    agent_id: str | None = None
 
 class ScratchSearchRequest(BaseModel):
     scratch_ref: str
-    agent_id: Optional[str] = None
-    offset: Optional[int] = 0
-    limit: Optional[int] = 0
-    filter: Optional[str] = None
-    regex: Optional[str] = None
-    fields: Optional[str] = None
-    context_lines: Optional[int] = 0
+    agent_id: str | None = None
+    offset: int | None = 0
+    limit: int | None = 0
+    filter: str | None = None
+    regex: str | None = None
+    fields: str | None = None
+    context_lines: int | None = 0
     # Per-turn tool budget key (utils/tool_budget.py). scratch_search now
     # counts against the budget — pass the same turn_key as tools_execute.
-    turn_key: Optional[str] = None
+    turn_key: str | None = None
 
 
 # Input schemas advertised over MCP — kept in sync with the models above so a
@@ -406,7 +406,7 @@ SCRATCH_SEARCH = "scratch_search"
 
 
 class APIGateway:
-    def __init__(self, tool_registry: ToolRegistry, memory_service, api_key: Optional[str] = None):
+    def __init__(self, tool_registry: ToolRegistry, memory_service, api_key: str | None = None):
         self.tool_registry = tool_registry
         self.memory_service = memory_service
         self.api_key = api_key

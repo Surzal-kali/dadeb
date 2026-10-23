@@ -31,8 +31,7 @@ from __future__ import annotations
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Any
 
 import requests
 import urllib3
@@ -71,7 +70,7 @@ _BODY_STACK_MARKERS = (
 )
 
 
-def _split_targets(targets: str) -> List[str]:
+def _split_targets(targets: str) -> list[str]:
     raw = (targets or "").strip()
     return [t for t in re.split(r"[\s,]+", raw) if t]
 
@@ -80,8 +79,8 @@ def _looks_like_url(entry: str) -> bool:
     return "://" in entry
 
 
-def _ports(ports: str) -> List[int]:
-    out: List[int] = []
+def _ports(ports: str) -> list[int]:
+    out: list[int] = []
     for part in re.split(r"[\s,]+", (ports or "").strip()):
         if not part:
             continue
@@ -95,7 +94,7 @@ def _ports(ports: str) -> List[int]:
 
 def _fetch_one(
     url: str, timeout: float, insecure: bool
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+) -> tuple[dict[str, Any] | None, str | None]:
     """One probe. Returns (result_dict, None) or (None, error_string).
 
     Redirects are followed hop-by-hop with per-hop scope-gate validation
@@ -116,7 +115,7 @@ def _fetch_one(
         head = r.text[:65536] if r.encoding is not None or r.content else ""
         title_m = _TITLE_RE.search(head)
         title = _ws.sub(" ", title_m.group(1)).strip()[:200] if title_m else None
-        stack: List[str] = []
+        stack: list[str] = []
         server = r.headers.get("Server")
         powered = r.headers.get("X-Powered-By") or r.headers.get("X-Generator")
         if server:
@@ -197,7 +196,7 @@ def probe_web(
     timeout: float = 5.0,
     threads: int = 48,
     wall_cap: float = 90.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Probe ``targets`` (hosts and/or URLs) concurrently and return intel.
 
     Bare hosts get every port in ``ports`` probed with ONE scheme each
@@ -235,7 +234,7 @@ def probe_web(
     if not _sc_ok:
         raise ScopeGateError(f"scope gate: {_sc_reason}")
 
-    jobs: List[str] = []
+    jobs: list[str] = []
     for entry in entries:
         if _looks_like_url(entry):
             jobs.append(entry if "://" in entry else f"https://{entry}")
@@ -246,8 +245,8 @@ def probe_web(
     jobs = jobs[:_MAX_REQUESTS]
 
     started = time.time()
-    results: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
     skipped_deadline = 0
     with ThreadPoolExecutor(max_workers=max(1, min(threads, 96))) as pool:
         futs = {pool.submit(_fetch_one, u, timeout, insecure): u for u in jobs}

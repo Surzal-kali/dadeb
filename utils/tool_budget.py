@@ -26,7 +26,6 @@ Counters live in gateway process memory and reset on gateway restart.
 import os
 import threading
 import time
-from typing import Dict, Optional, Tuple
 
 # Decision states returned by pre_dispatch.
 BUDGET_OK = "ok"                      # within budget — execute normally
@@ -80,9 +79,9 @@ class ToolBudget:
 
     def __init__(
         self,
-        limit: Optional[int] = None,
-        idle_reset_min: Optional[float] = None,
-        allowlist: Optional[str] = None,
+        limit: int | None = None,
+        idle_reset_min: float | None = None,
+        allowlist: str | None = None,
     ):
         env = os.environ
         if limit is None:
@@ -107,10 +106,10 @@ class ToolBudget:
             p.strip() for p in str(allowlist).split(",") if p.strip()
         )
         self._lock = threading.Lock()
-        self._counts: Dict[str, int] = {}
-        self._last_ts: Dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._last_ts: dict[str, float] = {}
 
-    def _key(self, agent_id: str, turn_key: Optional[str]) -> str:
+    def _key(self, agent_id: str, turn_key: str | None) -> str:
         base = agent_id or "0"
         return f"{base}|{turn_key}" if turn_key else base
 
@@ -124,8 +123,8 @@ class ToolBudget:
         return not self.is_terminal_lane(tool_id)
 
     def pre_dispatch(
-        self, agent_id: Optional[str], turn_key: Optional[str], tool_id: str
-    ) -> Tuple[str, dict]:
+        self, agent_id: str | None, turn_key: str | None, tool_id: str
+    ) -> tuple[str, dict]:
         """Consume one call before dispatch.
 
         Returns ``(decision, meta)``. Decisions:

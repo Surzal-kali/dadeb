@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 import paramiko
 
@@ -53,10 +53,10 @@ def ssh_exec_batch(
     hostname: str,
     username: str,
     password: str,
-    commands: List[str],
+    commands: list[str],
     port: int = 22,
     pace: float = 0.5,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Connect once, run multiple commands on the same SSH transport, close.
 
     Each command runs via ``exec_command`` on a fresh channel over the shared
@@ -136,7 +136,7 @@ def ssh_exec_batch(
             "results": [],
         }
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     # Per-command wall-clock cap (2026-09-25): batched chains share the hang
     # shapes of single ssh_exec calls (stdin-waiting segments, daemon children
     # holding the channel open). Without a cap one wedged command in the
@@ -153,7 +153,7 @@ def ssh_exec_batch(
                 )
 
                 env = _run_ssh_command(client, command, timeout=per_cmd_cap)
-                entry: Dict[str, Any] = {
+                entry: dict[str, Any] = {
                     "command": command,
                     "stdout": env.get("stdout") or "",
                     "exit_code": env.get("exit_code"),
@@ -211,8 +211,7 @@ def ssh_exec_batch(
             if client is not None:
                 client.close()
         except Exception:
-            pass
-
+            print("Warning: failed to close SSH client cleanly, ignoring.")
     # Envelope: overall status is Success if the connection held, even if
     # individual commands returned non-zero exit codes (those are per-command
     # results, not transport failures).  A connection-level failure was

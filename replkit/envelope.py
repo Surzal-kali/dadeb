@@ -21,7 +21,7 @@ identical with or without delegation.
 
 import json
 import re as _re
-from typing import Any, Dict, List
+from typing import Any
 
 
 class _Sentinel:
@@ -75,7 +75,7 @@ def _envelope_payload(envelope: Any) -> Any:
     return raw
 
 
-def find(envelope: Any, key: str, value: Any = _MISSING) -> List[Any]:
+def find(envelope: Any, key: str, value: Any = _MISSING) -> list[Any]:
     """Deep-search a tool result for entries matching ``key`` (and optionally ``value``).
 
     Walks dicts, lists, and nested combinations.  Returns a list of matches:
@@ -92,7 +92,7 @@ def find(envelope: Any, key: str, value: Any = _MISSING) -> List[Any]:
     """
     payload = _envelope_payload(envelope)
     root_label = "result" if payload is not envelope else "$"
-    results: List[Any] = []
+    results: list[Any] = []
 
     def _walk(obj: Any, path: str) -> None:
         if isinstance(obj, dict):
@@ -113,7 +113,7 @@ def find(envelope: Any, key: str, value: Any = _MISSING) -> List[Any]:
     return results
 
 
-def pluck(envelope: Any, key: str) -> List[Any]:
+def pluck(envelope: Any, key: str) -> list[Any]:
     """Extract all values for ``key`` from a tool result, no matter how deeply nested.
 
     Shortcut for ``find(envelope, key)`` when you just want the values (not
@@ -126,7 +126,7 @@ def pluck(envelope: Any, key: str) -> List[Any]:
     return [v for v in find(envelope, key) if not isinstance(v, dict)]
 
 
-def grep(envelope: Any, pattern: str, ignore_case: bool = True) -> List[tuple]:
+def grep(envelope: Any, pattern: str, ignore_case: bool = True) -> list[tuple]:
     """Grep through all string values in a tool result, returning ``(path, line)`` tuples.
 
     Searches every string found anywhere in the structured payload (dict keys,
@@ -143,7 +143,7 @@ def grep(envelope: Any, pattern: str, ignore_case: bool = True) -> List[tuple]:
     root_label = "result" if payload is not envelope else "$"
     flags = _re.IGNORECASE if ignore_case else 0
     rx = _re.compile(pattern, flags)
-    matches: List[tuple] = []
+    matches: list[tuple] = []
 
     def _walk(obj: Any, path: str) -> None:
         if isinstance(obj, str):
@@ -164,7 +164,7 @@ def grep(envelope: Any, pattern: str, ignore_case: bool = True) -> List[tuple]:
     return matches
 
 
-def keys(envelope: Any) -> List[str]:
+def keys(envelope: Any) -> list[str]:
     """Return a sorted list of every distinct key found anywhere in a tool result.
 
     Useful for discovering what fields a large envelope actually contains
@@ -190,7 +190,7 @@ def keys(envelope: Any) -> List[str]:
 
 def scratch(scratch_ref: str, *, filter: str = "", regex: str = "",
             fields: str = "", offset: int = 0, limit: int = 0,
-            context: int = 0) -> Dict[str, Any]:
+            context: int = 0) -> dict[str, Any]:
     """Retrieve a stored scratch result by reference, with optional grep/paging.
 
     Wraps ``ScratchStore.retrieve()`` — the same engine the API gateway's

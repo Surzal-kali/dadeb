@@ -39,9 +39,9 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from constants import TransportType, framework_tool
+from constants import framework_tool
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DROPBOX_DIR = Path(os.getenv("MSFVENOM_DROPBOX", str(_REPO_ROOT / "dropbox")))
@@ -59,7 +59,7 @@ _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 # Upload-testing presets: web platform -> (default payload, msfvenom format,
 # file extension).  Each default payload is a pure shell payload whose
 # handler works through dispatch_metasploit; presets stay pure shell by design.
-PRESETS: Dict[str, Tuple[str, str, str]] = {
+PRESETS: dict[str, tuple[str, str, str]] = {
     "php":    ("php/reverse_php",           "raw",  ".php"),
     "php_bind": ("php/bind_php",            "raw",  ".php"),
     "jsp":    ("java/jsp_shell_reverse_tcp", "raw",  ".jsp"),
@@ -76,7 +76,7 @@ PRESETS: Dict[str, Tuple[str, str, str]] = {
 _KINDS = ("payloads", "formats", "encoders", "platforms", "archs")
 
 
-def _locate_msfvenom() -> Optional[str]:
+def _locate_msfvenom() -> str | None:
     """Find the msfvenom binary. Env override ``MSFVENOM_BIN`` first (same
     pattern as hash_crack's JOHN_BIN/HASHCAT_BIN), then known paths, then PATH."""
     env_bin = os.getenv("MSFVENOM_BIN")
@@ -88,10 +88,10 @@ def _locate_msfvenom() -> Optional[str]:
     return shutil.which("msfvenom")
 
 
-def _fail(error: str, **extra) -> Dict[str, Any]:
+def _fail(error: str, **extra) -> dict[str, Any]:
     """Uniform Failed envelope so the executor surfaces status=Failed and
     the secretary narrates instead of treating a dict as success."""
-    out: Dict[str, Any] = {"status": "Failed", "error": error}
+    out: dict[str, Any] = {"status": "Failed", "error": error}
     out.update(extra)
     return out
 
@@ -117,7 +117,7 @@ def _tail(text: str, limit: int = _STDERR_TAIL) -> str:
     "contact, no scope gate.",
     tags=["exploit.msf"],
 )
-async def msfvenom_menu(kind: str = "payloads", query: str = "") -> Dict[str, Any]:
+async def msfvenom_menu(kind: str = "payloads", query: str = "") -> dict[str, Any]:
     """List msfvenom payloads/formats/encoders, filtered by ``query``.
 
     Args:
@@ -191,23 +191,23 @@ async def msfvenom_menu(kind: str = "payloads", query: str = "") -> Dict[str, An
     ],
 )
 async def generate_payload(
-    payload: Optional[str] = None,
+    payload: str | None = None,
     lhost: str = "",
     lport: int = 0,
-    preset: Optional[str] = None,
-    format: Optional[str] = None,  # noqa: A002 - mirrors msfvenom's own term
-    out_name: Optional[str] = None,
-    encoder: Optional[str] = None,
+    preset: str | None = None,
+    format: str | None = None,  # noqa: A002 - mirrors msfvenom's own term
+    out_name: str | None = None,
+    encoder: str | None = None,
     iterations: int = 1,
-    badchars: Optional[str] = None,
-    platform: Optional[str] = None,
-    arch: Optional[str] = None,
-    encrypt: Optional[str] = None,
-    encrypt_key: Optional[str] = None,
-    encrypt_iv: Optional[str] = None,
-    extra_options: Optional[Dict[str, Any]] = None,
+    badchars: str | None = None,
+    platform: str | None = None,
+    arch: str | None = None,
+    encrypt: str | None = None,
+    encrypt_key: str | None = None,
+    encrypt_iv: str | None = None,
+    extra_options: dict[str, Any] | None = None,
     start_handler: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run msfvenom to produce a payload file in ``dropbox/``.
 
     Args:
@@ -322,7 +322,7 @@ async def generate_payload(
             "in the root-0600 .env."
         )
 
-    argv: List[str] = [bin_path, "-p", payload, f"LHOST={lhost}", f"LPORT={lport}"]
+    argv: list[str] = [bin_path, "-p", payload, f"LHOST={lhost}", f"LPORT={lport}"]
     for key, val in (extra_options or {}).items():
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", str(key)):
             return _fail(f"Invalid extra option name {key!r}.")
@@ -395,12 +395,12 @@ async def generate_payload(
         # so the operator sees exactly what ran.
         return _fail(
             f"msfvenom failed: {_tail(proc.stderr) or _tail(proc.stdout)}",
-            command=" ".join(shlex.quote(a) for a in argv),
+            command=shlex.join(argv),
             returncode=proc.returncode,
         )
 
     data = out_path.read_bytes()
-    envelope: Dict[str, Any] = {
+    envelope: dict[str, Any] = {
         "status": "Success",
         "payload": payload,
         "format": fmt,
@@ -409,7 +409,7 @@ async def generate_payload(
         "out_name": out_name,
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
-        "command": " ".join(shlex.quote(a) for a in argv),
+        "command": shlex.join(argv),
         "msfvenom_tail": _tail(proc.stderr or proc.stdout, 400),
         "handler": None,
     }
@@ -425,12 +425,12 @@ async def generate_payload(
     return envelope
 
 
-async def _start_catch_handler(payload: str, lhost: str, lport: int) -> Dict[str, Any]:
+async def _start_catch_handler(payload: str, lhost: str, lport: int) -> dict[str, Any]:
     """Start an exploit/multi/handler job via the MSF RPC lane for a just-
     generated payload.  Lazy import keeps the Brain's startup scan of this
     module free of the metasploiting dependency (and its dotenv/RPC state)
     — only a start_handler=True call pays for it."""
-    handler: Dict[str, Any] = {
+    handler: dict[str, Any] = {
         "started": False, "payload": payload, "lhost": lhost, "lport": lport,
         "job_id": None, "error": None,
     }
@@ -467,7 +467,7 @@ async def _start_catch_handler(payload: str, lhost: str, lport: int) -> Dict[str
     "gate.",
     tags=["exploit.msf"],
 )
-def list_dropbox() -> Dict[str, Any]:
+def list_dropbox() -> dict[str, Any]:
     """List generated payload artifacts in ``dropbox/``."""
     try:
         DROPBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -477,7 +477,7 @@ def list_dropbox() -> Dict[str, Any]:
         ]
     except OSError as e:
         return _fail(f"Cannot read dropbox dir {DROPBOX_DIR}: {e}")
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for p in entries:
         try:
             data = p.read_bytes()

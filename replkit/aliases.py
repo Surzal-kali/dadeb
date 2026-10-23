@@ -12,7 +12,6 @@ table is keyed by full ``module_id`` so a rename in the source tree breaks
 loudly here, not silently at the keyboard.
 """
 
-from typing import Dict, List
 
 from daharness.models import ToolManifest
 
@@ -57,7 +56,7 @@ def _derive_alias(module_id: str) -> str:
     return last
 
 
-def build_tool_aliases(manifests: List[ToolManifest]) -> Dict[str, ToolManifest]:
+def build_tool_aliases(manifests: list[ToolManifest]) -> dict[str, ToolManifest]:
     """Return ``{alias: manifest}`` for all discovered tools.
 
     Curated aliases from ``_TOOL_ALIASES`` win.  Unmatched tools get
@@ -65,9 +64,9 @@ def build_tool_aliases(manifests: List[ToolManifest]) -> Dict[str, ToolManifest]
     top-level module name (``auxiliaries``, ``payloads``, etc.) as a
     prefix — if that *also* collides, append a numeric suffix.
     """
-    result: Dict[str, ToolManifest] = {}
+    result: dict[str, ToolManifest] = {}
     # First pass: curated aliases (explicit, may collide → resolved later)
-    pending: List[tuple] = []  # (alias, manifest)
+    pending: list[tuple] = []  # (alias, manifest)
     for m in manifests:
         curated = _TOOL_ALIASES.get(m.module_id)
         if curated:
@@ -97,7 +96,7 @@ def build_tool_aliases(manifests: List[ToolManifest]) -> Dict[str, ToolManifest]
 # ``module_id`` (so a rename in the source tree breaks loudly here, not
 # silently at the keyboard).  Tools not in this map fall through to
 # auto-derivation via _derive_alias().
-_TOOL_ALIASES: Dict[str, str] = {
+_TOOL_ALIASES: dict[str, str] = {
     # auxiliaries/
     "auxiliaries.nmap.run_nmap": "nmap",
     "auxiliaries.masscan.run_masscan": "masscan",

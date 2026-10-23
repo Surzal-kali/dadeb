@@ -4,9 +4,8 @@ import ipaddress
 import os
 import json
 import time as _time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 from constants import TransportType
-import dotenv
 from dotenv import load_dotenv
 
 from constants import framework_tool
@@ -15,7 +14,7 @@ from utils.handles import format_handle, parse_handle
 
 load_dotenv(override=True)
 
-MSGRPC_PASSWORD = os.getenv("MSGRPC_PASSWORD", "msfadmin4824")
+MSGRPC_PASSWORD = os.getenv("MSGRPC_PASSWORD", "msfadmin")
 MSF_RPC_PORT = int(os.getenv("MSF_RPC_PORT", "55553"))
 MSF_RPC_HOST = os.getenv("MSF_RPC_HOST", "127.0.0.1")
 
@@ -227,8 +226,8 @@ class MetasploitClient:
     )
     async def index_modules(
         self,
-        module_type: Optional[str] = None,
-        module_name: Optional[str] = None,
+        module_type: str | None = None,
+        module_name: str | None = None,
         limit: int = 15,
     ):
         """
@@ -409,7 +408,7 @@ class MetasploitClient:
         self,
         module_path: str,
         category: Literal["exploit", "auxiliary", "post"],
-        options: Dict[str, Any],
+        options: dict[str, Any],
         start_handler: bool = False,
     ):
         """
@@ -562,7 +561,7 @@ class MetasploitClient:
     async def _execute_module_impl(
         self,
         module_path: str,
-        options: Dict[str, Any],
+        options: dict[str, Any],
         start_handler: bool,
         category: str,
     ):
@@ -1187,7 +1186,7 @@ class MetasploitClient:
         "windows/meterpreter/reverse_tcp) with options like LHOST and LPORT. "
         "Use this to set up the payload before executing an exploit module."
     )
-    async def set_payload(self, payload_name: str, options: Dict[str, Any]):
+    async def set_payload(self, payload_name: str, options: dict[str, Any]):
         """
         Configure a Metasploit payload with specified options.
 

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import time
 from uuid import uuid4
-from typing import Dict, List, Optional
 
 from constants import framework_tool
 from daharness.findings import FindingStore
@@ -57,7 +56,7 @@ def report_finding(
         tool_chain: Tools used in this chain, comma-separated
             (e.g. "nmap, zap_open_url, zap_alerts").
     """
-    evidence: Dict[str, str] = {}
+    evidence: dict[str, str] = {}
     if evidence_request:
         evidence["request"] = evidence_request
     if evidence_response:
@@ -65,11 +64,11 @@ def report_finding(
     if evidence_excerpt:
         evidence["excerpt"] = evidence_excerpt
 
-    repro_list: List[str] = (
+    repro_list: list[str] = (
         [s.strip() for s in repro.split("\n") if s.strip()] if repro else []
     )
     if isinstance(tool_chain, list):tool_chain = ",".join(str(s).strip() for s in tool_chain if str(s).strip())
-    chain_list: List[str] = (
+    chain_list: list[str] = (
         [s.strip() for s in tool_chain.split(",") if s.strip()] if tool_chain else []
     )
 

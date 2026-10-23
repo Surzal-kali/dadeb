@@ -40,7 +40,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from constants import resolve_workspace_root
 
@@ -56,7 +56,7 @@ _MAX_ENTRIES_PER_TARGET = int(os.getenv("SNAPSHOT_MAX_ENTRIES", "200"))
 # sha256 fingerprint memo: (abs_path, mtime_ns, size) -> digest.  Hashing a
 # 40MB binary on every call would itself cost real time; this memo makes
 # repeat calls against an unchanged file O(1).
-_sha_memo: Dict[Tuple[str, int, int], str] = {}
+_sha_memo: dict[tuple[str, int, int], str] = {}
 _SHA_MEMO_MAX = 64
 
 
@@ -76,7 +76,7 @@ class SnapshotStore:
     ScratchStore).  Construction is cheap and the schema init is idempotent.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = str(db_path or default_db_path())
         self._repair_ownership_if_needed()
         self.conn = sqlite3.connect(self.db_path, timeout=10.0,
@@ -163,7 +163,7 @@ class SnapshotStore:
 
     # -- read ---------------------------------------------------------------
 
-    def lookup(self, cache_key: str) -> Optional[Dict[str, Any]]:
+    def lookup(self, cache_key: str) -> dict[str, Any] | None:
         """Return the cached result dict for ``cache_key``, or None.
 
         A hit bumps the ``hits`` counter (purely observational).  Returns a
@@ -196,7 +196,7 @@ class SnapshotStore:
         content_key: str,
         op_key: str,
         target_sig: str,
-        result: Dict[str, Any],
+        result: dict[str, Any],
     ) -> bool:
         """Store a successful result under ``cache_key``.
 
@@ -254,7 +254,7 @@ class SnapshotStore:
         except sqlite3.Error:
             return 0
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """Observed cache statistics (for the doctor/health surface)."""
         try:
             row = self.conn.execute(
@@ -295,7 +295,7 @@ class SnapshotStore:
 
 # --- singleton -------------------------------------------------------------
 
-_store: Optional[SnapshotStore] = None
+_store: SnapshotStore | None = None
 
 
 def get_snapshot_store() -> SnapshotStore:
@@ -309,8 +309,8 @@ def get_snapshot_store() -> SnapshotStore:
 # --- key helpers -----------------------------------------------------------
 
 def sha256_of_file(
-    path: str, st: Optional[os.stat_result] = None
-) -> Optional[str]:
+    path: str, st: os.stat_result | None = None
+) -> str | None:
     """SHA-256 of a file's bytes, memoized on (path, mtime_ns, size).
 
     Returns None when the file cannot be read.  The memo makes repeat calls

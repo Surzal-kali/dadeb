@@ -1,7 +1,5 @@
 import asyncio
-import importlib.util
 from impacket.smbconnection import SMBConnection
-from pathlib import Path
 
 from constants import framework_tool, brain_socket_path
 from listeners.thebrain import pack_message

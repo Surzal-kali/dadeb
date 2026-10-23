@@ -23,7 +23,6 @@ not need it and it is accepted-and-ignored.
 
 import os
 import socket
-from typing import Optional
 
 import ftplib
 
@@ -173,7 +172,7 @@ def ftp_list(host: str, username: str, password: str, path: str = ".",
         return f"ftp_list error: {e}"
 
 
-def _transfer_guard(size: int) -> Optional[str]:
+def _transfer_guard(size: int) -> str | None:
     if size > MAX_TRANSFER_BYTES:
         return (f"refused: {size} bytes exceeds the {MAX_TRANSFER_BYTES}-byte "
                 f"transfer cap (raise it by editing MAX_TRANSFER_BYTES)")

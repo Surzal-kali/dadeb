@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool
 from utils.handles import format_handle, parse_handle
@@ -127,13 +127,13 @@ class _MssqlConn:
     def __init__(self, ms: MSSQL):
         self._ms = ms
 
-    def query(self, sql: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    def query(self, sql: str) -> tuple[list[dict[str, Any]], str | None]:
         try:
             rows = self._ms.batch(sql, tuplemode=False)
         except Exception as exc:  # socket timeout / dead connection
             return [], f"MSSQL query failed: {exc}"
-        error: Optional[str] = None
-        errors: List[str] = []
+        error: str | None = None
+        errors: list[str] = []
         try:
             self._ms.printReplies(error_logger=errors.append, info_logger=lambda *_a: None)
         except Exception as exc:  # never let message-draining mask the rows
@@ -158,7 +158,7 @@ class _MysqlConn:
         self._conn = conn
         self._fetch_cap = fetch_cap
 
-    def query(self, sql: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    def query(self, sql: str) -> tuple[list[dict[str, Any]], str | None]:
         try:
             cur = self._conn.cursor()
             cur.execute(sql)
@@ -180,7 +180,7 @@ class _PgConn:
     def __init__(self, conn: Any):
         self._conn = conn
 
-    def query(self, sql: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    def query(self, sql: str) -> tuple[list[dict[str, Any]], str | None]:
         try:
             data = self._conn.run(sql)
             names = [c["name"] for c in (self._conn.columns or [])]
@@ -199,7 +199,7 @@ class _PgConn:
 def _open_mssql(host, port, username, password, database, domain, hashes, timeout):
     """impacket.tds path - works with the impacket already in the venv."""
     ms = MSSQL(host, port=int(port))
-    ms.connect(timeout=float(timeout))
+    ms.connect(timeout=float(timeout)) #Argument of type "float" cannot be assigned to parameter "timeout" of type "int" in function "connect" #TODO: FIX
     # login(database, username, password="", domain="", hashes=None,
     #       useWindowsAuth=False); hashes = "lm:nt" hex pair for pass-the-hash.
     ms.login(
@@ -255,7 +255,7 @@ def _open_postgres(host, port, username, password, database, timeout):
 _DBMS_ALIASES = {"postgresql": "postgres", "mssqlserver": "mssql"}
 
 
-def _normalize_dbms(dbms: str) -> Optional[str]:
+def _normalize_dbms(dbms: str) -> str | None:
     d = (dbms or "").strip().lower()
     d = _DBMS_ALIASES.get(d, d)
     return d if d in {"mssql", "mysql", "postgres"} else None
@@ -302,7 +302,7 @@ def _brack(name: str) -> str:
     return "[" + str(name).replace("]", "]]") + "]"
 
 
-def _read_only_violation(query: str) -> Optional[str]:
+def _read_only_violation(query: str) -> str | None:
     """Heuristic read-only seatbelt (see module docstring honesty note)."""
     q = query.strip()
     # Skip leading line comments so '-- comment\nselect 1' still classifies.
@@ -334,8 +334,8 @@ def _cap_cell(value: Any, cap: int) -> Any:
 
 
 def _cap_rows(
-    rows: List[Any], max_rows: int, cell_cap: int
-) -> Tuple[List[Any], bool]:
+    rows: list[Any], max_rows: int, cell_cap: int
+) -> tuple[list[Any], bool]:
     """Bound rows + cells. Returns (capped_rows, truncated_flag)."""
     truncated = len(rows) > max_rows
     out = []
@@ -347,7 +347,7 @@ def _cap_rows(
     return out, truncated
 
 
-def _fail(error: str, **extra: Any) -> Dict[str, Any]:
+def _fail(error: str, **extra: Any) -> dict[str, Any]:
     env = {"status": "Failed", "error": error}
     env.update(extra)
     return env
@@ -358,11 +358,11 @@ def _target_label(username: str, domain: str, host: str, port: int) -> str:
     return f"{user}@{host}:{port}"
 
 
-def _drain_query(conn, sql: str, max_rows: int, cell_cap: int) -> Dict[str, Any]:
+def _drain_query(conn, sql: str, max_rows: int, cell_cap: int) -> dict[str, Any]:
     """Run one query on an adapter; envelope entry with caps + error text."""
     rows, error = conn.query(sql)
     capped, truncated = _cap_rows(rows or [], max_rows, cell_cap)
-    entry: Dict[str, Any] = {
+    entry: dict[str, Any] = {
         "query": sql,
         "row_count": len(rows or []),
         "rows": capped,
@@ -399,7 +399,7 @@ def db_connect(
     domain: str = "",
     hashes: str = "",
     timeout: float = DEFAULT_TIMEOUT,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Open a persistent database connection; return a ``db:`` session handle.
 
     Args:
@@ -454,7 +454,7 @@ def db_connect(
     next_hints=["db_exec", "report_finding", "db_close"],
     tags=["net.services"],
 )
-def db_exec(handle: str, query: str, read_only: bool = True) -> Dict[str, Any]:
+def db_exec(handle: str, query: str, read_only: bool = True) -> dict[str, Any]:
     """Run a query on an open ``db:`` handle; the session stays open.
 
     Args:
@@ -490,7 +490,7 @@ def db_exec(handle: str, query: str, read_only: bool = True) -> Dict[str, Any]:
             "note": "connection may be dead: db_close and reconnect if this persists",
         }
     capped, truncated = _cap_rows(rows or [], MAX_ROWS_EXEC, EXEC_CELL_CAP)
-    env: Dict[str, Any] = {
+    env: dict[str, Any] = {
         "status": "Success",
         "handle": handle,
         "target": session.target,
@@ -519,7 +519,7 @@ def db_exec_batch(
     host: str,
     username: str,
     password: str,
-    queries: List[str],
+    queries: list[str],
     port: int = 1433,
     dbms: str = "mssql",
     database: str = "",
@@ -528,7 +528,7 @@ def db_exec_batch(
     read_only: bool = True,
     pace: float = DEFAULT_PACE,
     timeout: float = DEFAULT_TIMEOUT,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Connect once, run N queries on the same connection, close.
 
     The db analogue of ``ssh_exec_batch``: one TCP connect, one handshake,
@@ -578,7 +578,7 @@ def db_exec_batch(
     except Exception as exc:
         return _fail(f"{dbms_n} connection to {username}@{host}:{port} failed: {exc}")
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     try:
         for idx, q in enumerate(queries):
             results.append(_drain_query(conn, q, MAX_ROWS_EXEC, EXEC_CELL_CAP))
@@ -588,7 +588,7 @@ def db_exec_batch(
         try:
             conn.close()
         except Exception:
-            pass
+            pass #why pass?? #TODO: EXPLAIN OR FIX
 
     ok = sum(1 for r in results if not r.get("error"))
     return {
@@ -627,7 +627,7 @@ def db_schema_farm(
     include_samples: bool = True,
     sample_tables: int = 5,
     timeout: float = DEFAULT_TIMEOUT,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Enumerate databases, tables, columns and interest-ranked samples.
 
     One connect, a bounded query plan (2 queries per database plus up to
@@ -673,7 +673,7 @@ def db_schema_farm(
     except Exception as exc:
         return _fail(f"{dbms_n} connection to {username}@{host}:{port} failed: {exc}")
 
-    notes: List[str] = []
+    notes: list[str] = []
     try:
         dbs_raw, err = conn.query(
             "SELECT name FROM sys.databases WHERE HAS_DBACCESS(name) = 1 ORDER BY name"
@@ -685,7 +685,7 @@ def db_schema_farm(
             notes.append(f"databases truncated at max_dbs={max_dbs} (had {len(db_names)})")
             db_names = db_names[:max_dbs]
 
-        databases: List[Dict[str, Any]] = []
+        databases: list[dict[str, Any]] = []
         tables_seen = 0
         tables_truncated = False
         columns_seen = 0
@@ -704,7 +704,7 @@ def db_schema_farm(
             if terr:
                 notes.append(f"{db}: table listing error: {terr}")
                 continue
-            entries: List[Dict[str, Any]] = []
+            entries: list[dict[str, Any]] = []
             for r in trows:
                 if tables_seen >= max_tables:
                     tables_truncated = True
@@ -723,13 +723,13 @@ def db_schema_farm(
 
             q_cols = (
                 f"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE "
-                f"FROM {_brack(db)}.INFORMATION_SCHEMA.COLUMNS "
+                f"FROM {_brack(db)}.INFORMATION_SCHEMA.COLUMNS " #todo: red squigglies need explanation
                 f"ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"
             )
             crows, cerr = conn.query(q_cols)
             if cerr:
                 notes.append(f"{db}: column listing error: {cerr}")
-            col_index: Dict[Tuple[str, str], List[str]] = {}
+            col_index: dict[tuple[str, str], list[str]] = {}
             for r in crows:
                 if columns_seen >= max_columns:
                     columns_truncated = True
@@ -748,7 +748,7 @@ def db_schema_farm(
                 }
             )
 
-        samples: List[Dict[str, Any]] = []
+        samples: list[dict[str, Any]] = []
         if include_samples:
             sampled = 0
             for d in databases:
@@ -784,7 +784,7 @@ def db_schema_farm(
             conn.close()
         except Exception:
             pass
-
+#TODO: WHY PASS???
     if columns_truncated:
         notes.append(f"columns truncated at max_columns={max_columns}")
     return {
@@ -809,7 +809,7 @@ def db_schema_farm(
     accepted_handle_kinds=["db"],
     tags=["net.services"],
 )
-def db_close(handle: str) -> Dict[str, Any]:
+def db_close(handle: str) -> dict[str, Any]:
     """Tear down a ``db:`` session.
 
     Teardown-only: closes the existing socket, no new target interaction, so

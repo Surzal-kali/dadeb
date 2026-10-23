@@ -87,8 +87,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 from constants import framework_tool, resolve_workspace_root
 
 
@@ -99,7 +98,7 @@ from constants import framework_tool, resolve_workspace_root
 # --show-bad-code).  6 slots filled; slots 7-8 held open for practice gaps.
 # verb -> blurb
 # ---------------------------------------------------------------------------
-_VERB_TABLE: Dict[str, str] = {
+_VERB_TABLE: dict[str, str] = {
     "decompile": "full decompile into the per-target workspace (cached; params: deobf/show_bad_code/mode/threads/no_res/force)",
     "manifest":  "decode AndroidManifest.xml only (fast resources-only pass; returns the XML)",
     "class":     "pull ONE class's decompiled source via --single-class (params: single_class='com.example.Foo')",
@@ -162,7 +161,7 @@ _META_NAME: str = ".jadx_meta.json"
 
 # Magic-byte signatures for the inputs jadx accepts.  (apk/xapk/apkm/aab/
 # aar/jar/zip/apks are all ZIP-family; the extension refines the label.)
-_APK_MAGIC: List[tuple] = [
+_APK_MAGIC: list[tuple] = [
     ("ZIP-family", 0, b"PK\x03\x04"),            # apk/jar/zip/xapk/apkm/aab/aar
     ("DEX",       0, b"dex\n"),                  # raw classes.dex
     ("Java-class", 0, b"\xca\xfe\xba\xbe"),      # raw .class
@@ -174,13 +173,13 @@ _SKIP_DIRS: frozenset = frozenset({
     _DECOMPILED_SUBDIR,
 })
 
-_ZIP_EXT_LABELS: Dict[str, str] = {
+_ZIP_EXT_LABELS: dict[str, str] = {
     ".apk": "APK", ".xapk": "XAPK", ".apkm": "APKM", ".apks": "APKS",
     ".aab": "AAB", ".aar": "AAR", ".jar": "JAR", ".zip": "ZIP",
 }
 
 
-def detect_apk_format(path: str) -> Optional[str]:
+def detect_apk_format(path: str) -> str | None:
     """Sniff the first bytes of ``path`` for a format jadx accepts.
 
     Returns a human label (``"APK"``, ``"DEX"``, ``"ZIP-family"`` …) or
@@ -204,7 +203,7 @@ def detect_apk_format(path: str) -> Optional[str]:
     return None
 
 
-def resolve_apk_target(target: str) -> Optional[str]:
+def resolve_apk_target(target: str) -> str | None:
     """Resolve ``target`` to an absolute path, searching the drop folder.
 
     Existing paths are honoured as-is; otherwise the drop folder
@@ -230,7 +229,7 @@ def resolve_apk_target(target: str) -> Optional[str]:
     return None
 
 
-def discover_apk_targets(root: Optional[str] = None) -> List[Dict[str, Any]]:
+def discover_apk_targets(root: str | None = None) -> list[dict[str, Any]]:
     """Walk the apk drop folder and return recognised jadx-able files.
 
     Skips the ``decompiled/`` workspace subtree and dot-directories.  Each hit:
@@ -239,7 +238,7 @@ def discover_apk_targets(root: Optional[str] = None) -> List[Dict[str, Any]]:
     base = root or APK_TARGETS_ROOT
     if not os.path.isdir(base):
         return []
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
         for fname in sorted(filenames):
@@ -274,10 +273,10 @@ _COMMON_JADX_PATHS: tuple = (
     os.path.expanduser("~/jadx/bin/jadx"),
 )
 
-_jadx_version_cache: Optional[str] = None  # "" = probed-and-unavailable
+_jadx_version_cache: str | None = None  # "" = probed-and-unavailable
 
 
-def resolve_jadx_bin() -> Optional[str]:
+def resolve_jadx_bin() -> str | None:
     """Locate jadx: $JADX_BIN -> PATH -> common install paths."""
     env_bin = os.getenv("JADX_BIN", "").strip()
     if env_bin and os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
@@ -291,7 +290,7 @@ def resolve_jadx_bin() -> Optional[str]:
     return None
 
 
-def _jadx_version() -> Optional[str]:
+def _jadx_version() -> str | None:
     """Probe ``jadx --version`` once per process; None when unavailable."""
     global _jadx_version_cache
     if _jadx_version_cache is not None:
@@ -312,7 +311,7 @@ def _jadx_version() -> Optional[str]:
     return _jadx_version_cache or None
 
 
-def _preflight_or_none(target: str, verb: str) -> Optional[Dict[str, Any]]:
+def _preflight_or_none(target: str, verb: str) -> dict[str, Any] | None:
     """Return an error envelope when jadx/java are unavailable, else None.
 
     Preflight lives ONLY in the verbs that spawn jadx (decompile / manifest /
@@ -353,20 +352,20 @@ def _workspace_for(source_path: str) -> str:
     return os.path.join(APK_TARGETS_ROOT, _DECOMPILED_SUBDIR, base)
 
 
-def _stat_fingerprint(source_path: str) -> Dict[str, Any]:
+def _stat_fingerprint(source_path: str) -> dict[str, Any]:
     st = os.stat(source_path)
     return {"source_mtime_ns": st.st_mtime_ns, "source_size": st.st_size}
 
 
-def _read_meta(ws: str) -> Optional[Dict[str, Any]]:
+def _read_meta(ws: str) -> dict[str, Any] | None:
     try:
-        with open(os.path.join(ws, _META_NAME), "r", encoding="utf-8") as fh:
+        with open(os.path.join(ws, _META_NAME), encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError):
         return None
 
 
-def _write_meta(ws: str, source_path: str, jadx_ver: Optional[str]) -> None:
+def _write_meta(ws: str, source_path: str, jadx_ver: str | None) -> None:
     meta = dict(_stat_fingerprint(source_path))
     meta["jadx_version"] = jadx_ver
     meta["source"] = os.path.basename(source_path)
@@ -377,10 +376,10 @@ def _write_meta(ws: str, source_path: str, jadx_ver: Optional[str]) -> None:
         pass  # cache bookkeeping must never fail the run
 
 
-def _workspace_state(ws: str, source_path: str) -> Dict[str, Any]:
+def _workspace_state(ws: str, source_path: str) -> dict[str, Any]:
     """Inspect the workspace: exists / has sources / has manifest / stale."""
     exists = os.path.isdir(ws)
-    state: Dict[str, Any] = {
+    state: dict[str, Any] = {
         "exists": exists,
         "has_sources": False,
         "has_manifest": False,
@@ -403,7 +402,7 @@ def _workspace_state(ws: str, source_path: str) -> Dict[str, Any]:
     return state
 
 
-def _safe_ws_child(ws: str, rel_path: str) -> Optional[str]:
+def _safe_ws_child(ws: str, rel_path: str) -> str | None:
     """Resolve ``rel_path`` inside ``ws``, refusing traversal.  None = refuse."""
     if not rel_path:
         return None
@@ -430,7 +429,7 @@ def _clip(text: str) -> tuple:
     return text, False
 
 
-def _run_jadx_argv(argv: List[str]) -> tuple:
+def _run_jadx_argv(argv: list[str]) -> tuple:
     """Run a composed jadx argv.  Returns (proc, error_message)."""
     try:
         proc = subprocess.run(
@@ -446,7 +445,7 @@ def _run_jadx_argv(argv: List[str]) -> tuple:
         return None, f"jadx launch failed: {exc}"
 
 
-def _proc_tails(proc) -> Tuple[str, str]:
+def _proc_tails(proc) -> tuple[str, str]:
     """Bounded ``(stderr_tail, stdout_tail)`` from a finished jadx run.
 
     Empirical jadx 1.5.6 fact (verified 2026-09-22): ALL log output —
@@ -475,7 +474,7 @@ def _proc_tails(proc) -> Tuple[str, str]:
     "the filename.",
     next_hints=["run_jadx"],
 )
-def list_apk_targets() -> Dict[str, Any]:
+def list_apk_targets() -> dict[str, Any]:
     """Enumerate recognised files in the apk drop folder.
 
     Walks :data:`APK_TARGETS_ROOT` (default ``apk/`` at the repo root;
@@ -528,8 +527,8 @@ def list_apk_targets() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 def _verb_decompile(
     target: str, deobf: bool, show_bad_code: bool, mode: str,
-    threads: Optional[int], no_res: bool, force: bool,
-) -> Dict[str, Any]:
+    threads: int | None, no_res: bool, force: bool,
+) -> dict[str, Any]:
     ws = _workspace_for(target)
     state = _workspace_state(ws, target)
     if state["exists"] and not state["stale"] and state["has_sources"] and not force:
@@ -600,7 +599,7 @@ def _verb_decompile(
             f"{stderr_tail or stdout_tail or 'jadx emitted no diagnostics'} "
             f"— {n_java} .java source(s) written (may be partial) in {ws}"
         )
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "status": "ok" if proc.returncode == 0 else "error",
         "verb": "decompile",
         "summary": summary,
@@ -629,7 +628,7 @@ def _verb_decompile(
     return result
 
 
-def _verb_manifest(target: str) -> Dict[str, Any]:
+def _verb_manifest(target: str) -> dict[str, Any]:
     ws = _workspace_for(target)
     manifest_path = os.path.join(ws, _MANIFEST_REL)
     state = _workspace_state(ws, target)
@@ -665,7 +664,7 @@ def _verb_manifest(target: str) -> Dict[str, Any]:
             f"no decoded {os.path.basename(target)} at resources/AndroidManifest.xml — "
             f"is this an Android target? (plain jars/dex have no manifest)",
         )
-    with open(safe, "r", encoding="utf-8", errors="replace") as fh:
+    with open(safe, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
     content, truncated = _clip(content)
     return {
@@ -687,7 +686,7 @@ def _verb_manifest(target: str) -> Dict[str, Any]:
     }
 
 
-def _verb_class(target: str, single_class: Optional[str]) -> Dict[str, Any]:
+def _verb_class(target: str, single_class: str | None) -> dict[str, Any]:
     if not single_class or not _CLASS_RE.match(single_class):
         return _err_verb(
             target, "class",
@@ -720,7 +719,7 @@ def _verb_class(target: str, single_class: Optional[str]) -> Dict[str, Any]:
         if proc.returncode != 0 or not produced:
             stderr_tail, stdout_tail = _proc_tails(proc)
             diag = stderr_tail or stdout_tail or "jadx emitted no diagnostics"
-            extra: Dict[str, Any] = {
+            extra: dict[str, Any] = {
                 "single_class": single_class,
                 "exit_code": proc.returncode,
                 "stderr_tail": stderr_tail,
@@ -739,7 +738,7 @@ def _verb_class(target: str, single_class: Optional[str]) -> Dict[str, Any]:
                 extra=extra,
             )
         out_file = produced[0]
-        with open(out_file, "r", encoding="utf-8", errors="replace") as fh:
+        with open(out_file, encoding="utf-8", errors="replace") as fh:
             content = fh.read()
         content, truncated = _clip(content)
         lines = content.count("\n") + 1
@@ -768,11 +767,11 @@ def _verb_class(target: str, single_class: Optional[str]) -> Dict[str, Any]:
 
 
 def _verb_grep(
-    target: str, pattern: Optional[str], glob: Optional[str],
+    target: str, pattern: str | None, glob: str | None,
     case_insensitive: bool,
-    max_matches: Optional[int] = None, offset: int = 0,
-    max_files: Optional[int] = None,
-) -> Dict[str, Any]:
+    max_matches: int | None = None, offset: int = 0,
+    max_files: int | None = None,
+) -> dict[str, Any]:
     ws = _workspace_for(target)
     if not os.path.isdir(ws):
         return _err_verb(
@@ -841,7 +840,7 @@ def _verb_grep(
             )
         file_cap = min(requested_files, _GREP_FILES_CEILING)
     import fnmatch
-    collected: List[Dict[str, Any]] = []
+    collected: list[dict[str, Any]] = []
     files_scanned = 0
     files_skipped = 0
     real_ws = os.path.realpath(ws)
@@ -919,7 +918,7 @@ def _verb_grep(
         "status": "ok",
         "verb": "grep",
         "summary": (
-            f"{len(matches)} match(es) in {len(set(m['file'] for m in matches))} "
+            f"{len(matches)} match(es) in {len({m['file'] for m in matches})} "
             f"file(s) — {files_scanned} file(s) scanned, {files_skipped} skipped "
             f"(non-text/ext), pattern {pattern!r}"
             + (f", offset {offset}" if offset else "")
@@ -955,7 +954,7 @@ def _verb_grep(
     }
 
 
-def _verb_read(target: str, path: Optional[str]) -> Dict[str, Any]:
+def _verb_read(target: str, path: str | None) -> dict[str, Any]:
     ws = _workspace_for(target)
     if not os.path.isdir(ws):
         return _err_verb(
@@ -1001,10 +1000,10 @@ def _verb_read(target: str, path: Optional[str]) -> Dict[str, Any]:
 
 
 def _verb_tree(
-    target: str, glob: Optional[str],
+    target: str, glob: str | None,
     tree_mode: str = "files", offset: int = 0,
-    limit: Optional[int] = None,
-) -> Dict[str, Any]:
+    limit: int | None = None,
+) -> dict[str, Any]:
     ws = _workspace_for(target)
     if not os.path.isdir(ws):
         return _err_verb(
@@ -1043,7 +1042,7 @@ def _verb_tree(
     if tree_mode == "dirs":
         # Per-directory rollup: the model navigates a big workspace by
         # directory counts instead of a flat 500-path wall of text.
-        counts: Dict[str, Dict[str, Any]] = {}
+        counts: dict[str, dict[str, Any]] = {}
         for dirpath, dirnames, filenames in os.walk(ws):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             dir_rel = os.path.relpath(dirpath, ws)
@@ -1110,7 +1109,7 @@ def _verb_tree(
             "delta": f"listed {len(page)}/{total_dirs} dirs",
         }
     # --- flat files listing (default; backward compatible) ------------------
-    all_files: List[str] = []
+    all_files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(ws):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for fname in filenames:
@@ -1158,7 +1157,7 @@ def _count_by_ext(ws: str, ext: str) -> int:
     return n
 
 
-def _count_all(ws: str, skip: Optional[str] = None) -> int:
+def _count_all(ws: str, skip: str | None = None) -> int:
     n = 0
     for dirpath, dirnames, filenames in os.walk(ws):
         if skip:
@@ -1173,7 +1172,7 @@ def _count_all(ws: str, skip: Optional[str] = None) -> int:
 # The composite tool
 # ---------------------------------------------------------------------------
 
-def _run_jadx_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _run_jadx_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Digest adapter for ``run_jadx`` — per-verb compact summary.
 
     The full jadx output (grep match lists, decompiled source blobs, file
@@ -1302,24 +1301,24 @@ def run_jadx(
     deobf: bool = False,
     show_bad_code: bool = False,
     mode: str = "auto",
-    threads: Optional[int] = None,
+    threads: int | None = None,
     no_res: bool = False,
     force: bool = False,
     # --- class verb param ---
-    single_class: Optional[str] = None,
+    single_class: str | None = None,
     # --- grep verb params ---
-    pattern: Optional[str] = None,
-    glob: Optional[str] = None,
+    pattern: str | None = None,
+    glob: str | None = None,
     case_insensitive: bool = False,
-    max_matches: Optional[int] = None,
-    max_files: Optional[int] = None,
+    max_matches: int | None = None,
+    max_files: int | None = None,
     # --- read verb param ---
-    path: Optional[str] = None,
+    path: str | None = None,
     # --- shared paging / tree params ---
     offset: int = 0,
     tree_mode: str = "files",
-    limit: Optional[int] = None,
-) -> Dict[str, Any]:
+    limit: int | None = None,
+) -> dict[str, Any]:
     """Drive jadx against a target from the apk drop folder.
 
     Args:
@@ -1373,7 +1372,7 @@ def run_jadx(
             target, command,
             f"mode {mode!r} not in {', '.join(_DECOMPILE_MODES)}; rejected",
         )
-    threads_val: Optional[int] = None
+    threads_val: int | None = None
     if threads is not None:
         try:
             threads_val = int(threads)
@@ -1414,17 +1413,17 @@ def run_jadx(
 
 
 def _err_verb(
-    target: Optional[str],
-    command: Optional[str],
+    target: str | None,
+    command: str | None,
     error: str,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Consistent error envelope.
 
     ``extra`` merges verb-specific keys (e.g. ``stderr_tail``/``stdout_tail``
     on jadx-spawn failures) into the base shape without changing it.
     """
-    envelope: Dict[str, Any] = {
+    envelope: dict[str, Any] = {
         "status": "error",
         "verb": command,
         "summary": error,

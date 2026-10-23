@@ -24,7 +24,7 @@ state through the SAME per-hop gating without a second redirect loop.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urljoin
 
 import requests
@@ -37,12 +37,12 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 def gated_get(
     url: str,
     *,
-    headers: Optional[Dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
     verify: bool = True,
-    timeout: Tuple[float, float] = (5.0, 10.0),
+    timeout: tuple[float, float] = (5.0, 10.0),
     max_hops: int = 5,
-    session: Optional[requests.Session] = None,
-) -> Tuple[requests.Response, List[Dict[str, Any]]]:
+    session: requests.Session | None = None,
+) -> tuple[requests.Response, list[dict[str, Any]]]:
     """GET ``url`` manually following redirects, gate-checking every hop.
 
     Returns ``(response, hops)`` — ``hops`` is the ordered list of
@@ -62,7 +62,7 @@ def gated_get(
             the armed scope gate, or if the chain exceeds ``max_hops``
             (stopped while still in scope — never fired past the cap).
     """
-    hops: List[Dict[str, Any]] = []
+    hops: list[dict[str, Any]] = []
     current = (url or "").strip()
     if not current:
         raise ScopeGateError("scope gate: empty URL")
@@ -106,17 +106,17 @@ def gated_request(
     method: str,
     url: str,
     *,
-    headers: Optional[Dict[str, str]] = None,
-    params: Optional[Dict[str, Any]] = None,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
     data: Any = None,
     json: Any = None,
     files: Any = None,
     verify: bool = True,
-    timeout: Tuple[float, float] = (5.0, 15.0),
+    timeout: tuple[float, float] = (5.0, 15.0),
     max_hops: int = 5,
     allow_redirects: bool = True,
-    session: Optional[requests.Session] = None,
-) -> Tuple[requests.Response, List[Dict[str, Any]]]:
+    session: requests.Session | None = None,
+) -> tuple[requests.Response, list[dict[str, Any]]]:
     """Arbitrary-method HTTP request with per-hop scope-gate validation.
 
     Generalises :func:`gated_get` to POST/PUT/PATCH/DELETE with a body.
@@ -149,7 +149,7 @@ def gated_request(
     Returns ``(response, hops)``; ``hops`` is the ordered list of
     ``{"url", "status", "method"}`` visited.
     """
-    hops: List[Dict[str, Any]] = []
+    hops: list[dict[str, Any]] = []
     current = (url or "").strip()
     if not current:
         raise ScopeGateError("scope gate: empty URL")

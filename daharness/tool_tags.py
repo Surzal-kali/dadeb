@@ -58,9 +58,9 @@ Judgment-call interims (tagged, but operator may disagree — one-line edits):
   Optional secondary still open (not adopted): secretsdump +brute.crack.
 """
 
-from typing import Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
 
-CANONICAL_TAGS: Tuple[str, ...] = (
+CANONICAL_TAGS: tuple[str, ...] = (
     "recon.subdomain",
     "recon.web",
     "recon.dns-certs",
@@ -82,7 +82,7 @@ CANONICAL_TAGS: Tuple[str, ...] = (
 # construction: module.function or module.Class.method).  Values are tuples of
 # canonical categories (multi-tagging allowed when a tool genuinely straddles).
 # Absence = untagged (deliberate for the PENDING set above).
-TOOL_TAGS: Dict[str, Tuple[str, ...]] = {
+TOOL_TAGS: dict[str, tuple[str, ...]] = {
     # --- recon.subdomain ---------------------------------------------------
     "auxiliaries.amass.run_amass": ("recon.subdomain",),
     "auxiliaries.amass.amass_status": ("recon.subdomain",),
@@ -303,7 +303,7 @@ def resolve_tags(
     tool_id: str,
     decorator_tags: Iterable[str] = (),
     warn=None,
-) -> Tuple[str, ...]:
+) -> tuple[str, ...]:
     """Merge decorator tags with the bulk map.  Decorator wins; map fills.
 
     Non-canonical tags are KEPT (discoverability preserved) but a warning is
@@ -337,6 +337,6 @@ def tagged_doc(doc: str, tags: Iterable[str]) -> str:
     return f"{doc}\n\nCategories: {', '.join(tags)}"
 
 
-def unknown_tags(tags: Iterable[str]) -> Tuple[str, ...]:
+def unknown_tags(tags: Iterable[str]) -> tuple[str, ...]:
     """Tags not in CANONICAL_TAGS (empty tuple when all canonical)."""
     return tuple(t for t in tags if t not in CANONICAL_TAGS)

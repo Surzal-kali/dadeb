@@ -32,13 +32,12 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 from constants import framework_tool
 from utils.background_job import launch_job, poll_job, register_verdict_parser
 
 
-def _parse_nmap_verdict(log_text: str) -> Dict[str, Any]:
+def _parse_nmap_verdict(log_text: str) -> dict[str, Any]:
     """Best-effort summary from nmap's text output.
 
     Returns a dict with ``open_ports`` (list of ``"port/state/service"``
@@ -53,7 +52,7 @@ def _parse_nmap_verdict(log_text: str) -> Dict[str, Any]:
     elif re.search(r"Nmap scan report for .+ is (up|down)", log_text, re.IGNORECASE):
         host_state = m.group(1).lower() if m else None
 
-    open_ports: List[str] = []
+    open_ports: list[str] = []
     # Match lines like: 22/tcp   open  ssh
     #                 80/tcp   open  http
     for line in log_text.splitlines():
@@ -73,7 +72,7 @@ def _parse_nmap_verdict(log_text: str) -> Dict[str, Any]:
 register_verdict_parser("nmap", _parse_nmap_verdict)
 
 
-def _nmap_target_argv(target: str) -> List[str]:
+def _nmap_target_argv(target: str) -> list[str]:
     """Split a multi-target string into nmap argv elements.
 
     nmap treats ONE space-containing argv element as a single (unresolvable)
@@ -84,7 +83,7 @@ def _nmap_target_argv(target: str) -> List[str]:
     """
     import shlex
 
-    argv: List[str] = []
+    argv: list[str] = []
     for chunk in shlex.split(target):
         parts = chunk.split(",")
         if len(parts) > 1 and all(
@@ -118,8 +117,8 @@ def _nmap_target_argv(target: str) -> List[str]:
 def run_nmap(
     target: str,
     options: str = "-Pn -sV",
-    shaping: Optional[str] = None,
-) -> Dict[str, Any]:
+    shaping: str | None = None,
+) -> dict[str, Any]:
     """Launch nmap against ``target`` and return immediately.
 
     nmap runs as a detached background subprocess writing to a per-job log
@@ -185,7 +184,7 @@ def run_nmap(
     )
 
 
-def _nmap_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _nmap_status_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Digest adapter for ``nmap_status`` — compact port/service summary.
 
     The full nmap log (which can be thousands of lines for ``-p- -sV``) is
@@ -259,7 +258,7 @@ def _nmap_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
     result_digest=lambda r: _nmap_status_digest(r),
     untrusted_target=True,
 )
-def nmap_status(job_id: str) -> Dict[str, Any]:
+def nmap_status(job_id: str) -> dict[str, Any]:
     """Poll the progress of a scan launched by ``run_nmap``.
 
     Reads the job's log file, checks whether the subprocess is still alive,
@@ -293,7 +292,7 @@ _SCRIPTS_DIR_CANDIDATES = (
 # ask for by name.  Serves as a graceful fallback when a script's
 # machine-readable header is unparsable; the nmap --script-help path below
 # is the primary source of descriptions.
-_COMMON_SCRIPT_BRIEFS: Dict[str, str] = {
+_COMMON_SCRIPT_BRIEFS: dict[str, str] = {
     "smb-enum-shares": "enumerate SMB shares via null/credentialed sessions",
     "smb-enum-users": "enumerate SMB user accounts",
     "smb-enum-sessions": "enumerate active SMB sessions",
@@ -339,7 +338,7 @@ _COMMON_SCRIPT_BRIEFS: Dict[str, str] = {
 }
 
 
-def _find_scripts_dir() -> Optional[Path]:
+def _find_scripts_dir() -> Path | None:
     """Return the first existing NSE scripts directory, or None."""
     override = os.getenv("NMAP_SCRIPTS_DIR")
     if override and Path(override).is_dir():
@@ -364,7 +363,7 @@ def _find_scripts_dir() -> Optional[Path]:
 )
 def nmap_scripts(
     query: str = "", category: str = "", detail: bool = False, limit: int = 40
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List the installed NSE scripts, optionally filtered.
 
     Args:
@@ -397,7 +396,7 @@ def nmap_scripts(
 
     nmap_bin = shutil.which("nmap") or "nmap"
 
-    def _load_script(path: Path) -> Dict[str, Any]:
+    def _load_script(path: Path) -> dict[str, Any]:
         """Best-effort parse of one .nse: name, description, categories.
 
         Real NSE files declare these as LUA ASSIGNMENTS, not comment
@@ -431,7 +430,7 @@ def nmap_scripts(
                     break
 
         # categories = { "a", "b", ... }
-        categories: List[str] = []
+        categories: list[str] = []
         m = re.search(r"^\s*categories\s*=\s*\{(.*?)\}", text[:8192], re.S | re.M)
         if m:
             categories = re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
@@ -450,7 +449,7 @@ def nmap_scripts(
             "usage": usage,
         }
 
-    installed: List[Dict[str, Any]] = []
+    installed: list[dict[str, Any]] = []
     for p in sorted(scripts_dir.glob("*.nse")):
         installed.append(_load_script(p))
 
@@ -486,7 +485,7 @@ def nmap_scripts(
             #   |   Attempts to list shares ... (indented prose)
             # Split on the "| <name>" headers and attach each block to its
             # script; unknown names are ignored.
-            blocks: Dict[str, List[str]] = {}
+            blocks: dict[str, list[str]] = {}
             current = None
             for line in (proc.stdout or "").splitlines():
                 hm = re.match(r"^\|\s*([a-z0-9_-]+)\s*$", line)

@@ -35,7 +35,8 @@ from __future__ import annotations
 import fnmatch
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any
+from collections.abc import Iterator
 
 # Primary Kali/Debian wordlist root.  Override with the WORDLISTS_ROOT env
 # var (used by tests and non-standard installs).
@@ -57,7 +58,7 @@ WORDLISTS_ROOT: Path = Path(
 # The main root is always walked.  Everything else is the usual Kali
 # per-package wordlist folder that ``/usr/share/wordlists`` symlinks to —
 # walking the real folder works even where the symlink is dangling.
-_DEFAULT_SOURCES: List[tuple] = [
+_DEFAULT_SOURCES: list[tuple] = [
     # main root: rockyou + per-package symlinks
     ("wordlists", str(WORDLISTS_ROOT)),
     ("dirb", "/usr/share/dirb/wordlists"),
@@ -70,7 +71,7 @@ _DEFAULT_SOURCES: List[tuple] = [
     ("dnsrecon", "/usr/share/dnsrecon"),
 ]
 
-WORDLIST_SOURCES: Dict[str, str] = {}
+WORDLIST_SOURCES: dict[str, str] = {}
 if os.getenv("WORDLIST_SOURCES"):
     # Env override form: "key=/abs/dir,key2=/abs/dir2" (merged over defaults).
     for chunk in os.environ["WORDLIST_SOURCES"].split(","):
@@ -96,7 +97,7 @@ else:
 # wordlist exists without checking.  Aliases below cover the common set;
 # absent ones are reported in ``common_absent`` so the operator knows to
 # install them (e.g. ``apt install seclists`` or clone the repo).
-COMMON_WORDLISTS: Dict[str, str] = {
+COMMON_WORDLISTS: dict[str, str] = {
     "rockyou.txt": "SecLists/Passwords/Leaked-Databases/rockyou.txt",
     "dirb_common": "SecLists/Discovery/Web-Content/dirb/common.txt",
     "directory_list_2.3_small": "SecLists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
@@ -125,7 +126,7 @@ DEFAULT_HYDRA_PASSWORD_LIST: str = os.getenv(
 )
 
 
-def resolve_wordlist(rel_path: str, root: Optional[Path] = None) -> Optional[str]:
+def resolve_wordlist(rel_path: str, root: Path | None = None) -> str | None:
     """Resolve a wordlist path against the declared wordlist sources.
 
     Accepts an absolute path that already exists (honoured as-is), or a
@@ -142,7 +143,7 @@ def resolve_wordlist(rel_path: str, root: Optional[Path] = None) -> Optional[str
     if p.is_absolute() and p.is_file():
         return str(p)
 
-    bases: List[Path] = []
+    bases: list[Path] = []
     if root is not None:
         bases.append(root)
     bases.extend(
@@ -157,7 +158,7 @@ def resolve_wordlist(rel_path: str, root: Optional[Path] = None) -> Optional[str
     return None
 
 
-def resolve_default_wordlist(kind: str, root: Optional[Path] = None) -> Optional[str]:
+def resolve_default_wordlist(kind: str, root: Path | None = None) -> str | None:
     """Resolve the framework default wordlist for ``kind``.
 
     ``kind`` is one of ``"ffuf"``, ``"hydra_logins"``, ``"hydra_passwords"``.
@@ -225,11 +226,11 @@ def _category_from_path(path: Path, root: Path) -> str:
 
 
 def discover_wordlists(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     pattern: str = "*.txt",
     include_hidden: bool = False,
-    sources: Optional[Dict[str, str]] = None,
-) -> Iterator[Dict[str, Any]]:
+    sources: dict[str, str] | None = None,
+) -> Iterator[dict[str, Any]]:
     """Walk every declared wordlist source, yielding matching files.
 
     Each yielded dict has ``path`` (absolute, ``str``), ``size`` (bytes),
@@ -269,7 +270,7 @@ def discover_wordlists(
         for dirpath, dirnames, filenames in os.walk(base, followlinks=True):
             # Prune junk + hidden dirs; track dir realpaths so a symlink
             # pointing at an already-walked ancestor is never re-entered.
-            kept: List[str] = []
+            kept: list[str] = []
             for d in sorted(dirnames):
                 if d in skip_dirs or (not include_hidden and d.startswith(".")):
                     continue
@@ -310,7 +311,7 @@ def discover_wordlists(
                 }
 
 
-def preflight_wordlists(root: Optional[Path] = None) -> Dict[str, Any]:
+def preflight_wordlists(root: Path | None = None) -> dict[str, Any]:
     """Launch-time sanity check for the declared wordlist sources.
 
     Returns a report dict:
@@ -329,7 +330,7 @@ def preflight_wordlists(root: Optional[Path] = None) -> Dict[str, Any]:
 
     Idempotent and read-only — safe to call from ``launch_all``.
     """
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "ok": False,
         "root": str(root or WORDLISTS_ROOT),
         "txt_count": 0,
@@ -341,7 +342,7 @@ def preflight_wordlists(root: Optional[Path] = None) -> Dict[str, Any]:
         "warnings": [],
     }
 
-    declared: Dict[str, str] = (
+    declared: dict[str, str] = (
         {"wordlists": str(root)} if root is not None else dict(WORDLIST_SOURCES)
     )
 

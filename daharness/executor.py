@@ -16,11 +16,9 @@ import os
 import struct
 import subprocess
 import sys
-import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
-from pydantic import ValidationError
 
 from constants import TransportType, brain_socket_path
 from .models import ToolManifest
@@ -303,7 +301,7 @@ class ExecutorMixin:
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_unix_connection(socket_path), connect_timeout
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     f"[BRAIN_DISPATCH] {tool_id}: Brain socket connect did not complete "
                     f"within {connect_timeout:.0f}s (BRAIN_CONNECT_TIMEOUT); sidecar wedged "
@@ -363,7 +361,7 @@ class ExecutorMixin:
 
             result_value = envelope.get("result")
 
-            shaped: Dict[str, Any] = {
+            shaped: dict[str, Any] = {
                 "status": "Success" if status == "success" else "Failed",
             }
             # Pass through structured result data for typed callers.
@@ -383,7 +381,7 @@ class ExecutorMixin:
         except FileNotFoundError:
             logger.info(f"[BRAIN_DISPATCH] {socket_path} does not exist; Brain sidecar is down")
             return None, True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Abandon the connection cleanly: an unclosed writer leaks the fd
             # (and the socket pair) for as long as the tool keeps running.
             try:
@@ -504,7 +502,7 @@ class ExecutorMixin:
                 coro = asyncio.to_thread(functools.partial(func, **args))
             try:
                 result = await asyncio.wait_for(coro, timeout=dispatch_timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     "[INPROC_LAUNCH] %s did not return within %.0fs (BRAIN_DISPATCH_TIMEOUT)",
                     tool_id, dispatch_timeout,
@@ -527,7 +525,7 @@ class ExecutorMixin:
             return {"error": f"In-process launch failed: {e}", "status": "Failed"}
 
     @staticmethod
-    def _wrap_launch_result(result: Any) -> Dict[str, Any]:
+    def _wrap_launch_result(result: Any) -> dict[str, Any]:
         """Shape an in-process result into the executor transport envelope.
 
         The envelope carries the *structured* result under ``result`` and the
@@ -559,7 +557,7 @@ class ExecutorMixin:
                 # went out — it must NOT be relabeled Success or the secretary
                 # will narrate a maybe-failure as a success and skip the
                 # read_listener check.
-                wrapped: Dict[str, Any] = {
+                wrapped: dict[str, Any] = {
                     "status": existing_status,
                     "result": result,
                 }

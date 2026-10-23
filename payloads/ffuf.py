@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool
 from utils.background_job import launch_job, poll_job, terminate_job, register_verdict_parser
@@ -36,7 +36,7 @@ _FFUF_ROW_RE = re.compile(
 # -noninteractive first appears in ffuf 2.0.0; Debian Trixie ships 1.1.0
 # where the flag is fatal ("flag provided but not defined", exit 2).
 _FFUF_NONINTERACTIVE_MIN = (2, 0)
-_noninteractive_supported: Optional[bool] = None
+_noninteractive_supported: bool | None = None
 
 
 def _ffuf_supports_noninteractive() -> bool:
@@ -58,7 +58,7 @@ def _ffuf_supports_noninteractive() -> bool:
     return _noninteractive_supported
 
 
-def _inject_noninteractive(extra: List[str]) -> List[str]:
+def _inject_noninteractive(extra: list[str]) -> list[str]:
     """Append ``-noninteractive`` when the installed ffuf supports it.
 
     The detached launcher already sets stdin=/dev/null, which keeps ffuf
@@ -71,9 +71,9 @@ def _inject_noninteractive(extra: List[str]) -> List[str]:
     return extra
 
 
-def _inject_scan_config(extra: List[str], url: str,
-                        scope_handle: Optional[str],
-                        scope_platform: Optional[str]) -> Tuple[List[str], Optional[Dict[str, Any]]]:
+def _inject_scan_config(extra: list[str], url: str,
+                        scope_handle: str | None,
+                        scope_platform: str | None) -> tuple[list[str], dict[str, Any] | None]:
     """Auto-inject mandatory testing requirements from the program manifest.
 
     When ``scope_handle`` / ``scope_platform`` point to an Intigriti program
@@ -116,7 +116,7 @@ def _inject_scan_config(extra: List[str], url: str,
     return injected, cfg
 
 
-def _inject_ignore_comments(extra: List[str]) -> List[str]:
+def _inject_ignore_comments(extra: list[str]) -> list[str]:
     """Append ``-ic`` unless the caller already set it.
 
     141 of 6 042 SecLists wordlists contain ``#``-prefixed comment lines
@@ -140,13 +140,13 @@ _FOLLOW_REDIRECT_FLAGS = frozenset(
 )
 
 
-def _strip_follow_redirects(extra: List[str]) -> Tuple[List[str], bool]:
+def _strip_follow_redirects(extra: list[str]) -> tuple[list[str], bool]:
     """Drop redirect-following flags; returns (clean_list, stripped_any)."""
     kept = [a for a in extra if a not in _FOLLOW_REDIRECT_FLAGS]
     return kept, len(kept) != len(extra)
 
 
-def _path_from_record(rec: Dict[str, Any]) -> str:
+def _path_from_record(rec: dict[str, Any]) -> str:
     """Extract the fuzzed value from a ffuf result record.
 
     JSON records carry it in ``input`` — a dict like ``{"FUZZ": "admin"}``.
@@ -177,7 +177,7 @@ def _path_from_record(rec: Dict[str, Any]) -> str:
 _MAX_FINDINGS = int(os.getenv("FFUF_MAX_FINDINGS", "10000"))
 
 
-def _interest_rank(f: Dict[str, Any]) -> int:
+def _interest_rank(f: dict[str, Any]) -> int:
     """Interest ordering: 200s first, then 3xx redirects, then 403s, 500s."""
     code = f.get("status") or 0
     if code == 200:
@@ -191,7 +191,7 @@ def _interest_rank(f: Dict[str, Any]) -> int:
     return 4
 
 
-def _cap_findings(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _cap_findings(findings: list[dict[str, Any]]) -> dict[str, Any]:
     """Bound the findings list so the poll verdict stays wire-safe.
 
     When truncating, keep the most interesting findings first
@@ -216,7 +216,7 @@ def _cap_findings(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _parse_ffuf_output_file(out_path: str) -> Optional[Dict[str, Any]]:
+def _parse_ffuf_output_file(out_path: str) -> dict[str, Any] | None:
     """Parse ffuf's ``-of json -o <file>`` output (one JSON object per file).
 
     Real file shape (ffuf 1.1.0, captured live): ``{"commandline": ...,
@@ -224,7 +224,7 @@ def _parse_ffuf_output_file(out_path: str) -> Optional[Dict[str, Any]]:
     ..., ...}]}`` — results at a top-level ``"results"`` key.
     """
     try:
-        with open(out_path, "r") as fh:
+        with open(out_path) as fh:
             data = _json.load(fh)
     except (OSError, ValueError):
         return None
@@ -252,7 +252,7 @@ def _parse_ffuf_output_file(out_path: str) -> Optional[Dict[str, Any]]:
     return capped
 
 
-def _parse_ffuf_verdict(log_text: str) -> Dict[str, Any]:
+def _parse_ffuf_verdict(log_text: str) -> dict[str, Any]:
     """Best-effort summary from ffuf's stdout (human table mode).
 
     Strips the ANSI ``\x1b[2K`` prefixes ffuf writes into redirected
@@ -261,9 +261,9 @@ def _parse_ffuf_verdict(log_text: str) -> Dict[str, Any]:
     ``-of json -o <file>`` output is parsed separately by
     ``_parse_ffuf_output_file`` and preferred by ``run_ffuf``'s verdict.
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     seen = set()
-    meta: Dict[str, Any] = {}
+    meta: dict[str, Any] = {}
 
     for raw_line in log_text.splitlines():
         s = _ANSI_RE.sub("", raw_line).strip()
@@ -340,8 +340,8 @@ register_verdict_parser("ffuf", _parse_ffuf_verdict)
     untrusted_target=True,
 )
 def run_ffuf(url: str, wordlist: str = "", options: str = "",
-             scope_handle: Optional[str] = None,
-             scope_platform: Optional[str] = None) -> Dict[str, Any]:
+             scope_handle: str | None = None,
+             scope_platform: str | None = None) -> dict[str, Any]:
     """Launch ffuf against ``url`` and return immediately.
 
     The URL must contain the ``FUZZ`` keyword where wordlist entries are
@@ -441,7 +441,7 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
         *opt_list, "-of", "json", "-o", out_path,
     ]
 
-    def _verdict(log_text: str) -> Dict[str, Any]:
+    def _verdict(log_text: str) -> dict[str, Any]:
         verdict = _parse_ffuf_verdict(log_text)
         file_verdict = _parse_ffuf_output_file(out_path)
         if file_verdict and file_verdict.get("findings_count"):
@@ -477,7 +477,7 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     return job
 
 
-def _ffuf_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _ffuf_status_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Digest adapter for ``ffuf_status`` — hit summary + status distribution.
 
     The full ffuf output (hundreds/thousands of path rows) is stored in
@@ -512,7 +512,7 @@ def _ffuf_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
 
     # Status code distribution — the primary triage signal.
     if findings:
-        status_counts: Dict[int, int] = {}
+        status_counts: dict[int, int] = {}
         for f in findings:
             code = f.get("status")
             if code is not None:
@@ -583,7 +583,7 @@ def _ffuf_status_digest(result: Dict[str, Any]) -> Dict[str, Any]:
     result_digest=lambda r: _ffuf_status_digest(r),
     untrusted_target=True,
 )
-def ffuf_status(job_id: str) -> Dict[str, Any]:
+def ffuf_status(job_id: str) -> dict[str, Any]:
     """Poll the progress of a run launched by ``run_ffuf``.
 
     Reads the job's log file, checks whether the subprocess is still alive,
@@ -607,7 +607,7 @@ def ffuf_status(job_id: str) -> Dict[str, Any]:
     "taking too long, is no longer needed, or was launched by mistake.",
     next_hints=["ffuf_status"],
 )
-def ffuf_cancel(job_id: str) -> Dict[str, Any]:
+def ffuf_cancel(job_id: str) -> dict[str, Any]:
     """Terminate an ffuf run launched by ``run_ffuf``.
 
     Sends SIGTERM to the background subprocess (escalating to SIGKILL if it

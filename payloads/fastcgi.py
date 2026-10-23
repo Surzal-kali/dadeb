@@ -41,7 +41,7 @@ import json
 import socket
 import struct
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool
 
@@ -106,7 +106,7 @@ def _begin_request(
     return _make_record(FCGI_BEGIN_REQUEST, request_id, body)
 
 
-def _encode_params(params: Dict[str, str]) -> bytes:
+def _encode_params(params: dict[str, str]) -> bytes:
     """Encode key-value pairs into FastCGI FCGI_PARAMS content bytes."""
     chunks = bytearray()
     for key, value in params.items():
@@ -132,8 +132,8 @@ def _encode_length(length: int) -> bytes:
 
 def _params_records(
     request_id: int,
-    params: Dict[str, str],
-) -> List[bytes]:
+    params: dict[str, str],
+) -> list[bytes]:
     """Split encoded params into FCGI_PARAMS records (max 65535 content each)."""
     encoded = _encode_params(params)
     records = []
@@ -150,7 +150,7 @@ def _params_records(
 def _stdin_records(
     request_id: int,
     body: bytes = b"",
-) -> List[bytes]:
+) -> list[bytes]:
     """Split body into FCGI_STDIN records + empty terminator."""
     records = []
     if body:
@@ -164,7 +164,7 @@ def _stdin_records(
     return records
 
 
-def _read_record(sock: socket.socket) -> Tuple[int, int, bytes]:
+def _read_record(sock: socket.socket) -> tuple[int, int, bytes]:
     """Read one FastCGI record from the socket.
 
     Returns (record_type, request_id, content_bytes). Returns
@@ -198,11 +198,11 @@ def _recv_exact(sock: socket.socket, length: int) -> bytes:
 def _fastcgi_send(
     host: str,
     port: int,
-    params: Dict[str, str],
+    params: dict[str, str],
     body: bytes = b"",
     timeout: float = 10.0,
     keep_conn: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Open a TCP connection to a FastCGI server, send a request, read response.
 
     Returns a dict with ``stdout``, ``stderr``, ``app_status``, and
@@ -225,8 +225,8 @@ def _fastcgi_send(
         sock.sendall(wire)
 
         # Read response: collect STDOUT + STDERR until END_REQUEST
-        stdout_chunks: List[bytes] = []
-        stderr_chunks: List[bytes] = []
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
         app_status = None
 
         while True:
@@ -265,7 +265,7 @@ def _default_params(
     remote_addr: str = "127.0.0.1",
     content_type: str = "",
     content_length: str = "",
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Build the standard FastCGI params that PHP-FPM expects."""
     params = {
         "SCRIPT_FILENAME": script_filename,
@@ -311,7 +311,7 @@ def fastcgi_request(
     body: str = "",
     extra_params: str = "",
     timeout: float = 10.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send a raw FastCGI request to a PHP-FPM/FastCGI server.
 
     Connects directly to the FastCGI server (no HTTP layer) and sends
@@ -382,7 +382,7 @@ def fastcgi_request(
 
     try:
         result = _fastcgi_send(target, port, params, body=body_bytes, timeout=timeout)
-    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+    except (TimeoutError, ConnectionRefusedError, OSError) as e:
         return {
             "error": f"FastCGI connection to {target}:{port} failed: {e}",
             "status": "Failed",
@@ -412,7 +412,7 @@ def fastcgi_php_exec(
     script_filename: str = "/var/www/html/index.php",
     server_name: str = "localhost",
     timeout: float = 10.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute PHP code on a target via PHP-FPM FastCGI exploitation.
 
     Implements the ``auto_prepend_file=php://input`` RCE chain:
@@ -472,7 +472,7 @@ def fastcgi_php_exec(
 
     try:
         result = _fastcgi_send(target, port, params, body=body, timeout=timeout)
-    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+    except (TimeoutError, ConnectionRefusedError, OSError) as e:
         return {
             "error": f"FastCGI connection to {target}:{port} failed: {e}",
             "status": "Failed",

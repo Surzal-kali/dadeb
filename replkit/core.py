@@ -20,7 +20,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from daharness.models import ToolManifest
 from daharness.registry import ToolRegistry
@@ -74,7 +74,7 @@ def _make_executor() -> ToolRegistry:
 
 # ── Discover tools ──────────────────────────────────────────────────────────
 
-def discover_tools() -> List[ToolManifest]:
+def discover_tools() -> list[ToolManifest]:
     """Discover all tools using the registry's static+dynamic scan (no ChromaDB)."""
     reg = ToolRegistry.__new__(ToolRegistry)
     return reg.discover_local_tools()
@@ -82,7 +82,7 @@ def discover_tools() -> List[ToolManifest]:
 
 # ── Run a tool ───────────────────────────────────────────────────────────────
 
-async def run_tool(tool_id: str, arguments: Dict[str, Any], manifests: List[ToolManifest]) -> Dict[str, Any]:
+async def run_tool(tool_id: str, arguments: dict[str, Any], manifests: list[ToolManifest]) -> dict[str, Any]:
     """Run a single tool by ID and return the result dict."""
     manifest = next((m for m in manifests if m.module_id == tool_id), None)
     if manifest is None:
@@ -138,7 +138,7 @@ def print_manifest(m: ToolManifest, verbose: bool = False):
             print(f"      {req_mark} {pname}: {ptype}  {pdesc}")
 
 
-def print_result(result: Dict[str, Any]):
+def print_result(result: dict[str, Any]):
     """Pretty-print a tool execution result."""
     status = result.get("status", "unknown")
     elapsed = result.get("_elapsed_s", "?")
@@ -177,7 +177,7 @@ def print_result(result: Dict[str, Any]):
 
 # ── Argument parsing: --flag value, using manifest schema for coercion ──────
 
-def parse_flag_args(tokens: List[str], manifest: Optional[ToolManifest] = None) -> Dict[str, Any]:
+def parse_flag_args(tokens: list[str], manifest: ToolManifest | None = None) -> dict[str, Any]:
     """Parse --flag value style arguments into a dict.
 
     Uses the tool manifest's parameter schema for type coercion:
@@ -214,15 +214,15 @@ def parse_flag_args(tokens: List[str], manifest: Optional[ToolManifest] = None) 
             return {}
 
     # Build type map from the manifest schema (the authoritative source)
-    type_map: Dict[str, str] = {}
-    required_order: List[str] = []
+    type_map: dict[str, str] = {}
+    required_order: list[str] = []
     if manifest and manifest.parameters:
         props = manifest.parameters.get("properties", {})
         for pname, pdef in props.items():
             type_map[pname] = pdef.get("type", "string")
         required_order = list(manifest.parameters.get("required", []))
 
-    args: Dict[str, Any] = {}
+    args: dict[str, Any] = {}
     i = 0
     positional_idx = 0
 
@@ -318,7 +318,7 @@ def _anchor_pytest_arg(arg: str) -> str:
     return arg
 
 
-def _selftest_argv(extra_args: Optional[List[str]] = None) -> List[str]:
+def _selftest_argv(extra_args: list[str] | None = None) -> list[str]:
     """Build the selftest macro's pytest argv (see :func:`run_selftest`).
 
     The ``tests/`` tree anchor is ALWAYS present — flag-only passthrough
@@ -347,7 +347,7 @@ def _selftest_argv(extra_args: Optional[List[str]] = None) -> List[str]:
     return argv
 
 
-def run_selftest(extra_args: Optional[List[str]] = None) -> int:
+def run_selftest(extra_args: list[str] | None = None) -> int:
     """Run the pytest suite as a REPL macro. Returns pytest's exit code.
 
     Cwd-independent — fires the same from the REPL, an operator shell alias,
@@ -378,7 +378,7 @@ def run_selftest(extra_args: Optional[List[str]] = None) -> int:
 
 # ── Manifest lookup shared by loop + one-shots ──────────────────────────────
 
-def find_manifest(tool_id: str, manifests: List[ToolManifest]) -> Optional[ToolManifest]:
+def find_manifest(tool_id: str, manifests: list[ToolManifest]) -> ToolManifest | None:
     """Find a manifest by exact ID, or by substring match (unique only).
 
     Argument order follows the monolith's ``_find_manifest(tool_id,
@@ -397,7 +397,7 @@ def find_manifest(tool_id: str, manifests: List[ToolManifest]) -> Optional[ToolM
     return None
 
 
-def safe_default_arguments(tool_id: str, m: Optional[ToolManifest]) -> Optional[Dict[str, Any]]:
+def safe_default_arguments(tool_id: str, m: ToolManifest | None) -> dict[str, Any] | None:
     """Resolve the bare-`run` argument set for a tool from SAFE_ARGS.
 
     Returns the args dict when defaults exist, or ``None`` after printing

@@ -95,7 +95,7 @@ import json
 import os
 import re
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from constants import framework_tool
 
@@ -158,11 +158,11 @@ class BurpMCPClient:
     the next tool call detects the dead session and reconnects lazily.
     """
 
-    _instance: Optional["BurpMCPClient"] = None
+    _instance: BurpMCPClient | None = None
     _lock = threading.Lock()
 
     @classmethod
-    def get_instance(cls) -> "BurpMCPClient":
+    def get_instance(cls) -> BurpMCPClient:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -173,8 +173,8 @@ class BurpMCPClient:
         self._url = BURP_MCP_URL
         self._session = None  # mcp.client.session.ClientSession
         self._cm_stack = None  # AsyncExitStack holding sse_client + ClientSession
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._loop_thread: Optional[threading.Thread] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
         self._connected = False
         self._connect_lock = threading.Lock()  # guards get_instance-style reentry
         # Async connect serialization, created lazily on the background loop
@@ -182,9 +182,9 @@ class BurpMCPClient:
         # concurrent _ensure_connected() callers each tear down the session
         # the previous one just opened (via _connect's _disconnect), livelocking
         # the single background loop and freezing every burp_* call.
-        self._async_connect_lock: Optional[asyncio.Lock] = None
+        self._async_connect_lock: asyncio.Lock | None = None
         # Cached tool inventory (refreshed on connect / reconnect).
-        self._available_tools: Dict[str, Any] = {}
+        self._available_tools: dict[str, Any] = {}
 
     # -- loop lifecycle ----------------------------------------------------
 
@@ -209,7 +209,7 @@ class BurpMCPClient:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _submit(self, coro, timeout: Optional[float] = None) -> Any:
+    def _submit(self, coro, timeout: float | None = None) -> Any:
         """Run ``coro`` on the background loop and block for its result.
 
         On timeout the coroutine is *cancelled* so a wedged coroutine (e.g.
@@ -232,7 +232,7 @@ class BurpMCPClient:
         # Hold the asyncio Task in a mutable container so the cancel
         # callback (scheduled on timeout) can reach it.  The container is
         # per-call: each _submit invocation creates its own _task_holder.
-        _task_holder: Dict[str, Any] = {}
+        _task_holder: dict[str, Any] = {}
 
         async def _wrap():
             task = asyncio.ensure_future(coro)
@@ -255,13 +255,13 @@ class BurpMCPClient:
                     try:
                         await task
                     except (asyncio.CancelledError, Exception):
-                        pass
+                        pass #TODO: shouldn't we be logging instead of passing?
 
             cancel_fut = asyncio.run_coroutine_threadsafe(_cancel_task(), loop)
             try:
                 cancel_fut.result(timeout=5)
             except Exception:
-                pass  # never block _submit on cleanup
+                pass  # TODO: shouldn't we be logging instead of passing?
             raise
 
     # -- connection lifecycle ----------------------------------------------
@@ -314,8 +314,8 @@ class BurpMCPClient:
             self._connected = True
             # Cache the tool inventory so wrappers can probe availability
             # (e.g. Pro-only Collaborator tools).
-            await self._refresh_tools()
-        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            await self._refresh_tools() #TODO: isn't there a built in timeout error?
+        except (TimeoutError, asyncio.CancelledError) as e:
             # Timeout: the BApp accepted the SSE connection but did not
             # complete the MCP handshake within BURP_MCP_CONNECT_TIMEOUT.
             # CancelledError: _submit's timeout fired and cancelled the
@@ -327,7 +327,7 @@ class BurpMCPClient:
             try:
                 await stack.aclose()
             except Exception:
-                pass
+                pass #TODO: ANOTHER OPPORTUNITY FOR LOGGING BUT WE PASSED?!
             self._session = None
             self._cm_stack = None
             self._connected = False
@@ -357,7 +357,7 @@ class BurpMCPClient:
             try:
                 await stack.aclose()
             except Exception:
-                pass
+                pass #TODO: FIX
             self._session = None
             self._cm_stack = None
             self._connected = False
@@ -374,7 +374,7 @@ class BurpMCPClient:
             try:
                 await self._cm_stack.aclose()
             except Exception:
-                pass
+                pass #TODO: FIX...i mean. shouldn't we do more for the end user than *pass* on error?
         self._cm_stack = None
         self._session = None
         self._connected = False
@@ -436,7 +436,7 @@ class BurpMCPClient:
         if self._session is not None:
             await self._session.send_ping()
 
-    def list_available_tools(self) -> List[str]:
+    def list_available_tools(self) -> list[str]:
         """Return the names of tools the connected Burp instance exposes.
 
         Pro-only tools (scanner issues, collaborator) are absent on Community.
@@ -455,7 +455,7 @@ class BurpMCPClient:
     # -- tool call ---------------------------------------------------------
 
     async def _call_tool_coro(
-        self, name: str, arguments: Dict[str, Any], timeout: Optional[float]
+        self, name: str, arguments: dict[str, Any], timeout: float | None
     ) -> Any:
         """Call one MCP tool and extract the text content from the result."""
         import mcp.types as types
@@ -519,7 +519,7 @@ class BurpMCPClient:
             raise BurpMCPError("tool_error", f"{name}: {err_text or 'unknown'}")
 
         # Extract text content.  Most BApp tools return a single TextContent.
-        parts: List[str] = []
+        parts: list[str] = []
         for block in (result.content or []):
             if isinstance(block, types.TextContent):
                 parts.append(block.text)
@@ -530,8 +530,8 @@ class BurpMCPClient:
     def call_tool(
         self,
         name: str,
-        arguments: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = BURP_MCP_CALL_TIMEOUT,
+        arguments: dict[str, Any] | None = None,
+        timeout: float | None = BURP_MCP_CALL_TIMEOUT,
     ) -> str:
         """Sync entry point: call ``name`` with ``arguments``, return text.
 
@@ -543,7 +543,7 @@ class BurpMCPClient:
             timeout=timeout + 10 if timeout else None,
         )
 
-    def reconnect(self) -> Dict[str, Any]:
+    def reconnect(self) -> dict[str, Any]:
         """Force a clean disconnect + reconnect of the SSE session.
 
         Call this after Burp was restarted (the old SSE stream is dead and
@@ -555,7 +555,7 @@ class BurpMCPClient:
         try:
             self._submit(self._disconnect(), timeout=BURP_MCP_CONNECT_TIMEOUT + 5)
         except Exception:
-            pass  # stale stack teardown — never block the reconnect
+            pass  # TODO: why pass when can log or do something else? why pass at all?
         try:
             self._submit(self._connect(), timeout=BURP_MCP_CONNECT_TIMEOUT + 5)
         except BurpMCPError as e:
@@ -668,7 +668,7 @@ def _scope_check(target: str) -> None:
         raise ScopeGateError(f"scope gate: {_reason}")
 
 
-def _host_from_raw_request(raw_request: str) -> Optional[str]:
+def _host_from_raw_request(raw_request: str) -> str | None:
     """Extract the target host from a raw HTTP request for scope gating.
 
     Mirrors the same-named helper in ``auxiliaries/zap.py``.  Checks the
@@ -780,7 +780,7 @@ def _html_to_markdown(html: str, max_len: int = 8192) -> str:
     return text
 
 
-def _parse_burp_response(raw: str) -> Dict[str, Any]:
+def _parse_burp_response(raw: str) -> dict[str, Any]:
     """Parse the BApp's Java ``HttpRequestResponse.toString()`` into a dict.
 
     Returns:
@@ -846,7 +846,7 @@ def _parse_burp_response(raw: str) -> Dict[str, Any]:
         except ValueError:
             pass
 
-    response_headers: Dict[str, str] = {}
+    response_headers: dict[str, str] = {}
     content_type = ""
     for ln in header_lines[1:]:
         if ":" in ln:
@@ -890,7 +890,7 @@ def _parse_burp_response(raw: str) -> Dict[str, Any]:
     }
 
 
-def _burp_response_digest(result: Dict[str, Any]) -> Dict[str, str]:
+def _burp_response_digest(result: dict[str, Any]) -> dict[str, str]:
     """Result-projection digest for burp_send_* tools.
 
     Compacts a parsed Burp response into a one-liner: status code, content
@@ -944,7 +944,7 @@ def burp_send_http1_request(
     target_hostname: str,
     target_port: int,
     uses_https: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send a raw HTTP/1.1 request via Burp and return the response.
 
     ``\\n`` line endings in ``content`` are normalized to ``\\r\\n`` by the
@@ -1005,13 +1005,13 @@ def burp_send_http1_request(
 )
 @_burp_error_guard
 def burp_send_http2_request(
-    pseudo_headers: Dict[str, str],
+    pseudo_headers: dict[str, str],
     target_hostname: str,
     target_port: int,
     uses_https: bool = True,
-    headers: Optional[Dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
     request_body: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send an HTTP/2 request via Burp and return the response.
 
     The returned dict carries a *parsed* response (``status_code``,
@@ -1070,7 +1070,7 @@ def burp_send_http2_request(
     result_digest=_burp_response_digest,
 )
 @_burp_error_guard
-def burp_send_raw(raw_request: str, uses_https: bool = False) -> Dict[str, Any]:
+def burp_send_raw(raw_request: str, uses_https: bool = False) -> dict[str, Any]:
     """Send a raw HTTP/1.1 request via Burp, inferring the target from it.
 
     First line must be ``METHOD /path HTTP/1.1``; include a ``Host:`` header.
@@ -1140,7 +1140,7 @@ def burp_send_raw(raw_request: str, uses_https: bool = False) -> Dict[str, Any]:
     tags=["recon.web"],
 )
 @_burp_error_guard
-def burp_get_proxy_history(count: int = 20, offset: int = 0) -> Dict[str, Any]:
+def burp_get_proxy_history(count: int = 20, offset: int = 0) -> dict[str, Any]:
     """Read paginated entries from Burp's proxy HTTP history.
 
     Args:
@@ -1177,7 +1177,7 @@ def burp_get_proxy_history(count: int = 20, offset: int = 0) -> Dict[str, Any]:
 @_burp_error_guard
 def burp_get_proxy_history_regex(
     regex: str, count: int = 20, offset: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Grep Burp's proxy history with a server-side regex.
 
     Args:
@@ -1206,7 +1206,7 @@ def burp_get_proxy_history_regex(
     tags=["recon.web"],
 )
 @_burp_error_guard
-def burp_get_proxy_websocket_history(count: int = 20, offset: int = 0) -> Dict[str, Any]:
+def burp_get_proxy_websocket_history(count: int = 20, offset: int = 0) -> dict[str, Any]:
     """Read paginated entries from Burp's proxy WebSocket history.
 
     Args:
@@ -1234,7 +1234,7 @@ def burp_get_proxy_websocket_history(count: int = 20, offset: int = 0) -> Dict[s
 @_burp_error_guard
 def burp_get_proxy_websocket_history_regex(
     regex: str, count: int = 20, offset: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Grep Burp's WebSocket history with a server-side regex.
 
     Args:
@@ -1267,8 +1267,8 @@ def burp_create_repeater_tab(
     target_hostname: str,
     target_port: int,
     uses_https: bool = False,
-    tab_name: Optional[str] = None,
-) -> Dict[str, Any]:
+    tab_name: str | None = None,
+) -> dict[str, Any]:
     """Open a Repeater tab in Burp with the given HTTP/1.1 request.
 
     Args:
@@ -1307,14 +1307,14 @@ def burp_create_repeater_tab(
 )
 @_burp_error_guard
 def burp_create_repeater_tab_http2(
-    pseudo_headers: Dict[str, str],
+    pseudo_headers: dict[str, str],
     target_hostname: str,
     target_port: int,
     uses_https: bool = True,
-    headers: Optional[Dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
     request_body: str = "",
-    tab_name: Optional[str] = None,
-) -> Dict[str, Any]:
+    tab_name: str | None = None,
+) -> dict[str, Any]:
     """Open an HTTP/2 Repeater tab in Burp with the given request.
 
     Args:
@@ -1361,8 +1361,8 @@ def burp_send_to_intruder(
     target_hostname: str,
     target_port: int,
     uses_https: bool = False,
-    tab_name: Optional[str] = None,
-) -> Dict[str, Any]:
+    tab_name: str | None = None,
+) -> dict[str, Any]:
     """Send a request to Burp's Intruder tool.
 
     Args:
@@ -1398,7 +1398,7 @@ def burp_send_to_intruder(
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_set_proxy_intercept(intercepting: bool) -> Dict[str, Any]:
+def burp_set_proxy_intercept(intercepting: bool) -> dict[str, Any]:
     """Toggle Burp Proxy intercept on or off.
 
     Args:
@@ -1424,7 +1424,7 @@ def burp_set_proxy_intercept(intercepting: bool) -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_set_task_engine_state(running: bool) -> Dict[str, Any]:
+def burp_set_task_engine_state(running: bool) -> dict[str, Any]:
     """Set Burp's task execution engine state.
 
     Args:
@@ -1448,7 +1448,7 @@ def burp_set_task_engine_state(running: bool) -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_url_encode(content: str) -> Dict[str, Any]:
+def burp_url_encode(content: str) -> dict[str, Any]:
     """URL-encode a string via Burp's encoder.
 
     Args:
@@ -1463,7 +1463,7 @@ def burp_url_encode(content: str) -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_url_decode(content: str) -> Dict[str, Any]:
+def burp_url_decode(content: str) -> dict[str, Any]:
     """URL-decode a string via Burp's decoder.
 
     Args:
@@ -1478,7 +1478,7 @@ def burp_url_decode(content: str) -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_base64_encode(content: str) -> Dict[str, Any]:
+def burp_base64_encode(content: str) -> dict[str, Any]:
     """Base64-encode a string via Burp's encoder.
 
     Args:
@@ -1493,7 +1493,7 @@ def burp_base64_encode(content: str) -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_base64_decode(content: str) -> Dict[str, Any]:
+def burp_base64_decode(content: str) -> dict[str, Any]:
     """Base64-decode a string via Burp's decoder.
 
     Args:
@@ -1511,7 +1511,7 @@ def burp_base64_decode(content: str) -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_output_project_options() -> Dict[str, Any]:
+def burp_output_project_options() -> dict[str, Any]:
     """Export Burp's project-level configuration as JSON."""
     result = _burp().call_tool("output_project_options")
     return {"status": "Success", "config": result}
@@ -1524,7 +1524,7 @@ def burp_output_project_options() -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_output_user_options() -> Dict[str, Any]:
+def burp_output_user_options() -> dict[str, Any]:
     """Export Burp's user-level configuration as JSON."""
     result = _burp().call_tool("output_user_options")
     return {"status": "Success", "config": result}
@@ -1538,7 +1538,7 @@ def burp_output_user_options() -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_list_tools() -> Dict[str, Any]:
+def burp_list_tools() -> dict[str, Any]:
     """List the MCP tools the connected Burp instance exposes."""
     tools = _burp().list_available_tools()
     return {
@@ -1565,7 +1565,7 @@ def burp_list_tools() -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_reconnect() -> Dict[str, Any]:
+def burp_reconnect() -> dict[str, Any]:
     """Re-establish the Burp MCP SSE session after a Burp restart/close.
 
     Use this when:
@@ -1590,7 +1590,7 @@ def burp_reconnect() -> Dict[str, Any]:
     tags=["infra"],
 )
 @_burp_error_guard
-def burp_health() -> Dict[str, Any]:
+def burp_health() -> dict[str, Any]:
     """Health check: is the Burp MCP server reachable?"""
     client = _burp()
     try:

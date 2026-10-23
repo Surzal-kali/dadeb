@@ -11,8 +11,8 @@ import signal
 import struct
 import sys
 from pathlib import Path
-from typing import Dict, Callable, Any, Optional
-from enum import Enum
+from typing import Any
+from collections.abc import Callable
 
 # This file is often launched directly (python listeners/thebrain.py), which
 # puts listeners/ -- not the framework root -- on sys.path, so top-level
@@ -21,7 +21,7 @@ _FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent
 if str(_FRAMEWORK_ROOT) not in sys.path:
     sys.path.insert(0, str(_FRAMEWORK_ROOT))
 
-from constants import TransportType, framework_tool, brain_socket_path
+from constants import framework_tool, brain_socket_path  # noqa: F401 — framework_tool re-exported for memories.py
 from listeners.execution_tracker import EXECUTION_TRACKER
 
 # --- dedicated tool-executor pool (2026-09-25 executor-starvation fix) -------
@@ -38,7 +38,7 @@ from listeners.execution_tracker import EXECUTION_TRACKER
 # never starve the loop's default executor (DNS lookups, subprocess pipes,
 # library internals that also use it), and BRAIN_TOOL_EXECUTORS gives the
 # operator a concurrency dial.
-_TOOL_EXECUTOR: Optional["concurrent.futures.Executor"] = None
+_TOOL_EXECUTOR: "concurrent.futures.Executor | None" = None
 
 
 def _tool_executor() -> "concurrent.futures.Executor":
@@ -61,28 +61,28 @@ EVENT_HANDLERS = {}
 
 class FunctionRegistry:
     def __init__(self):
-        self.tools: Dict[str, Callable] = {}
-        self.metadata: Dict[str, Dict] = {}
+        self.tools: dict[str, Callable] = {}
+        self.metadata: dict[str, dict] = {}
         # Per-session class instances, keyed by (session_id, class_key) so
         # concurrent agents (distinct session ids) get ISOLATED stateful tool
         # clients (e.g. separate MetasploitClient / RPC consoles) instead of
         # sharing one. Session "0" is the default/shared pool used by callers
         # that don't supply a session id (backward compatible with the old
         # single-instance behaviour).
-        self._instances: Dict[tuple, Any] = {}
+        self._instances: dict[tuple, Any] = {}
         # tool_id -> (cls, method_name) for class-method tools, so dispatch can
         # rebind to the per-session instance. Module-level function tools have
         # no entry here and are called as-is (they're stateless).
-        self._class_tools: Dict[str, tuple] = {}
+        self._class_tools: dict[str, tuple] = {}
 
     def register(self, name: str, func: Callable, doc: str):
         self.tools[name] = func
         self.metadata[name] = {"doc": doc, "args": inspect.signature(func)}
 
-    def get_tool(self, name: str) -> Optional[Callable]:
+    def get_tool(self, name: str) -> Callable | None:
         return self.tools.get(name)
 
-    def get_metadata(self, name: str) -> Optional[Dict]:
+    def get_metadata(self, name: str) -> dict | None:
         return self.metadata.get(name)
 
     @staticmethod
@@ -511,7 +511,7 @@ async def start_brain():
             try:
                 writer.close()
             except Exception:
-                pass
+                pass #TODO: handle exceptions better than "pass and pray"
     # Bind the socket at the lane's trust level: the umask swap lands the
     # permed mode atomically (no race window between bind and chmod).
     # 0777 is reserved for world-writable socket dirs (legacy container
@@ -579,7 +579,7 @@ async def dispatch(event, full_payload=None):
             # mid-JSON, fail json.loads, and silently fall back to the legacy
             # comma-split producing garbage kwargs.
             payload = payload_str
-            kwargs: Dict[str, Any] = {}
+            kwargs: dict[str, Any] = {}
             args: list = []
             if '|' in payload:
                 tool_id, args_str = payload.split('|', 1)
@@ -680,7 +680,7 @@ async def dispatch(event, full_payload=None):
                             if ceiling > 0
                             else await fut
                         )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     verdict = await EXECUTION_TRACKER.kill(
                         exec_id,
                         force=True,

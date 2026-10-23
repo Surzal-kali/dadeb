@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
 
 import requests
 import requests.adapters
@@ -91,7 +91,7 @@ def _canonical(url: str) -> str:
     return f"{host}{path}{query}"
 
 
-def _canonical_from_envelope(envelope: Dict[str, Any]) -> str:
+def _canonical_from_envelope(envelope: dict[str, Any]) -> str:
     """Recover the URL an envelope corresponds to from its requestHeader."""
     req = envelope.get("requestHeader", "")
     # requestHeader starts with "GET <url> HTTP/1.1" -- take the second token.
@@ -123,10 +123,10 @@ class ZAPClient:
     reused across the whole process.
     """
 
-    _instance: Optional["ZAPClient"] = None
+    _instance: ZAPClient | None = None
 
     @classmethod
-    def get_instance(cls) -> "ZAPClient":
+    def get_instance(cls) -> ZAPClient:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -209,7 +209,7 @@ class ZAPClient:
 
     # ---- primitives ------------------------------------------------------
 
-    def open_url(self, url: str, follow_redirects: bool = False) -> Dict[str, Any]:
+    def open_url(self, url: str, follow_redirects: bool = False) -> dict[str, Any]:
         """Load a URL into the session; passive scanner observes it.
 
         ``core/action/accessUrl`` supports an optional ``followRedirects``
@@ -260,7 +260,7 @@ class ZAPClient:
 
     # ---- scan-config enforcement (Intigriti RoE) -------------------------
 
-    def clear_ri_rules(self) -> List[Dict[str, str]]:
+    def clear_ri_rules(self) -> list[dict[str, str]]:
         """Remove all framework-managed replacer + rate-limit rules.
 
         ZAP replacer and rate-limit rules are **daemon-global** — they
@@ -276,7 +276,7 @@ class ZAPClient:
         Returns a list of ``{"type": ..., "description": ..., "status": ...}``
         dicts so callers can audit what was cleared.
         """
-        cleared: List[Dict[str, str]] = []
+        cleared: list[dict[str, str]] = []
 
         # --- Replacer rules ---
         # ZAP 2.17 wraps the list under the "rules" key (NOT "replacerRules").
@@ -319,7 +319,7 @@ class ZAPClient:
 
     def configure_scan_config(self, target: str,
                               scope_handle: str,
-                              scope_platform: str) -> Optional[Dict[str, Any]]:
+                              scope_platform: str) -> dict[str, Any] | None:
         """Auto-apply mandatory testing requirements from the program manifest.
 
         When ``scope_platform`` is ``"intigriti"`` and the cached manifest
@@ -363,7 +363,7 @@ class ZAPClient:
         from urllib.parse import urlparse
         host = urlparse(target if "://" in target else f"http://{target}").hostname or target
 
-        rule_status: List[Dict[str, str]] = []
+        rule_status: list[dict[str, str]] = []
 
         # --- Clear stale framework rules from previous scope switches -----
         # Replacer/rate rules are daemon-global; without this, an Adobe
@@ -379,7 +379,7 @@ class ZAPClient:
             try:
                 self._get("replacer/action/removeRule", description=desc)
             except Exception:
-                pass  # rule doesn't exist yet — fine
+                pass  # rule doesn't exist yet — fine (i guess..)
             try:
                 self._get(
                     "replacer/action/addRule",
@@ -440,7 +440,7 @@ class ZAPClient:
 
     def send_raw(self, raw_request: str,
                  follow_redirects: bool = False,
-                 timeout: float = 30.0) -> Dict[str, Any]:
+                 timeout: float = 30.0) -> dict[str, Any]:
         """Send a raw HTTP request byte-for-byte through ZAP's HTTP sender.
 
         Uses the core ``core/action/sendRequest`` endpoint (no add-on
@@ -506,7 +506,7 @@ class ZAPClient:
         return resp
 
     def _send_request_once(self, request: str, follow_redirects: bool,
-                           timeout: float) -> Dict[str, Any]:
+                           timeout: float) -> dict[str, Any]:
         """One ``sendRequest`` attempt: returned envelope, or raise.
 
         The synthetic zero-response envelope (target never spoke HTTP;
@@ -550,7 +550,7 @@ class ZAPClient:
                     "(connection failed/timed out). Synthetic zero-status "
                     f"response for: {first}"
                 )
-            return cast(Dict[str, Any], resp)
+            return cast(dict[str, Any], resp)
         except requests.exceptions.Timeout as e:
             # The action session has no retry, so this fires once and
             # surfaces immediately.  Wrap it so the _zap_error_guard
@@ -658,10 +658,10 @@ class ZAPClient:
         """Running / stopped / finished."""
         return self._get("ajaxSpider/view/status").get("status", "unknown")
 
-    def active_scan(self, url: str, policy: Optional[str] = None) -> str:
+    def active_scan(self, url: str, policy: str | None = None) -> str:
         _zap_scope_drift_guard()
         """Run an active scan against a URL (optionally with a named policy)."""
-        q: Dict[str, Any] = {"url": url, "recurse": "true"}
+        q: dict[str, Any] = {"url": url, "recurse": "true"}
         if policy:
             q["scanPolicyName"] = policy
         return self._get("ascan/action/scan", **q).get("scan", "")
@@ -670,7 +670,7 @@ class ZAPClient:
         """0..100 progress."""
         return int(self._get("ascan/view/status", scanId=scan_id).get("status", 0))
 
-    def alerts_summary(self, base_url: Optional[str] = None) -> Dict[str, int]:
+    def alerts_summary(self, base_url: str | None = None) -> dict[str, int]:
         """Number of alerts grouped by risk level (the lightweight triage view).
 
         Uses ``alert/view/alertsSummary`` so we get just counts — not the giant
@@ -678,7 +678,7 @@ class ZAPClient:
         when a scan reaches 100 so the secretary gets actionable triage in the
         same poll instead of a bare progress integer with ~0% information.
         """
-        q: Dict[str, Any] = {}
+        q: dict[str, Any] = {}
         if base_url:
             q["baseurl"] = base_url
         raw = self._get("alert/view/alertsSummary", **q)
@@ -689,11 +689,11 @@ class ZAPClient:
 
     def alerts(
         self,
-        base_url: Optional[str] = None,
-        risk_id: Optional[int] = None,
+        base_url: str | None = None,
+        risk_id: int | None = None,
         summary: bool = True,
         max_alerts: int = 50,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List all alerts raised (optionally filtered by URL prefix and risk
         level: 0 informational, 1 low, 2 medium, 3 high, 4 informational).
 
@@ -708,7 +708,7 @@ class ZAPClient:
         ``zap_alert_message`` to drill into a single alert's full metadata +
         HTTP wire bytes.
         """
-        q: Dict[str, Any] = {}
+        q: dict[str, Any] = {}
         if base_url:
             q["baseurl"] = base_url
         if risk_id is not None:
@@ -716,7 +716,7 @@ class ZAPClient:
         raw = self._get("alert/view/alerts", **q).get("alerts", [])
         if not summary:
             return raw
-        projected: List[Dict[str, Any]] = []
+        projected: list[dict[str, Any]] = []
         for a in raw[:max_alerts]:
             inst = a.get("instance") or []
             first = inst[0] if inst else {}
@@ -746,7 +746,7 @@ class ZAPClient:
             })
         return projected
 
-    def alert_message(self, alert_id: str) -> Dict[str, Any]:
+    def alert_message(self, alert_id: str) -> dict[str, Any]:
         """Return the alert metadata AND the full HTTP message that triggered it.
 
         ZAP 2.17 dropped ``alert/view/message`` (returns ``BAD_VIEW``). The
@@ -775,7 +775,7 @@ class ZAPClient:
 
     def history_regex(
         self, url: str, pattern: str, body_only: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Fetch the raw HTTP message for ``url`` and run ``re.search`` over
         it. This is the "ZAP-as-grep" entry point: the model can ask for any
         substring/regex across a previously-spidered response -- e.g. all
@@ -831,11 +831,11 @@ class ZAPClient:
             "truncated": len(matches) > 200,
         }
 
-    def sites(self) -> List[str]:
+    def sites(self) -> list[str]:
         """Top-level hosts discovered by the session."""
         return self._get("core/view/sites").get("sites", [])
 
-    def sites_tree(self, url: Optional[str] = None) -> str:
+    def sites_tree(self, url: str | None = None) -> str:
         """Full discovered-URL hierarchy as a JSON string.
 
         ZAP 2.17 removed ``core/view/sitesTree`` (it returns ``BAD_VIEW`` /
@@ -857,7 +857,7 @@ class ZAPClient:
         """
         from urllib.parse import urlsplit
 
-        q: Dict[str, Any] = {}
+        q: dict[str, Any] = {}
         if url:
             u = url.strip()
             # Accept bare hosts ("10.10.10.110") and "host:port" forms that
@@ -884,7 +884,7 @@ class ZAPClient:
                 "fallback_sites": self.sites(),
             })
 
-        tree: Dict[str, Any] = {}
+        tree: dict[str, Any] = {}
         for raw in urls:
             try:
                 parts = urlsplit(raw)
@@ -906,7 +906,7 @@ class ZAPClient:
         report_format: str = "html",
         report_file: str = "/tmp/zap_report.html",
         report_title: str = "Framework ZAP scan",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Generate a local report (html / xml / json / md). Returns the path.
 
         The ZAP ``reports`` add-on is NOT bundled into the daemon JAR --
@@ -1063,8 +1063,8 @@ def _zap_error_guard(func):
 )
 @_zap_error_guard
 def zap_open_url(target: str,
-                 scope_handle: Optional[str] = None,
-                 scope_platform: Optional[str] = None) -> Dict[str, Any]:
+                 scope_handle: str | None = None,
+                 scope_platform: str | None = None) -> dict[str, Any]:
     """Open a single URL so ZAP observes it. Use this before spidering or
     scanning to seed the session with a known-good entry point.
 
@@ -1110,7 +1110,7 @@ def zap_open_url(target: str,
     "again only when the user requests an update."
 )
 @_zap_error_guard
-def zap_spider(target: str, max_depth: int = 5, recurse: bool = True) -> Dict[str, str]:
+def zap_spider(target: str, max_depth: int = 5, recurse: bool = True) -> dict[str, str]:
     """Crawl from ``target`` up to ``max_depth`` hops. Returns the spider id;
     perform one status call to confirm launch, then hand off to the user.
     Poll again only when the user requests an update.
@@ -1140,7 +1140,7 @@ def zap_spider(target: str, max_depth: int = 5, recurse: bool = True) -> Dict[st
     "the user requests an update; never poll repeatedly until complete."
 )
 @_zap_error_guard
-def zap_spider_status(scan_id: str) -> Dict[str, Any]:
+def zap_spider_status(scan_id: str) -> dict[str, Any]:
     """Args:
         scan_id: The spider id returned by ``zap_spider``.
     """
@@ -1149,7 +1149,7 @@ def zap_spider_status(scan_id: str) -> Dict[str, Any]:
 
 @framework_tool("Start the AJAX (headless-browser) spider against a URL.")
 @_zap_error_guard
-def zap_ajax_spider(target: str) -> Dict[str, str]:
+def zap_ajax_spider(target: str) -> dict[str, str]:
     """The AJAX spider is a singleton — there is no per-scan ID.  Perform one
     status call to confirm launch, then hand off to the user.  Poll progress
     again only when the user requests an update.
@@ -1169,13 +1169,13 @@ def zap_ajax_spider(target: str) -> Dict[str, str]:
     "when the user requests an update; never poll repeatedly until complete."
 )
 @_zap_error_guard
-def zap_ajax_spider_status() -> Dict[str, str]:
+def zap_ajax_spider_status() -> dict[str, str]:
     return {"status": _zap().ajax_spider_status()}
 
 
 @framework_tool("Start an active scan against a URL; returns ascan_id.")
 @_zap_error_guard
-def zap_active_scan(target: str, policy: Optional[str] = None) -> Dict[str, str]:
+def zap_active_scan(target: str, policy: str | None = None) -> dict[str, str]:
     """Active scan attacks every URL the spider discovered. ``policy`` is
     optional and names a ZAP scan policy (e.g. ``"Default Policy"``).
 
@@ -1202,14 +1202,14 @@ def zap_active_scan(target: str, policy: Optional[str] = None) -> Dict[str, str]
     next_hints=["zap_alerts", "zap_report"],
 )
 @_zap_error_guard
-def zap_active_scan_status(scan_id: str, base_url: Optional[str] = None) -> Dict[str, Any]:
+def zap_active_scan_status(scan_id: str, base_url: str | None = None) -> dict[str, Any]:
     """Args:
         scan_id: The ascan id returned by ``zap_active_scan``.
         base_url: Optional URL prefix to scope the done-summary alert counts
             (e.g. ``http://target``). Defaults to all alerts.
     """
     pct = _zap().active_scan_status(scan_id)
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "ascan_id": scan_id,
         "status": pct,
         "done": pct >= 100,
@@ -1232,10 +1232,10 @@ def zap_active_scan_status(scan_id: str, base_url: Optional[str] = None) -> Dict
     untrusted_target=True,
 )
 @_zap_error_guard
-def zap_alerts(base_url: Optional[str] = None,
-               risk_id: Optional[int] = None,
+def zap_alerts(base_url: str | None = None,
+               risk_id: int | None = None,
                summary: bool = True,
-               max_alerts: int = 50) -> List[Dict[str, Any]]:
+               max_alerts: int = 50) -> list[dict[str, Any]]:
     """List all ZAP alerts raised during the session, with optional filtering.
 
     Risk levels: 0 informational, 1 low, 2 medium, 3 high, 4 informational
@@ -1268,7 +1268,7 @@ def zap_alerts(base_url: Optional[str] = None,
     untrusted_target=True,
 )
 @_zap_error_guard
-def zap_alert_message(alert_id: str) -> Dict[str, Any]:
+def zap_alert_message(alert_id: str) -> dict[str, Any]:
     """Returns the alert rule that fired (name, risk, CWE, evidence) AND the
     raw HTTP request + response that triggered it. Use to triage a finding:
     confirm it's a real positive and not a fingerprinting false positive.
@@ -1286,7 +1286,7 @@ def zap_alert_message(alert_id: str) -> Dict[str, Any]:
 )
 @_zap_error_guard
 def zap_history_regex(target: str, pattern: str,
-                      body_only: bool = True) -> Dict[str, Any]:
+                      body_only: bool = True) -> dict[str, Any]:
     """Use cases: enumerate hidden form fields, find all JS endpoints, locate
     comments containing TODOs, etc. Body-only skips the HTTP headers.
 
@@ -1301,13 +1301,13 @@ def zap_history_regex(target: str, pattern: str,
 
 @framework_tool("List top-level hosts discovered by the ZAP session.")
 @_zap_error_guard
-def zap_sites() -> List[str]:
+def zap_sites() -> list[str]:
     return _zap().sites()
 
 
 @framework_tool("Get the full ZAP sites tree (optionally scoped to a subtree URL).")
 @_zap_error_guard
-def zap_sites_tree(target: Optional[str] = None) -> str:
+def zap_sites_tree(target: str | None = None) -> str:
     """JSON dump of the entire discovered URL hierarchy.
 
     Args:
@@ -1321,7 +1321,7 @@ def zap_sites_tree(target: Optional[str] = None) -> str:
 @_zap_error_guard
 def zap_report(report_format: str = "html",
                report_file: str = "/tmp/zap_report.html",
-               report_title: str = "Framework ZAP scan") -> Dict[str, Any]:
+               report_title: str = "Framework ZAP scan") -> dict[str, Any]:
     """Requires the ZAP ``reports`` add-on; a vanilla daemon may not have
     it. On failure, returns a dict with an ``error`` field describing
     what's missing instead of raising.
@@ -1337,7 +1337,7 @@ def zap_report(report_format: str = "html",
         report_title=report_title,
     )
 
-def _host_from_raw_request(raw_request: str) -> "Optional[str]":
+def _host_from_raw_request(raw_request: str) -> str | None:
     """Extract the target host from a raw HTTP request for scope gating.
 
     Checks the ``Host:`` header first (the common case for vhost-gated
@@ -1379,7 +1379,7 @@ def _host_from_raw_request(raw_request: str) -> "Optional[str]":
 @_zap_error_guard
 def zap_send_raw(raw_request: str,
                  follow_redirects: bool = False,
-                 timeout: float = 30.0) -> Dict[str, Any]:
+                 timeout: float = 30.0) -> dict[str, Any]:
     """Send a raw HTTP/1.1 request exactly as written.
 
     First line must be ``METHOD /path HTTP/1.1``; separate headers from the
@@ -1431,7 +1431,7 @@ def zap_send_raw(raw_request: str,
 # out-of-scope request (redirect hops, spider crawls, scan traffic, proxied
 # manual browsing). The armed manifest is read here — never written.
 
-def sync_protect_scope(zap: Optional[ZAPClient] = None) -> Dict[str, Any]:
+def sync_protect_scope(zap: ZAPClient | None = None) -> dict[str, Any]:
     """Mirror the armed scope into a ZAP context and set mode=protect.
 
     Reads ``scope/.armed_packet_scope.json`` + the cached manifest (the
@@ -1466,11 +1466,11 @@ def sync_protect_scope(zap: Optional[ZAPClient] = None) -> Dict[str, Any]:
     zap = zap or _zap()
     context_name = f"framework-armed-{handle}"
 
-    includes: List[str] = []
-    excludes: List[str] = []
-    skipped: List[Dict[str, str]] = []
+    includes: list[str] = []
+    excludes: list[str] = []
+    skipped: list[dict[str, str]] = []
 
-    def _host_patterns(host: str) -> List[str]:
+    def _host_patterns(host: str) -> list[str]:
         h = re.escape(host.lower())
         return [
             rf"https?://([^.]+\.)?{h}(:\d+)?(/.*)?",
@@ -1478,7 +1478,7 @@ def sync_protect_scope(zap: Optional[ZAPClient] = None) -> Dict[str, Any]:
         ]
 
     def _asset_patterns(
-        asset: Dict[str, Any], out: List[str], skip: List[Dict[str, str]]
+        asset: dict[str, Any], out: list[str], skip: list[dict[str, str]]
     ) -> None:
         atype = str(asset.get("asset_type", "")).upper()
         ident = str(asset.get("asset_identifier", "")).strip()
@@ -1568,12 +1568,12 @@ def sync_protect_scope(zap: Optional[ZAPClient] = None) -> Dict[str, Any]:
     next_hints=["zap_open_url", "zap_spider", "zap_active_scan", "report_finding"],
 )
 @_zap_error_guard
-def zap_sync_scope() -> Dict[str, Any]:
+def zap_sync_scope() -> dict[str, Any]:
     """Sync ZAP's context + mode with the operator-armed scope (read-only on scope)."""
     return sync_protect_scope()
 
 
-def _zap_scope_drift_guard() -> Optional[Dict[str, Any]]:
+def _zap_scope_drift_guard() -> dict[str, Any] | None:
     """Detect armed-scope drift and auto-repair the ZAP mirror.
 
     Compares the armed state file's mtime against the last-synced mtime
@@ -1603,11 +1603,11 @@ def _zap_scope_drift_guard() -> Optional[Dict[str, Any]]:
     state_p = Path(_state_path())
     sidecar = state_p.parent / ".zap_protect_sync.json"
     try:
-        armed_mtime: Optional[float] = state_p.stat().st_mtime
+        armed_mtime: float | None = state_p.stat().st_mtime
     except OSError:
         armed_mtime = None  # armed state file removed -> disarmed
 
-    last: Optional[float] = None
+    last: float | None = None
     if sidecar.is_file():
         try:
             last = float(_json.loads(sidecar.read_text()).get("armed_mtime") or 0)

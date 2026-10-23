@@ -30,7 +30,6 @@ drift".
 """
 
 import inspect
-from typing import Any, Dict, List
 
 from daharness.models import ToolManifest
 
@@ -76,7 +75,7 @@ def _build_signature(manifest: ToolManifest) -> inspect.Signature:
         return inspect.Signature()
     props = manifest.parameters.get("properties", {})
     required = set(manifest.parameters.get("required", []))
-    params: List[inspect.Parameter] = []
+    params: list[inspect.Parameter] = []
     # Required first (so positional order matches declaration), then optional
     ordered = sorted(props.items(), key=lambda kv: (kv[0] not in required, kv[0]))
     for pname, pdef in ordered:
@@ -127,7 +126,7 @@ def _build_docstring(manifest: ToolManifest) -> str:
     return "\n".join(lines)
 
 
-def _make_tool_wrapper(manifest: ToolManifest, manifests_list: List[ToolManifest]):
+def _make_tool_wrapper(manifest: ToolManifest, manifests_list: list[ToolManifest]):
     """Create an ``async def`` closure that dispatches a single tool through
     ``run_tool`` with a real ``Signature`` and ``__doc__``.
 

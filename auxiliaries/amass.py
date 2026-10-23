@@ -49,12 +49,10 @@ import shlex
 import socket
 import subprocess
 import threading
-import time
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout, as_completed
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool, resolve_workspace_root
 from utils.background_job import launch_job, poll_job
@@ -124,7 +122,7 @@ _VALUE_FLAGS = {
 }
 
 
-def _validate_options(options: str) -> List[str]:
+def _validate_options(options: str) -> list[str]:
     """Parse and validate an options string against the flag allowlist.
 
     Returns a clean argv list.  Raises ValueError on disallowed flags.
@@ -132,7 +130,7 @@ def _validate_options(options: str) -> List[str]:
     if not options or not options.strip():
         return []
     tokens = shlex.split(options)
-    clean: List[str] = []
+    clean: list[str] = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -158,12 +156,12 @@ def _validate_options(options: str) -> List[str]:
 
 # Extra per-job metadata that launch_job/poll_job don't carry (domain,
 # temp output dir, whether to do alive-check).  Keyed by job_id, capped.
-_AMASS_JOBS: "Dict[str, Dict[str, Any]]" = {}
+_AMASS_JOBS: dict[str, dict[str, Any]] = {}
 _AMASS_LOCK = threading.Lock()
 _MAX_AMASS_JOBS = 64
 
 
-def _retrieve_names(domain: str) -> List[str]:
+def _retrieve_names(domain: str) -> list[str]:
     """Retrieve discovered subdomain names from the engine's home DB.
 
     In amass v5, ``amass enum`` does NOT print names to stdout.  Results are
@@ -207,7 +205,7 @@ def _retrieve_names(domain: str) -> List[str]:
     return []
 
 
-def _crtsh_fallback(domain: str) -> List[str]:
+def _crtsh_fallback(domain: str) -> list[str]:
     """Query crt.sh CT logs directly.
 
     crt.sh is frequently overloaded (502/timeout), especially for domains
@@ -239,7 +237,7 @@ def _crtsh_fallback(domain: str) -> List[str]:
     return []
 
 
-def _certspotter_fallback(domain: str) -> List[str]:
+def _certspotter_fallback(domain: str) -> list[str]:
     """Query CertSpotter CT-log API (free, no key required).
 
     CertSpotter is more reliable than crt.sh for large domains and returns
@@ -272,7 +270,7 @@ def _certspotter_fallback(domain: str) -> List[str]:
         return []
 
 
-def _hackertarget_fallback(domain: str) -> List[str]:
+def _hackertarget_fallback(domain: str) -> list[str]:
     """Query HackerTarget hostsearch API (free, no key required).
 
     Returns ``hostname,ip`` lines.  Free tier allows ~50 queries/day per
@@ -301,7 +299,7 @@ def _hackertarget_fallback(domain: str) -> List[str]:
         return []
 
 
-def _get_names(domain: str) -> List[str]:
+def _get_names(domain: str) -> list[str]:
     """Retrieve names from amass's home DB, augmented with free CT sources.
 
     Amass's home DB is the primary source (accumulates across runs).  Free
@@ -330,8 +328,8 @@ def _get_names(domain: str) -> List[str]:
 
 def _store_amass_meta(job_id: str, domain: str,
                       options: str, composite: bool,
-                      scope_platform: Optional[str] = None,
-                      scope_handle: Optional[str] = None) -> None:
+                      scope_platform: str | None = None,
+                      scope_handle: str | None = None) -> None:
     """Stash extra metadata for a launched amass job."""
     with _AMASS_LOCK:
         _AMASS_JOBS[job_id] = {
@@ -357,7 +355,7 @@ def _store_amass_meta(job_id: str, domain: str,
                 _AMASS_JOBS.pop(k, None)
 
 
-def _get_amass_meta(job_id: str) -> Optional[Dict[str, Any]]:
+def _get_amass_meta(job_id: str) -> dict[str, Any] | None:
     with _AMASS_LOCK:
         return _AMASS_JOBS.get(job_id)
 
@@ -587,7 +585,7 @@ def amass_status(job_id):
 
 # --- subdomain_enum composite ------------------------------------------------
 
-def _load_scope(platform: Optional[str] = None, handle: Optional[str] = None) -> Tuple[List[str], List[str]] | None:
+def _load_scope(platform: str | None = None, handle: str | None = None) -> tuple[list[str], list[str]] | None:
     """Load scope patterns from ``<platform>_<handle>.scope`` (per-company).
 
     With ``platform``/``handle`` given, reads ``scope/<platform>_<handle>.scope``
@@ -609,8 +607,8 @@ def _load_scope(platform: Optional[str] = None, handle: Optional[str] = None) ->
         scope_file = resolve_workspace_root() / ".scope"
     if not scope_file.is_file():
         return None
-    in_patterns: List[str] = []
-    out_patterns: List[str] = []
+    in_patterns: list[str] = []
+    out_patterns: list[str] = []
     for line in scope_file.read_text().splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
@@ -623,8 +621,8 @@ def _load_scope(platform: Optional[str] = None, handle: Optional[str] = None) ->
     return (in_patterns, out_patterns)
 
 
-def _in_scope(subdomain: str, patterns: List[str],
-              out_patterns: Optional[List[str]] = None) -> bool:
+def _in_scope(subdomain: str, patterns: list[str],
+              out_patterns: list[str] | None = None) -> bool:
     """Check if a subdomain matches any scope pattern.
 
     Patterns:
@@ -703,15 +701,15 @@ def _is_alive(hostname: str, timeout: float = 3.0) -> bool:
             return True
         except _FutureTimeout:
             return False
-        except (socket.gaierror, socket.timeout, OSError):
+        except (socket.gaierror, TimeoutError, OSError):
             return False
 
 
 def _resolve_alive(
-    hostnames: List[str], timeout: float = 3.0, workers: int = 40,
-    out_patterns: Optional[List[str]] = None,
-    budget: Optional[float] = None,
-) -> Tuple[List[Dict[str, Any]], int]:
+    hostnames: list[str], timeout: float = 3.0, workers: int = 40,
+    out_patterns: list[str] | None = None,
+    budget: float | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     """Concurrently DNS-resolve a list of hostnames within a hard deadline.
 
     Returns ``(records, checked)`` where ``records`` is one entry per input
@@ -754,7 +752,7 @@ def _resolve_alive(
                 return True
         return False
 
-    records: Dict[str, Dict[str, Any]] = {}
+    records: dict[str, dict[str, Any]] = {}
     checked = 0
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_is_alive, h, host_timeout): h for h in hostnames}
@@ -769,7 +767,7 @@ def _resolve_alive(
             # tells the caller the result is partial.
             pass
     # Hosts that didn't get a verdict in time are conservatively not-alive.
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for h in hostnames:
         if h in records:
             out.append(records[h])

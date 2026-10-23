@@ -32,7 +32,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class Session:
     client: Any  # the live connection object (paramiko.SSHClient, MSF session, ...)
     created_at: float
     last_activity: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def touch(self) -> None:
         self.last_activity = time.time()
@@ -61,10 +61,10 @@ class SessionManager:
     open a connection and :meth:`get` when they need to interact with one.
     """
 
-    _instance: Optional["SessionManager"] = None
+    _instance: SessionManager | None = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls) -> "SessionManager":
+    def __new__(cls) -> SessionManager:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
@@ -74,7 +74,7 @@ class SessionManager:
     def __init__(self) -> None:
         if getattr(self, "_initialized", False):
             return
-        self._sessions: Dict[str, Session] = {}
+        self._sessions: dict[str, Session] = {}
         self._next_id = 1
         self._lock = threading.RLock()
         self._initialized = True
@@ -107,7 +107,7 @@ class SessionManager:
             )
             return sid
 
-    def get(self, sid: str) -> Optional[Session]:
+    def get(self, sid: str) -> Session | None:
         """Retrieve a live session by ID, updating its activity timestamp."""
         with self._lock:
             session = self._sessions.get(sid)
@@ -115,7 +115,7 @@ class SessionManager:
                 session.touch()
             return session
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
+    def list_sessions(self) -> list[dict[str, Any]]:
         """Return a list of session summaries (no live objects)."""
         with self._lock:
             return [

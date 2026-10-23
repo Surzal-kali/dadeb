@@ -33,8 +33,7 @@ Safety rails, by construction:
 
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 import requests
 
 from constants import framework_tool
@@ -75,7 +74,7 @@ def _origin(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
-def _host_headers(host_header: str) -> Optional[Dict[str, str]]:
+def _host_headers(host_header: str) -> dict[str, str] | None:
     """Optional Host header override for vhost-gated apps.
 
     requests still CONNECTS to the URL's host (no DNS change), so the scope
@@ -99,8 +98,8 @@ def _resolve_action(page_url: str, action: str) -> str:
     return urljoin(page_url, action)
 
 
-def _extract_form(html: str) -> Dict[str, Any]:
-    hidden: List[Tuple[str, str]] = []
+def _extract_form(html: str) -> dict[str, Any]:
+    hidden: list[tuple[str, str]] = []
     for tag in _HIDDEN_INPUT_RX.findall(html or ""):
         name = _INPUT_NAME_RX.search(tag)
         value = _INPUT_VALUE_RX.search(tag)
@@ -109,7 +108,7 @@ def _extract_form(html: str) -> Dict[str, Any]:
     action = _FORM_ACTION_RX.search(html or "")
 
     # Password field — the single most reliable form fingerprint.
-    pwd_candidates: List[str] = []
+    pwd_candidates: list[str] = []
     for m in _PASSWORD_FIELD_RX.finditer(html or ""):
         name = m.group(1) or m.group(2)
         if name and name not in pwd_candidates:
@@ -121,7 +120,7 @@ def _extract_form(html: str) -> Dict[str, Any]:
     # 2) Fallback: any <input type="text"> (or input with no type) whose
     #    name is NOT already a hidden or password field — the remaining
     #    text input is almost always the username field.
-    user_candidates: List[str] = []
+    user_candidates: list[str] = []
     hidden_names = {n for n, _ in hidden}
     for m in _USERNAME_NAME_RX.finditer(html or ""):
         n = m.group(1)
@@ -146,7 +145,7 @@ def _extract_form(html: str) -> Dict[str, Any]:
     }
 
 
-def _resolve_wordlist(wordlist: str) -> Optional[str]:
+def _resolve_wordlist(wordlist: str) -> str | None:
     if wordlist:
         import os
         return wordlist if os.path.isfile(wordlist) else None
@@ -285,7 +284,7 @@ def web_login_brute(url: str, username: str,
         success_set = {int(x) for x in str(success_statuses).split(",") if x.strip()}
         started = time.monotonic()
         fired = 0
-        with open(wl_path, "r", encoding="latin-1", errors="replace") as fh:
+        with open(wl_path, encoding="latin-1", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if fired >= attempts_cap:
                     break

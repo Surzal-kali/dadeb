@@ -28,7 +28,6 @@ raw-shell client.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
 
 HANDLE_SEPARATOR = ":"
 
@@ -55,7 +54,7 @@ def format_handle(kind: str, sid: str) -> str:
     return f"{kind}{HANDLE_SEPARATOR}{sid}"
 
 
-def parse_handle(handle: str) -> Tuple[str, str]:
+def parse_handle(handle: str) -> tuple[str, str]:
     """Return ``(kind, sid)`` from a handle string.
 
     Raises ValueError if the handle is malformed or carries an unknown kind,
@@ -78,7 +77,7 @@ def parse_handle(handle: str) -> Tuple[str, str]:
     return kind, sid
 
 
-def handle_kind(handle: str) -> Optional[str]:
+def handle_kind(handle: str) -> str | None:
     """Best-effort kind extraction; returns ``None`` on any malformed handle."""
     try:
         return parse_handle(handle)[0]
@@ -86,7 +85,7 @@ def handle_kind(handle: str) -> Optional[str]:
         return None
 
 
-def validate_handle_for_tool(handle: str, accepted_kinds) -> Optional[str]:
+def validate_handle_for_tool(handle: str, accepted_kinds) -> str | None:
     """Return ``None`` if ``handle`` is acceptable for a tool that declares
     ``accepted_kinds``; otherwise return a human-readable reason string that
     is suitable to feed back to the model as a ``ModelRetry`` message.

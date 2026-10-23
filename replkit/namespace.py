@@ -34,7 +34,7 @@ import textwrap as _textwrap
 import time
 import traceback
 import urllib.parse as _urlparse
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from daharness.models import ToolManifest
 from daharness.registry import ToolRegistry
@@ -62,7 +62,7 @@ from replkit.wrappers import build_tool_aliases, _make_tool_wrapper
 # at the top level (``sleep``, ``b64decode``, ``b64encode``, ``pprint``) for
 # the ones you reach for most — the rest are available as ``module.func``.
 
-_STDLIB_MODULES: Dict[str, Any] = {
+_STDLIB_MODULES: dict[str, Any] = {
     "asyncio": asyncio,
     "json": json,
     "os": os,
@@ -87,7 +87,7 @@ _STDLIB_MODULES: Dict[str, Any] = {
 
 # Bare functions hoisted to top-level for ergonomics — the ones you'd
 # otherwise type ``from X import Y`` for every session.
-_STDLIB_BARES: Dict[str, Any] = {
+_STDLIB_BARES: dict[str, Any] = {
     "sleep": time.sleep,
     "b64decode": _base64.b64decode,
     "b64encode": _base64.b64encode,
@@ -112,10 +112,10 @@ _STDLIB_BARES: Dict[str, Any] = {
 # ``HTML(table_str)`` / ``Math(r'\\sum p_i \\log p_i')`` / ``Latex(...)`` with
 # zero imports.  Loaded lazily so headless modes (``run`` / ``oneshot`` /
 # ``search``) that never build the IPython namespace pay nothing.
-_DISPLAY_CLASSES: Dict[str, Any] | None = None
+_DISPLAY_CLASSES: dict[str, Any] | None = None
 
 
-def _load_display_classes() -> Dict[str, Any]:
+def _load_display_classes() -> dict[str, Any]:
     """Lazy IPython.display wrapper classes for bare-name injection.
 
     Returns a dict of ``{name: class}`` for ``Markdown``, ``HTML``, ``JSON``,
@@ -158,8 +158,8 @@ def _load_display_classes() -> Dict[str, Any]:
 
 
 def build_ipython_namespace(
-    manifests: List[ToolManifest],
-) -> Dict[str, Any]:
+    manifests: list[ToolManifest],
+) -> dict[str, Any]:
     """Build the full kitted-out IPython user namespace.
 
     Returns a dict suitable for ``IPython.embed(user_ns=...)`` containing:
@@ -183,7 +183,7 @@ def build_ipython_namespace(
         ``scratch()`` for deep-searching large tool results without
         remembering the envelope shape.
     """
-    ns: Dict[str, Any] = {}
+    ns: dict[str, Any] = {}
 
     # ── Stdlib convenience overlay (injected first so tool aliases win
     #    on any name collision — unlikely but deterministic) ────────────
@@ -200,7 +200,7 @@ def build_ipython_namespace(
 
     # ── Tool wrappers ───────────────────────────────────────────────────
     alias_map = build_tool_aliases(manifests)
-    tools: Dict[str, Any] = {}
+    tools: dict[str, Any] = {}
     for alias, m in alias_map.items():
         wrapper = _make_tool_wrapper(m, manifests)
         ns[alias] = wrapper
@@ -209,7 +209,7 @@ def build_ipython_namespace(
     ns["manifests"] = manifests
     ns["registry"] = _make_executor()
 
-    def manifest_by_id(tool_id: str) -> Optional[ToolManifest]:
+    def manifest_by_id(tool_id: str) -> ToolManifest | None:
         """Look up a manifest by its full ``module_id``."""
         return next((m for m in manifests if m.module_id == tool_id), None)
     ns["manifest_by_id"] = manifest_by_id

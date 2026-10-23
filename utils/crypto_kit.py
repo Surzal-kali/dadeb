@@ -34,7 +34,7 @@ import math
 import re
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool
 
@@ -118,7 +118,7 @@ def _looks_hex(s: str) -> bool:
     "results often expose user IDs, roles, and internal names (IDOR/authorization leads).",
     next_hints=["report_finding", "jwt_decode"],
 )
-def decode_blob(blob: str, max_rounds: int = 6) -> Dict[str, Any]:
+def decode_blob(blob: str, max_rounds: int = 6) -> dict[str, Any]:
     """Iteratively decode ``blob`` while printability improves.
 
     Each round tries URL-unquote, base64 (std + urlsafe, padding-fixed),
@@ -132,7 +132,7 @@ def decode_blob(blob: str, max_rounds: int = 6) -> Dict[str, Any]:
     current = (blob or "").strip()
     if not current:
         return {"status": "Failed", "error": "empty blob"}
-    steps: List[Dict[str, str]] = []
+    steps: list[dict[str, str]] = []
     best_ratio = _printable_ratio(current.encode())
     for _ in range(max(1, max_rounds)):
         improved = None
@@ -181,7 +181,7 @@ _SUSPICIOUS_ALGS = {"none", "HS256", "HS384", "HS512"}
     "human-readable. This is triage for auth findings, not a bypass tool.",
     next_hints=["report_finding", "decode_blob"],
 )
-def jwt_decode(token: str) -> Dict[str, Any]:
+def jwt_decode(token: str) -> dict[str, Any]:
     """Split ``token`` on '.', base64url-decode header + payload as JSON.
 
     Args:
@@ -195,7 +195,7 @@ def jwt_decode(token: str) -> Dict[str, Any]:
             "error": f"expected 2-3 dot-separated parts, got {len(parts)}",
         }
 
-    def _b64d(part: str) -> Optional[Dict[str, Any]]:
+    def _b64d(part: str) -> dict[str, Any] | None:
         import json
 
         padded = part + "=" * (-len(part) % 4)
@@ -211,7 +211,7 @@ def jwt_decode(token: str) -> Dict[str, Any]:
         return {"status": "Failed", "error": "header/payload not valid b64url JSON"}
 
     alg = str(header.get("alg", ""))
-    flags: List[str] = []
+    flags: list[str] = []
     if alg.lower() == "none":
         flags.append("alg=none: signature may be strippable — TEST with the "
                      "signature removed (operator decision, gated traffic)")
@@ -259,12 +259,12 @@ _HASH_SHAPES = (
     "heuristic only. Pairs with check_hash_wordlist for unsalted hashes.",
     next_hints=["check_hash_wordlist", "suggest_crack_mode", "run_john"],
 )
-def identify_hash(hash_string: str) -> Dict[str, Any]:
+def identify_hash(hash_string: str) -> dict[str, Any]:
     """Return candidate hash types for ``hash_string`` (no cracking)."""
     s = (hash_string or "").strip()
     if not s:
         return {"status": "Failed", "error": "empty hash"}
-    candidates: List[str] = []
+    candidates: list[str] = []
     if s.startswith("$2a$") or s.startswith("$2b$") or s.startswith("$2y$"):
         candidates.append("bcrypt")
     elif s.startswith("$1$"):
@@ -302,7 +302,7 @@ def check_hash_wordlist(
     hash_string: str,
     wordlist: str = "",
     max_lines: int = _MAX_WORDLIST_LINES,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Recompute ``hash_string`` over wordlist lines until it matches.
 
     Args:
@@ -337,7 +337,7 @@ def check_hash_wordlist(
     hfun = getattr(hashlib, alg)
     scanned = 0
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
             for line in fh:
                 scanned += 1
                 candidate = line.rstrip("\r\n")
@@ -370,7 +370,7 @@ def check_hash_wordlist(
 # xor_brute / rot_brute — single-key classical brutes
 # --------------------------------------------------------------------------- #
 
-def _decode_input(data: str) -> Optional[bytes]:
+def _decode_input(data: str) -> bytes | None:
     s = (data or "").strip()
     if not s:
         return None
@@ -396,7 +396,7 @@ def _decode_input(data: str) -> Optional[bytes]:
     "client-side data in bounties.",
     next_hints=["decode_blob", "report_finding"],
 )
-def xor_brute(data: str, top: int = 5) -> Dict[str, Any]:
+def xor_brute(data: str, top: int = 5) -> dict[str, Any]:
     """Try all 256 single-byte keys on ``data`` (hex or base64 input).
 
     Args:
@@ -409,7 +409,7 @@ def xor_brute(data: str, top: int = 5) -> Dict[str, Any]:
             "status": "Failed",
             "error": "input is neither valid hex nor base64",
         }
-    scored: List[tuple] = []
+    scored: list[tuple] = []
     for key in range(256):
         out = bytes(b ^ key for b in raw)
         ratio = _printable_ratio(out)
@@ -446,7 +446,7 @@ def xor_brute(data: str, top: int = 5) -> Dict[str, Any]:
     "only. For 'Uryyb jbeyq'-class CTF strings and encoded breadcrumbs.",
     next_hints=["decode_blob"],
 )
-def rot_brute(text: str) -> Dict[str, Any]:
+def rot_brute(text: str) -> dict[str, Any]:
     """Try all letter rotations on ``text``; report the top candidates."""
     text = (text or "").strip()
     if not text:
@@ -462,7 +462,7 @@ def rot_brute(text: str) -> Dict[str, Any]:
     if not letters:
         return {"status": "Failed", "error": "no letters to rotate"}
 
-    candidates: List[Dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     for shift in range(26):
         out = "".join(
             chr((ord(c) - base + shift) % 26 + base)
@@ -503,7 +503,7 @@ def rot_brute(text: str) -> Dict[str, Any]:
     "clean way to demonstrate weak-crypto findings.",
     next_hints=["report_finding"],
 )
-def rsa_decrypt(p: int, q: int, e: int, c: int) -> Dict[str, Any]:
+def rsa_decrypt(p: int, q: int, e: int, c: int) -> dict[str, Any]:
     """RSA decrypt from prime factors.
 
     Args:

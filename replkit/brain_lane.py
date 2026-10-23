@@ -14,7 +14,7 @@ import asyncio
 import json
 import struct
 import time
-from typing import Any, Dict
+from typing import Any
 
 from constants import brain_socket_path
 
@@ -39,7 +39,7 @@ async def _brain_read_message(reader) -> bytes:
     return await reader.readexactly(length)
 
 
-async def _brain_call(tool_id: str, arguments: Dict[str, Any], brain_session: int = 0) -> Dict[str, Any]:
+async def _brain_call(tool_id: str, arguments: dict[str, Any], brain_session: int = 0) -> dict[str, Any]:
     """Route one tool call to the Brain sidecar (CALL_TOOL wire format), with
     NO in-process fallback: a fallback would strand session state in this REPL
     process, invisible to the agent — the split-brain this helper exists to
@@ -68,11 +68,11 @@ async def _brain_call(tool_id: str, arguments: Dict[str, Any], brain_session: in
         data = await asyncio.wait_for(_brain_read_message(reader), timeout=_BRAIN_TIMEOUT)
         writer.close()
         await writer.wait_closed()
-    except (asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError) as e:
+    except (TimeoutError, asyncio.IncompleteReadError, ValueError) as e:
         try:
             writer.close()
         except Exception:
-            pass
+            print(f"Failed to close Brain socket writer after {tool_id} timeout: {e}")
         return {
             "stdout": "",
             "status": "Failed",
@@ -97,7 +97,7 @@ async def _brain_call(tool_id: str, arguments: Dict[str, Any], brain_session: in
     status = str(envelope.get("status", "")).lower()
     error_msg = envelope.get("error")
     result_value = envelope.get("result")
-    shaped: Dict[str, Any] = {
+    shaped: dict[str, Any] = {
         "status": "Success" if status == "success" else "Failed",
         "_elapsed_s": round(time.monotonic() - start, 2),
     }

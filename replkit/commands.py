@@ -13,18 +13,14 @@ via :mod:`replkit.core`, and returns the process exit code.
 
 import asyncio
 import inspect
-import json
 import shlex
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 from daharness.models import ToolManifest
 
 from replkit.brain_lane import _sessions_command
 from replkit.completer import ToolReplCompleter
 from replkit.core import (
-    SAFE_ARGS,
     discover_tools,
     find_manifest,
     parse_flag_args,
@@ -60,9 +56,9 @@ def _normalise_tool_id(tool_id: str) -> str:
 
 def _find_tool_live(
     tool_id: str,
-    manifests: List[ToolManifest],
-    completer: Optional[ToolReplCompleter] = None,
-) -> tuple[Optional[ToolManifest], List[ToolManifest]]:
+    manifests: list[ToolManifest],
+    completer: ToolReplCompleter | None = None,
+) -> tuple[ToolManifest | None, list[ToolManifest]]:
     """Manifest lookup with a one-shot live re-discovery on a miss.
 
     The ``repl>`` loop holds the manifest snapshot taken at startup
@@ -143,7 +139,7 @@ Positional args fill required params in order:
 """)
 
 
-async def repl_loop(manifests: List[ToolManifest]):
+async def repl_loop(manifests: list[ToolManifest]):
     """Interactive REPL loop."""
     repl_help()
 
@@ -316,7 +312,7 @@ async def repl_loop(manifests: List[ToolManifest]):
 
 # ── One-shot run ─────────────────────────────────────────────────────────────
 
-async def oneshot_run(tool_id: str, arg_tokens: List[str]):
+async def oneshot_run(tool_id: str, arg_tokens: list[str]):
     """Run a single tool and print the result, then exit."""
     from replkit.core import safe_default_arguments
 

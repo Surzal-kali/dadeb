@@ -34,7 +34,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from constants import resolve_workspace_root
 
@@ -63,7 +63,7 @@ class EvidenceStore:
     """SQLite backing store for the evidence ledger (WAL, busy-timeout,
     idempotent schema — scratch-store conventions, single cached conn)."""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = db_path or _db_path()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
@@ -125,7 +125,7 @@ class EvidenceStore:
     # -- helpers ------------------------------------------------------------
 
     @staticmethod
-    def _ttl_for_kind(kind: str) -> Optional[float]:
+    def _ttl_for_kind(kind: str) -> float | None:
         """Default per-kind TTL (hours): credential 24h floor, scope
         questions never, everything else EVIDENCE_OPEN_TTL_HOURS."""
         if kind == "scope_question":
@@ -149,7 +149,7 @@ class EvidenceStore:
         except sqlite3.Error:
             return 0
 
-    def _get(self, entry_id: str) -> Optional[sqlite3.Row]:
+    def _get(self, entry_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM evidence_entries WHERE entry_id = ?",
             (entry_id,),
@@ -164,12 +164,12 @@ class EvidenceStore:
         *,
         agent_id: str = "secretary",
         source: str = "",
-        content: Optional[Dict[str, Any]] = None,
+        content: dict[str, Any] | None = None,
         scratch_ref: str = "",
         related_journal: str = "",
-        ttl_hours: Optional[float] = None,
-        engagement: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        ttl_hours: float | None = None,
+        engagement: str | None = None,
+    ) -> dict[str, Any]:
         if kind not in _KINDS:
             raise EvidenceError(
                 f"unknown kind {kind!r}; expected one of {', '.join(_KINDS)}"
@@ -236,7 +236,7 @@ class EvidenceStore:
         outcome: str,
         *,
         note: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Record ONE credential validation attempt. The UNIQUE
         (entry_id, service, target) constraint is the runbook: a second
         attempt against the same service raises with the re-mint guidance
@@ -295,7 +295,7 @@ class EvidenceStore:
         status: str,
         resolution: str = "",
         resolved_by: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if status not in ("resolved", "wontfix", "promoted"):
             raise EvidenceError(
                 f"cannot resolve to {status!r}; expected resolved|wontfix|promoted"
@@ -322,11 +322,11 @@ class EvidenceStore:
         kind: str = "",
         engagement: str = "",
         include_covered: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Open entries with their validation-attempt coverage (the reuse-
         sweep view: which recovered creds still owe which services)."""
         sql = "SELECT * FROM evidence_entries WHERE status = 'open'"
-        params: List[Any] = []
+        params: list[Any] = []
         if kind:
             sql += " AND kind = ?"
             params.append(kind)
@@ -346,7 +346,7 @@ class EvidenceStore:
             r["attempts"] = self._attempts(r["entry_id"])
         return rows
 
-    def _attempts(self, entry_id: str) -> List[Dict[str, Any]]:
+    def _attempts(self, entry_id: str) -> list[dict[str, Any]]:
         return [
             dict(r)
             for r in self.conn.execute(
@@ -355,7 +355,7 @@ class EvidenceStore:
             ).fetchall()
         ]
 
-    def get(self, entry_id: str) -> Dict[str, Any]:
+    def get(self, entry_id: str) -> dict[str, Any]:
         row = self._get(entry_id)
         if row is None:
             raise EvidenceError(f"evidence entry {entry_id!r} not found")
@@ -364,8 +364,8 @@ class EvidenceStore:
         out["attempts"] = self._attempts(entry_id)
         return out
 
-    def stats(self) -> Dict[str, Any]:
-        by_kind: Dict[str, int] = {}
+    def stats(self) -> dict[str, Any]:
+        by_kind: dict[str, int] = {}
         for r in self.conn.execute(
             "SELECT kind, count(*) AS n FROM evidence_entries "
             "WHERE status = 'open' GROUP BY kind"
@@ -403,7 +403,7 @@ class EvidenceStore:
             pass
 
 
-_STORE: Optional[EvidenceStore] = None
+_STORE: EvidenceStore | None = None
 
 
 def get_store() -> EvidenceStore:
@@ -466,7 +466,7 @@ def record_evidence(
         ttl_hours: Retention override; <=0 applies the per-kind default
             (credential 24h, scope_question never, others 7d).
     """
-    content: Dict[str, Any] = {}
+    content: dict[str, Any] = {}
     if content_json:
         try:
             parsed = json.loads(content_json)

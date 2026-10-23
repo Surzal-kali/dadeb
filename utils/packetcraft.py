@@ -43,7 +43,6 @@ from scapy.layers.dns import DNS, DNSQR, DNSRR
 import random
 import string
 import time
-import cryptography
 from scapy.all import sr1, srp1, send, sniff, hexdump, Raw, sendp
 
 from constants import framework_tool
@@ -84,7 +83,6 @@ def _default_interface() -> str:
     Read per-call instead of at import so loaddotenv/.env edits take effect.
     """
     return os.getenv(PACKET_INTERFACE_ENV) or DEFAULT_INTERFACE
-#[ ]TODO:  Needs to take advantage of poor cryptography, it's just sitting there {muy importante now that its on mcp}
 
 
 # --- module-local helpers -------------------------------------------------
@@ -874,7 +872,7 @@ def modify_packet(hex: str, fields: dict):
     try:
         pkt = _packet_from_hex(hex)
         # Coerce values: scapy fields are typed; str is accepted for most.
-        coerced = {k: v for k, v in fields.items()}
+        coerced = {**fields}
         pkt = _craft().utils.modify_packet(pkt, **coerced)
         return _craft_result(pkt)
     except Exception as e:

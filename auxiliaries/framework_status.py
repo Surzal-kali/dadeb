@@ -22,8 +22,7 @@ import shutil
 import socket
 import struct
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from constants import framework_tool, resolve_workspace_root, brain_socket_path
 from utils.snapshot_cache import get_snapshot_store
@@ -34,7 +33,7 @@ def _check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except (OSError, socket.timeout):
+    except (OSError, TimeoutError):
         return False
 
 
@@ -61,7 +60,7 @@ def _check_unix_socket(path: str) -> tuple:
         return False, "permission-denied"
     except FileNotFoundError:
         return False, "not-found"
-    except (ConnectionRefusedError, socket.timeout):
+    except (ConnectionRefusedError, TimeoutError):
         return False, "stale"
     except OSError as exc:
         return False, f"error:{exc.errno or type(exc).__name__}"
@@ -91,7 +90,7 @@ def _ollama_env_note() -> str:
     "in the registry. Use this to verify the harness is alive before "
     "starting an engagement or after a crash."
 )
-def framework_health() -> Dict[str, Any]:
+def framework_health() -> dict[str, Any]:
     """Probe framework subsystems and return a health report.
 
     Checks:
@@ -131,7 +130,7 @@ def framework_health() -> Dict[str, Any]:
     workspace = resolve_workspace_root()
     db_path = workspace / "ids.db"
 
-    subsystems: Dict[str, Dict[str, Any]] = {}
+    subsystems: dict[str, dict[str, Any]] = {}
 
     # Brain sidecar
     brain_sock = str(brain_socket_path())
@@ -199,6 +198,14 @@ def framework_health() -> Dict[str, Any]:
                     "name": lambda self: "dummy",
                 })(),
             )
+#             #TODO: FIX Argument of type "DummyEF" cannot be assigned to parameter "embedding_function" of type "EmbeddingFunction[Embeddable] | None" in function "get_or_create_collection"
+#   Type "DummyEF" is not assignable to type "EmbeddingFunction[Embeddable] | None"
+#     "DummyEF" is incompatible with protocol "EmbeddingFunction[Embeddable]"
+#       "__call__" is not present
+#       "embed_query" is not present
+#       "__init_subclass__" is not present
+#       "embed_with_retries" is not present
+#       "__init__" is not present
             tool_count = len(coll.get(include=[]).get("ids", []))
         except Exception as exc:
             chroma_up = False
@@ -301,7 +308,7 @@ def framework_health() -> Dict[str, Any]:
 # matching error (pdg's "run: r2pm -ci r2ghidra", masscan's raw-socket trap,
 # jadx's Java requirement).
 
-def _check_path(cmd: str) -> Dict[str, Any]:
+def _check_path(cmd: str) -> dict[str, Any]:
     """PATH probe for a CLI tool, with install-string remediation."""
     import shutil
     path = shutil.which(cmd)
@@ -314,7 +321,7 @@ def _check_path(cmd: str) -> Dict[str, Any]:
     }
 
 
-def _check_r2() -> Dict[str, Any]:
+def _check_r2() -> dict[str, Any]:
     """r2 binary + r2ghidra decompiler + drop folder, in one provider record."""
     r2 = _check_path("r2")
     if not r2["available"]:
@@ -339,7 +346,7 @@ def _check_r2() -> Dict[str, Any]:
     return {**r2, "available": available, "reason": reason}
 
 
-def _check_jadx() -> Dict[str, Any]:
+def _check_jadx() -> dict[str, Any]:
     """jadx + Java runtime + apk drop folder."""
     jadx = _check_path("jadx")
     if not jadx["available"]:
@@ -380,7 +387,7 @@ _CAP_NET_RAW_BIT = 13
 _CAP_EFFECTIVE_FLAG = 0x000001
 
 
-def _parse_cap_xattr(blob: bytes) -> Dict[str, Any]:
+def _parse_cap_xattr(blob: bytes) -> dict[str, Any]:
     """Decode a security.capability blob into exec-time-relevant facts.
 
     A file capability reaches the effective set at exec only when the
@@ -405,7 +412,7 @@ def _parse_cap_xattr(blob: bytes) -> Dict[str, Any]:
             "cap_net_raw": net_raw and effective}
 
 
-def _read_file_cap_net_raw(path: str) -> Dict[str, Any]:
+def _read_file_cap_net_raw(path: str) -> dict[str, Any]:
     """Exec-effective cap_net_raw evidence carried by the BINARY itself."""
     try:
         return _parse_cap_xattr(os.getxattr(path, "security.capability"))
@@ -433,7 +440,7 @@ def _process_raw_socket_ok() -> bool:
 
 
 def _masscan_launch_capability(euid: int, lane_raw: bool,
-                               file_caps: Dict[str, Any]) -> Tuple[bool, str]:
+                               file_caps: dict[str, Any]) -> tuple[bool, str]:
     """Grade masscan's LAUNCH from the privilege sources the launch uses.
 
     Returns ``(capable, reason)``; the reason names the deciding source so
@@ -462,7 +469,7 @@ def _masscan_launch_capability(euid: int, lane_raw: bool,
         "(sudo daharness doctor)")
 
 
-def _check_masscan() -> Dict[str, Any]:
+def _check_masscan() -> dict[str, Any]:
     """masscan + raw-socket capability, graded on the LAUNCH path.
 
     The old probe graded the doctor process's own SOCK_RAW attempt and
@@ -489,7 +496,7 @@ def _check_masscan() -> Dict[str, Any]:
                             "(systemd AmbientCapabilities=CAP_NET_RAW)")}
 
 
-def _check_msf() -> Dict[str, Any]:
+def _check_msf() -> dict[str, Any]:
     """msfconsole/msfvenom on PATH + msfrpcd RPC port answering."""
     console = _check_path("msfconsole")
     venompresent = _check_path("msfvenom")
@@ -510,7 +517,7 @@ def _check_msf() -> Dict[str, Any]:
             "remediation": "start the framework (python bootstrap.py) or msfrpcd manually"}
 
 
-def _check_scan_tools() -> List[Dict[str, Any]]:
+def _check_scan_tools() -> list[dict[str, Any]]:
     """Pure-PATH probes for the scanner lane (nmap/ffuf/hydra/sqlmap)."""
     out = []
     for cmd in ("nmap", "ffuf", "hydra", "sqlmap"):
@@ -520,7 +527,7 @@ def _check_scan_tools() -> List[Dict[str, Any]]:
     return out
 
 
-def _check_chroma() -> Dict[str, Any]:
+def _check_chroma() -> dict[str, Any]:
     """ChromaDB registry backend — the semantic lifeblood lane.
 
     The daemon launches it as a supervised sidecar (2026-10-20 merge of
@@ -535,7 +542,7 @@ def _check_chroma() -> Dict[str, Any]:
 
     host = os.getenv("CHROMA_HOST", "localhost")
     port = int(os.getenv("CHROMA_PORT", "9000"))
-    rec: Dict[str, Any] = {"provider": "chroma", "remediation": ""}
+    rec: dict[str, Any] = {"provider": "chroma", "remediation": ""}
     try:
         with _socket.create_connection((host, port), timeout=1.0):
             rec["available"] = True
@@ -557,7 +564,7 @@ def _check_chroma() -> Dict[str, Any]:
     return rec
 
 
-def _pg_host_candidates() -> List[str]:
+def _pg_host_candidates() -> list[str]:
     """Postgres endpoints to probe, ordered — mirrors utils.engagement's
     _host_candidates so the doctor and the engagement lane resolve the
     cluster the same way. An explicit HARNESS_DB_HOST pins the single
@@ -574,7 +581,7 @@ def _pg_host_candidates() -> List[str]:
     return ["127.0.0.1", "172.28.0.1"]
 
 
-def _check_postgres() -> Dict[str, Any]:
+def _check_postgres() -> dict[str, Any]:
     """Engagement-cobweb Postgres lane (deb wrapper: daharness-pg, :5433).
 
     available = the lane port is ANSWERING (cluster up). Down states split
@@ -608,7 +615,7 @@ def _check_postgres() -> Dict[str, Any]:
         except OSError:
             pass
 
-    base: Dict[str, Any] = {"provider": "postgres", "remediation": ""}
+    base: dict[str, Any] = {"provider": "postgres", "remediation": ""}
     if up:
         base["available"] = True
         base["reason"] = f"cluster answering on {host}:{port}"
@@ -704,7 +711,7 @@ def _doctor_gate_error() -> str:
     "blind and reports false downs, so it gets the refusal and the "
     "remediation instead of a lying report."
 )
-def framework_doctor(provider: str = "") -> Dict[str, Any]:
+def framework_doctor(provider: str = "") -> dict[str, Any]:
     """Probe per-lane capability and return a doctor report.
 
     Args:
@@ -716,7 +723,7 @@ def framework_doctor(provider: str = "") -> Dict[str, Any]:
     if gate:
         raise PermissionError(gate)
     p = (provider or "").strip().lower()
-    providers: Dict[str, Any] = {}
+    providers: dict[str, Any] = {}
 
     if p in ("", "r2"):
         providers["r2"] = _check_r2()

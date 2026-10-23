@@ -31,7 +31,7 @@ material. Keep it loopback/LAN for live work (README legal addendum).
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 DEFAULT_EMBED_URL = "http://localhost:11434/api/embed"
 
@@ -51,7 +51,7 @@ def resolve_embed_url() -> str:
     return url.rstrip("/") if url else DEFAULT_EMBED_URL
 
 
-def auth_headers() -> Dict[str, str]:
+def auth_headers() -> dict[str, str]:
     """Headers for the embed POST: Bearer auth iff ``EMBED_API_KEY`` is set."""
     headers = {"Content-Type": "application/json"}
     key = os.getenv("EMBED_API_KEY", "").strip()
@@ -60,7 +60,7 @@ def auth_headers() -> Dict[str, str]:
     return headers
 
 
-def embed_body(texts: List[str], model: str = "") -> Dict[str, Any]:
+def embed_body(texts: list[str], model: str = "") -> dict[str, Any]:
     """Request body shared by every embed consumer: ``{"model", "input"}``.
 
     ``input`` is always a list — the native Ollama embed API and the
@@ -69,7 +69,7 @@ def embed_body(texts: List[str], model: str = "") -> Dict[str, Any]:
     return {"model": model or embed_model(), "input": list(texts)}
 
 
-def parse_embed_response(payload: Any) -> List[List[float]]:
+def parse_embed_response(payload: Any) -> list[list[float]]:
     """Decode any of the three common embeddings wire shapes.
 
     - Ollama native (``/api/embed``): ``{"embeddings": [[...], ...]}``
@@ -96,7 +96,7 @@ def parse_embed_response(payload: Any) -> List[List[float]]:
 
 
 def embed_request(
-    texts: List[str], model: str = ""
-) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
+    texts: list[str], model: str = ""
+) -> tuple[str, dict[str, str], dict[str, Any]]:
     """Convenience trio: (url, headers, body) for one embeddings POST."""
     return resolve_embed_url(), auth_headers(), embed_body(texts, model)

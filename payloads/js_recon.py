@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -66,7 +66,7 @@ _FULL_URL_RE = re.compile(r"https?://[^\s\"'`<>\\)]{4,300}")
 _SOURCEMAP_RE = re.compile(r"sourceMappingURL\s*=\s*(\S+?\.map)")
 _ANY_MAP_RE = re.compile(r"[A-Za-z0-9_\-./]+\.js\.map\b")
 
-_SECRET_BATTERY: Tuple[Tuple[str, str], ...] = (
+_SECRET_BATTERY: tuple[tuple[str, str], ...] = (
     ("aws_access_key", r"\bAKIA[0-9A-Z]{16}\b"),
     ("google_api_key", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     ("github_token", r"\bgh[pousr]_[0-9A-Za-z]{36}\b"),
@@ -91,7 +91,7 @@ _SECRET_BATTERY: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def _fetch(url: str, timeout: float, insecure: bool) -> Tuple[Optional[str], int, str]:
+def _fetch(url: str, timeout: float, insecure: bool) -> tuple[str | None, int, str]:
     """GET ``url``; returns (text_or_None, status, error_string).
 
     Uses utils.gated_http: redirects are followed hop-by-hop with per-hop
@@ -128,10 +128,10 @@ def _static_asset(path: str) -> bool:
     return any(low.endswith(ext) for ext in _STATIC_EXT)
 
 
-def _extract_script_srcs(page_text: str, base_url: str) -> List[str]:
+def _extract_script_srcs(page_text: str, base_url: str) -> list[str]:
     """Absolute <script src> URLs, resolved against the page URL."""
-    out: List[str] = []
-    seen: Set[str] = set()
+    out: list[str] = []
+    seen: set[str] = set()
     for raw in _SCRIPT_SRC_RE.findall(page_text):
         raw = raw.strip()
         if not raw or raw.startswith(("data:", "blob:", "javascript:")):
@@ -143,9 +143,9 @@ def _extract_script_srcs(page_text: str, base_url: str) -> List[str]:
     return out
 
 
-def _extract_routes(text: str) -> List[str]:
+def _extract_routes(text: str) -> list[str]:
     """Endpoints from client calls, xhr.open, and quoted absolute paths."""
-    found: Set[str] = set()
+    found: set[str] = set()
     for pattern in (_CLIENT_CALL_RE, _XHR_OPEN_RE, _ABS_PATH_RE):
         for m in pattern.finditer(text):
             candidate = m.group("url")
@@ -163,8 +163,8 @@ def _extract_routes(text: str) -> List[str]:
     return sorted(found)[:_MAX_ROUTES]
 
 
-def _extract_full_urls(text: str) -> List[str]:
-    out: Set[str] = set()
+def _extract_full_urls(text: str) -> list[str]:
+    out: set[str] = set()
     for m in _FULL_URL_RE.finditer(text):
         u = m.group(0).rstrip(".,;:!?)]}'\"")
         if len(u) > 8 and not u.lower().endswith(_STATIC_EXT):
@@ -172,17 +172,17 @@ def _extract_full_urls(text: str) -> List[str]:
     return sorted(out)[:_MAX_URLS]
 
 
-def _extract_sourcemaps(text: str) -> List[str]:
-    out: Set[str] = set()
+def _extract_sourcemaps(text: str) -> list[str]:
+    out: set[str] = set()
     out.update(_SOURCEMAP_RE.findall(text))
     out.update(_ANY_MAP_RE.findall(text))
     return sorted(out)[:25]
 
 
-def _extract_secrets(text: str) -> List[Dict[str, str]]:
+def _extract_secrets(text: str) -> list[dict[str, str]]:
     """Regex battery. Returns {kind, match, context}; deduped, capped."""
-    out: List[Dict[str, str]] = []
-    seen: Set[Tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for kind, pattern in _SECRET_BATTERY:
         for m in re.finditer(pattern, text):
             match = (m.group(1) if m.groups() and m.group(1) else m.group(0)).strip()
@@ -218,7 +218,7 @@ def extract_js_routes(
     max_scripts: int = 25,
     timeout: float = 15.0,
     insecure: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fetch ``url`` and extract routes, URLs, secrets, sourcemaps from JS.
 
     If ``url`` ends in ``.js`` the file itself is the single blob; otherwise
@@ -250,17 +250,17 @@ def extract_js_routes(
     if page_text is None:
         return {"status": "Failed", "error": f"fetch failed: {err}", "url": url}
 
-    all_routes: Set[str] = set()
-    all_urls: Set[str] = set()
-    maps: Set[str] = set()
-    secrets: List[Dict[str, str]] = []
-    js_files: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, str]] = []
-    errors: List[Dict[str, str]] = []
+    all_routes: set[str] = set()
+    all_urls: set[str] = set()
+    maps: set[str] = set()
+    secrets: list[dict[str, str]] = []
+    js_files: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
 
     entry_host = urlparse(url).netloc
     if url.lower().endswith(".js"):
-        script_urls: List[str] = []
+        script_urls: list[str] = []
         blobs = [(url, page_text)]
     else:
         script_urls = _extract_script_srcs(page_text, url)[: max(1, max_scripts)]

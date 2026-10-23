@@ -39,13 +39,14 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
+from collections.abc import Callable
 
 
 # In-process job registry.  One entry per live or recently-finished job so
 # the secretary can poll across turns.  Capped to avoid unbounded growth.
 _MAX_JOBS = 64
-_JOBS: "Dict[str, Dict[str, Any]]" = {}
+_JOBS: Dict[str, Dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
 
 # Default log directory for per-job output.  Read PER CALL everywhere (see
@@ -72,11 +73,11 @@ def _log_dir() -> str:
 # sidecar reconstruction).  Keyed by ``tool_name`` — the same value passed
 # to ``launch_job(..., tool_name=...)`` and stored in the disk sidecar's
 # ``"tool"`` field.
-_VERDICT_PARSERS: "Dict[str, Callable[[str], Dict[str, Any]]]" = {}
+_VERDICT_PARSERS: Dict[str, Callable[[str], Dict[str, Any]]] = {}
 _VERDICT_PARSERS_LOCK = threading.Lock()
 
 
-def register_verdict_parser(tool_name: str, parser: Callable[[str], Dict[str, Any]]) -> None:
+def register_verdict_parser(tool_name: str, parser: Callable[[str], dict[str, Any]]) -> None:
     """Register a verdict parser for a tool used by ``poll_job`` fallbacks.
 
     Called by tool modules at import time (module-level, after the parser
@@ -87,13 +88,13 @@ def register_verdict_parser(tool_name: str, parser: Callable[[str], Dict[str, An
         _VERDICT_PARSERS[tool_name] = parser
 
 
-def _lookup_verdict_parser(tool_name: str) -> "Optional[Callable[[str], Dict[str, Any]]]":
+def _lookup_verdict_parser(tool_name: str) -> Optional[Callable[[str], Dict[str, Any]]]:
     """Return the registered verdict parser for ``tool_name``, or None."""
     with _VERDICT_PARSERS_LOCK:
         return _VERDICT_PARSERS.get(tool_name)
 
 
-def _find_job_tool(job_id: str) -> "Optional[str]":
+def _find_job_tool(job_id: str) -> Optional[str]:
     """Discover the tool name for a job by scanning the log dir for its sidecar.
 
     The disk sidecar is named ``<tool>_<job_id>.meta`` and contains a
@@ -122,14 +123,14 @@ def _find_job_tool(job_id: str) -> "Optional[str]":
 
 
 def launch_job(
-    command: List[str],
+    command: list[str],
     *,
     tool_name: str,
     timeout: float = 1800.0,
-    log_dir: Optional[str] = None,
-    verdict_parser: Optional[Callable[[str], Dict[str, Any]]] = None,
-    env: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+    log_dir: str | None = None,
+    verdict_parser: Callable[[str], dict[str, Any]] | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Launch a background subprocess and return immediately with a job_id.
 
     Parameters
@@ -179,7 +180,7 @@ def launch_job(
         env=env,
     )
 
-    entry: Dict[str, Any] = {
+    entry: dict[str, Any] = {
         "job_id": job_id,
         "tool": tool_name,
         "command": command,
@@ -256,7 +257,7 @@ def launch_job(
     }
 
 
-def poll_job(job_id: str, *, tool_name: str = "") -> Dict[str, Any]:
+def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:
     """Poll a background job: returns running/done, recent log lines, and an
     optional parsed verdict.
 
@@ -293,8 +294,8 @@ def poll_job(job_id: str, *, tool_name: str = "") -> Dict[str, Any]:
             "error": f"job id mismatch: requested {job_id!r} but entry has {entry.get('job_id')!r}",
         }
 
-    proc: Optional[subprocess.Popen] = entry.get("proc")
-    rc: Optional[int]
+    proc: subprocess.Popen | None = entry.get("proc")
+    rc: int | None
     if proc is not None:
         rc = proc.poll()
     else:
@@ -325,7 +326,7 @@ def poll_job(job_id: str, *, tool_name: str = "") -> Dict[str, Any]:
     else:
         status = "done"
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "job_id": job_id,
         "status": status,
         "exit_code": rc if rc is not None else None,
@@ -357,7 +358,7 @@ def poll_job(job_id: str, *, tool_name: str = "") -> Dict[str, Any]:
     return result
 
 
-def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+def get_job(job_id: str) -> dict[str, Any] | None:
     """Direct access to a job entry (for custom poll logic)."""
     with _JOBS_LOCK:
         return _JOBS.get(job_id)
@@ -378,13 +379,13 @@ def terminate_job(job_id: str) -> bool:
 
 def _read_log(path: str) -> str:
     try:
-        with open(path, "r", errors="replace") as f:
+        with open(path, errors="replace") as f:
             return f.read()
     except OSError:
         return ""
 
 
-def _reconstruct_job(job_id: str, tool_name: str) -> Optional[Dict[str, Any]]:
+def _reconstruct_job(job_id: str, tool_name: str) -> dict[str, Any] | None:
     """Rebuild a job entry from the disk sidecar after a restart."""
     meta_path = os.path.join(_log_dir(), f"{tool_name}_{job_id}.meta")
     try:
@@ -414,8 +415,8 @@ def _reconstruct_job(job_id: str, tool_name: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _terminate_job(entry: Dict[str, Any]) -> None:
-    proc: Optional[subprocess.Popen] = entry.get("proc")
+def _terminate_job(entry: dict[str, Any]) -> None:
+    proc: subprocess.Popen | None = entry.get("proc")
     if proc is not None:
         _terminate_proc(proc)
         return
@@ -446,7 +447,7 @@ def _terminate_proc(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def _pid_status(entry: Dict[str, Any]) -> Optional[int]:
+def _pid_status(entry: dict[str, Any]) -> int | None:
     """For a reconstructed job: return exit code if exited, None if running."""
     pid = entry.get("pid")
     if pid is not None:
@@ -463,7 +464,7 @@ def _pid_status(entry: Dict[str, Any]) -> Optional[int]:
     return 0 if pid is not None else None
 
 
-def _tail(text: str, n: int) -> List[str]:
+def _tail(text: str, n: int) -> list[str]:
     lines = [ln for ln in text.splitlines() if ln.strip()]
     ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
     lines = [ansi.sub("", ln).strip() for ln in lines]

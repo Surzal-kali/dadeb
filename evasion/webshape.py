@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # The old self-identifying marker, kept as an opt-in via SESSION_UA=legacy
 # (some RoE documents require the tool to identify itself).
@@ -56,7 +56,7 @@ LEGACY_UA = "framework-web-session/1.0 (+stateful-audit-lane)"
 #     orders like Chrome and only claims platforms its headers carry.
 # Pool strings are hardcoded, never read back from the installed lib: a
 # pip upgrade must not silently permutate per-host identity.
-_PROFILE_POOL: List[Dict[str, Any]] = [
+_PROFILE_POOL: list[dict[str, Any]] = [
     {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
@@ -128,7 +128,7 @@ _UA_POOL = [p["ua"] for p in _PROFILE_POOL]
 # canonicalise the plain-requests path's header emission (its only remaining
 # realism gap after the UA claim); the impersonated path takes template order
 # natively. Cookie/CSRF/app headers land after the browser set.
-_CANONICAL_ORDER: Dict[str, List[str]] = {
+_CANONICAL_ORDER: dict[str, list[str]] = {
     "chrome": [
         "host", "upgrade", "http2-settings", "sec-ch-ua", "sec-ch-ua-mobile",
         "sec-ch-ua-platform", "upgrade-insecure-requests", "user-agent",
@@ -149,10 +149,10 @@ _CANONICAL_ORDER: Dict[str, List[str]] = {
     ],
 }
 
-_CURL_OK: Optional[bool] = None  # lazy, cached curl_cffi availability probe
+_CURL_OK: bool | None = None  # lazy, cached curl_cffi availability probe
 
 
-def _operator_ua_override() -> Optional[str]:
+def _operator_ua_override() -> str | None:
     """$SESSION_UA override ('legacy' | custom string), if set — else None.
 
     An operator-owned identity never impersonates: the TLS stack cannot be
@@ -167,7 +167,7 @@ def _operator_ua_override() -> Optional[str]:
     return None
 
 
-def sticky_profile(host: str) -> Dict[str, Any]:
+def sticky_profile(host: str) -> dict[str, Any]:
     """Deterministic per-host identity profile.
 
     Precedence: $SESSION_UA override ('legacy' | custom string) > hash-pick.
@@ -224,7 +224,7 @@ def curl_impersonation_available() -> bool:
     return _CURL_OK
 
 
-def impersonation_target(profile: Dict[str, Any]) -> Optional[str]:
+def impersonation_target(profile: dict[str, Any]) -> str | None:
     """The curl-impersonate target for this profile, if usable right now.
 
     Returns None (impersonation off for this call) when: the profile is an
@@ -275,8 +275,8 @@ def browser_accept_encoding() -> str:
 
 
 def order_headers_for_family(
-    headers: Dict[str, str], family: str
-) -> Dict[str, str]:
+    headers: dict[str, str], family: str
+) -> dict[str, str]:
     """Re-emit ``headers`` in the family's canonical browser order.
 
     Known browser headers (lowercase-matched) follow the family's template
@@ -297,10 +297,10 @@ def order_headers_for_family(
 
 
 def canonical_fill_for_family(
-    profile: Dict[str, Any],
+    profile: dict[str, Any],
     method: str,
-    headers: Dict[str, str],
-) -> Dict[str, str]:
+    headers: dict[str, str],
+) -> dict[str, str]:
     """Fill identity-consistent browser headers the caller didn't supply.
 
     Only the trio browsers always send and only when absent: ``Accept``
@@ -312,7 +312,7 @@ def canonical_fill_for_family(
     says ``fingerprint.backend: python-requests`` and stays honest.
     """
     m = (method or "GET").upper()
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     lowers = {k.lower() for k in headers}
     if m == "GET" or m == "HEAD":
         if "accept" not in lowers and profile.get("accept"):

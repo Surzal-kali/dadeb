@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from asyncio import StreamReader, StreamWriter
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from listeners.thebrain import pack_message
 from constants import framework_tool, brain_socket_path
@@ -31,15 +31,15 @@ class ListenerDataStore:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._entries: List[Dict[str, Any]] = []
+        self._entries: list[dict[str, Any]] = []
         # Map of listener_handle -> { peer_addr_str: StreamWriter }
-        self._writers: Dict[str, Dict[str, StreamWriter]] = {}
+        self._writers: dict[str, dict[str, StreamWriter]] = {}
 
     # -- received data ------------------------------------------------------
 
     def add_data(
         self, handle: str, peer: str, data: bytes,
-        listener_port: Optional[int] = None,
+        listener_port: int | None = None,
     ) -> None:
         with self._lock:
             entry = {
@@ -65,7 +65,7 @@ class ListenerDataStore:
 
     def poll(
         self, handle: str = "", since: float = 0.0, limit: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Return received-data entries, optionally filtered.
 
         Args:
@@ -129,7 +129,7 @@ class ListenerDataStore:
                     return p
             return ""
 
-    def get_writer(self, handle: str, peer: str = "") -> Optional[StreamWriter]:
+    def get_writer(self, handle: str, peer: str = "") -> StreamWriter | None:
         with self._lock:
             conns = self._writers.get(handle)
             if not conns:
@@ -141,7 +141,7 @@ class ListenerDataStore:
                 return next(iter(conns.values()))
             return None
 
-    def list_clients(self, handle: str = "") -> Dict[str, List[str]]:
+    def list_clients(self, handle: str = "") -> dict[str, list[str]]:
         with self._lock:
             if handle:
                 return {handle: list(self._writers.get(handle, {}).keys())}
@@ -218,7 +218,7 @@ class TCPListener:
         # Per-handle config: handle -> {server, task, host, port, auto_answer}.
         # This is what makes handle↔port↔buffer an honest relationship instead
         # of an empirical guess.
-        self._listeners: Dict[str, Dict[str, Any]] = {}
+        self._listeners: dict[str, dict[str, Any]] = {}
 
     @framework_tool("Send a message to the Brain via the Unix socket.")
     async def send_to_brain(self, event_type, session_id, data):
@@ -247,7 +247,7 @@ class TCPListener:
         reader: StreamReader,
         writer: StreamWriter,
         _listener_handle: str = "",
-        _listener_port: Optional[int] = None,
+        _listener_port: int | None = None,
         _auto_answer: bool = False,
     ):
         """Per-connection read loop.
@@ -472,7 +472,7 @@ class TCPListener:
                 server.close()
                 await server.wait_closed()
             except Exception:
-                pass
+                pass #TODO: print or do *something*, if a listener isn't reaping properly thats bad
         _sm.close(sid)
         if getattr(self, "_handle", None) == handle:
             self._handle = None
@@ -570,7 +570,7 @@ class TCPListener:
         try:
             writer.write(payload)
             await asyncio.wait_for(writer.drain(), timeout=send_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # The write was interrupted by a timeout — the bytes may already
             # have been delivered (observed twice live: "timed out" yet 64
             # bytes arrived).  Do NOT drop the peer and do NOT claim failure.

@@ -47,9 +47,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Any
+from collections.abc import Callable
 
-from utils.scratch_store import ScratchStore, get_store
+from utils.scratch_store import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +103,11 @@ _LARGE_FIELD_CHAR_CAP = int(os.getenv("LARGE_FIELD_CHAR_CAP", "4096"))
 # Adapters are also registered directly here for tools that set
 # result_digest in the decorator (the common path).
 
-_DIGEST_ADAPTERS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+_DIGEST_ADAPTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
 
 def register_digest_adapter(
-    tool_id: str, adapter: Callable[[Dict[str, Any]], Dict[str, Any]]
+    tool_id: str, adapter: Callable[[dict[str, Any]], dict[str, Any]]
 ) -> None:
     """Register a per-tool digest adapter.
 
@@ -118,7 +119,7 @@ def register_digest_adapter(
     _DIGEST_ADAPTERS[tool_id] = adapter
 
 
-def get_digest_adapter(tool_id: str) -> Optional[Callable]:
+def get_digest_adapter(tool_id: str) -> Callable | None:
     """Look up a registered digest adapter for a tool_id."""
     return _DIGEST_ADAPTERS.get(tool_id)
 
@@ -145,15 +146,15 @@ _PAGE_TEMPLATE = {
 # --- Public projection API --------------------------------------------------
 
 def project_result(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     *,
     result_mode: str = "full",
     tool_id: str = "",
     agent_id: str = "0",
-    chat_id: Optional[str] = None,
+    chat_id: str | None = None,
     page_offset: int = 0,
     page_limit: int = 50,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Apply a result projection based on ``result_mode``.
 
     This is the single entry point called by the gateway, MCP handler, and
@@ -205,7 +206,7 @@ def project_result(
     # The stored scratch payload and the envelope the model sees must both
     # carry the tool's own fields.
     envelope_status = ""
-    provenance: Optional[Dict[str, Any]] = None
+    provenance: dict[str, Any] | None = None
     if "result" in result and "status" in result:
         envelope_status = str(result.get("status", "")).lower()
         # Capture the untrusted-target provenance stamp the executor placed
@@ -277,11 +278,11 @@ def project_result(
 # --- Large mode (default: capped passthrough) ------------------------------
 
 def _cap_result_fields(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     *,
     char_cap: int = _LARGE_FIELD_CHAR_CAP,
     byte_cap: int = _LARGE_MODE_BYTE_CAP,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Truncate every string field and list in ``result`` to stay under byte_cap.
 
     Returns a shallow-copied dict with:
@@ -321,15 +322,15 @@ def _cap_result_fields(
 
 
 def _project_large(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     *,
     mode: str,
     tool_id: str,
     agent_id: str,
-    chat_id: Optional[str],
+    chat_id: str | None,
     page_offset: int,
     page_limit: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Large mode: capped passthrough — the default for every lane.
 
     - Under ``LARGE_MODE_BYTE_CAP``: zero behavior change, raw result
@@ -410,12 +411,12 @@ def _project_large(
 # --- Digest builder --------------------------------------------------------
 
 def _build_digest(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     tool_id: str,
     scratch_ref: str,
-    scratch_info: Dict[str, Any],
-    provenance: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    scratch_info: dict[str, Any],
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a digest envelope using a registered adapter or the naive fallback."""
     adapter = get_digest_adapter(tool_id)
 
@@ -462,15 +463,15 @@ def _build_digest(
 # --- Page builder ----------------------------------------------------------
 
 def _build_page(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     tool_id: str,
     scratch_ref: str,
-    scratch_info: Dict[str, Any],
+    scratch_info: dict[str, Any],
     *,
     offset: int,
     limit: int,
-    provenance: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a bounded page envelope from the result's list-bearing fields."""
     # Find the primary list field to page.  Priority: rows, open_ports,
     # recent_lines, results, candidates, all, items, findings.  Fallback:
@@ -550,7 +551,7 @@ def _build_page(
 
 # --- Naive fallback digest --------------------------------------------------
 
-def _naive_digest(result: Dict[str, Any], scratch_ref: str) -> tuple:
+def _naive_digest(result: dict[str, Any], scratch_ref: str) -> tuple:
     """Build a conservative fallback digest when no adapter is registered.
 
     This is a bounded preview, not a real digest.  It reports:
@@ -631,7 +632,7 @@ _WEB_TOOL_IDS = (
 )
 
 
-def _web_html_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _web_html_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Per-tool digest adapter for web session results.
 
     Extracts structured content from the HTML body: forms (with inputs,
@@ -678,7 +679,7 @@ def _web_html_digest(result: Dict[str, Any]) -> Dict[str, Any]:
     return {"summary": summary, "row_hint_format": hint, "_extracted": extracted}
 
 
-def _extract_html_structure(html: str) -> Dict[str, Any]:
+def _extract_html_structure(html: str) -> dict[str, Any]:
     """Parse HTML and return structured content (forms, links, scripts, metas, CSRF).
 
     Uses BeautifulSoup when available; falls back to regex extraction.
@@ -691,7 +692,7 @@ def _extract_html_structure(html: str) -> Dict[str, Any]:
         return _extract_with_regex(html)
 
 
-def _extract_with_bs4(soup) -> Dict[str, Any]:
+def _extract_with_bs4(soup) -> dict[str, Any]:
     """Structured extraction via BeautifulSoup."""
     forms: list = []
     for form in soup.find_all("form"):
@@ -752,7 +753,7 @@ def _extract_with_bs4(soup) -> Dict[str, Any]:
     }
 
 
-def _extract_with_regex(html: str) -> Dict[str, Any]:
+def _extract_with_regex(html: str) -> dict[str, Any]:
     """Fallback HTML extraction via regex (no BeautifulSoup).
 
     Less accurate but covers the common cases (forms, inputs, links, scripts).

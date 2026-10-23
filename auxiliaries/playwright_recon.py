@@ -37,10 +37,9 @@ Honest limits (docstring is the contract):
 
 from __future__ import annotations
 
-import json
 import time
-from typing import Any, Dict, Optional
-
+from typing import Any
+#TODO: FIX
 import requests
 
 from constants import framework_tool
@@ -55,7 +54,7 @@ class SidecarError(Exception):
     """Raised when the sidecar is unreachable / returns an error envelope."""
 
 
-def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     try:
         r = requests.post(f"{_BASE}{path}", json=payload, timeout=_TIMEOUT)
     except requests.exceptions.ConnectionError as e:
@@ -75,7 +74,7 @@ def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return r.json()
 
 
-def _get(path: str) -> Dict[str, Any]:
+def _get(path: str) -> dict[str, Any]:
     try:
         r = requests.get(f"{_BASE}{path}", timeout=_TIMEOUT)
     except requests.exceptions.ConnectionError as e:
@@ -127,7 +126,7 @@ def playwright_fetch(
     url: str,
     wait_until: str = "networkidle",
     timeout_ms: int = 25000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """One-shot rendered-DOM fetch of ``url`` via the sidecar.
 
     Args:
@@ -169,7 +168,7 @@ def playwright_crawl(
     max_depth: int = 3,
     wall_cap: float = 120.0,
     same_origin: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Start a bounded crawl; returns ``{job_id}`` — poll with crawl_status.
 
     Args:
@@ -198,7 +197,7 @@ def playwright_crawl(
     "job_id from playwright_crawl.",
     next_hints=["report_finding", "extract_js_routes"],
 )
-def playwright_crawl_status(job_id: str) -> Dict[str, Any]:
+def playwright_crawl_status(job_id: str) -> dict[str, Any]:
     """Poll crawl progress by ``job_id``."""
     job_id = (job_id or "").strip()
     if not job_id:
@@ -210,7 +209,7 @@ def playwright_crawl_status(job_id: str) -> Dict[str, Any]:
     "Stop a running playwright_crawl job by job_id. The crawl finishes "
     "in-progress pages and reports partial results via crawl_status.",
 )
-def playwright_crawl_stop(job_id: str) -> Dict[str, Any]:
+def playwright_crawl_stop(job_id: str) -> dict[str, Any]:
     job_id = (job_id or "").strip()
     if not job_id:
         return {"status": "Failed", "error": "job_id required"}

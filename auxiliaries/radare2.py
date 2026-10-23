@@ -87,8 +87,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 from constants import framework_tool, resolve_workspace_root
 from utils.snapshot_cache import (
     build_cache_key,
@@ -104,7 +103,7 @@ logger = logging.getLogger(__name__)
 # 19 slots filled; the 20th is held open for a practice-found gap.
 # Each entry: verb -> (needs_addr, needs_count, count_cap, blurb)
 # ---------------------------------------------------------------------------
-_COMMAND_TABLE: Dict[str, Tuple[bool, bool, int, str]] = {
+_COMMAND_TABLE: dict[str, tuple[bool, bool, int, str]] = {
     # --- analysis / function discovery ---
     "aaa": (False, False, 0, "full analysis (always prepended as opener)"),
     "afl": (False, False, 0, "list discovered functions"),
@@ -133,15 +132,15 @@ _COMMAND_TABLE: Dict[str, Tuple[bool, bool, int, str]] = {
     # slot 20: reserved for a practice-found gap
 }
 
-ALLOWED_COMMANDS: Tuple[str, ...] = tuple(_COMMAND_TABLE.keys())
+ALLOWED_COMMANDS: tuple[str, ...] = tuple(_COMMAND_TABLE.keys())
 
 # Commands that require r2ghidra (checked via preflight).
-_R2GHIDRA_COMMANDS: Tuple[str, ...] = ("pdg",)
+_R2GHIDRA_COMMANDS: tuple[str, ...] = ("pdg",)
 
 # Forbidden characters — the r2 -c parser splits on ';' and newline; the rest
 # are shell-significant chars we reject as defense in depth even though we
 # never use shell=True.
-_FORBIDDEN_CHARS: Tuple[str, ...] = (" ", "!", "`", "$", ">", "|", "&",
+_FORBIDDEN_CHARS: tuple[str, ...] = (" ", "!", "`", "$", ">", "|", "&",
                                       ";", '"', "'", "\n")
 _FORBIDDEN_RE: re.Pattern = re.compile(
     r"[\s!`$>|&;\"'\n]"
@@ -160,7 +159,7 @@ _ADDR_FLAG_RE: re.Pattern = re.compile(r"^[A-Za-z0-9_.$\-]+$")
 _OUTPUT_CAP: int = int(os.getenv("R2_OUTPUT_CAP", str(32 * 1024)))
 
 
-def _truncate_output(raw: str, cap: int) -> Tuple[str, int]:
+def _truncate_output(raw: str, cap: int) -> tuple[str, int]:
     """Head+tail truncation with an explicit omission marker.
 
     Returns ``(output, omitted_bytes)``.  Sub-cap (or disabled, ``cap <= 0``)
@@ -215,7 +214,7 @@ BINARY_TARGETS_ROOT: str = os.getenv(
 
 # Magic-byte signatures for the formats r2 can meaningfully open.  The key
 # is a human-readable format label; the value is (offset, magic_bytes).
-_BINARY_MAGIC: List[Tuple[str, int, bytes]] = [
+_BINARY_MAGIC: list[tuple[str, int, bytes]] = [
     ("ELF",     0, b"\x7fELF"),
     ("PE",      0, b"MZ"),
     ("Mach-O",  0, b"\xfe\xed\xfa\xce"),     # 32-bit BE
@@ -232,7 +231,7 @@ _BINARY_MAGIC: List[Tuple[str, int, bytes]] = [
 _SKIP_DIRS = {".git", ".github", "__pycache__", "node_modules", ".venv", "venv"}
 
 
-def detect_binary_format(path: str) -> Optional[str]:
+def detect_binary_format(path: str) -> str | None:
     """Sniff the first bytes of ``path`` for a known binary magic.
 
     Returns a format label (``"ELF"``, ``"PE"``, ``"Mach-O"`` …) or ``None``
@@ -258,7 +257,7 @@ def detect_binary_format(path: str) -> Optional[str]:
     return None
 
 
-def resolve_binary_target(target: str) -> Optional[str]:
+def resolve_binary_target(target: str) -> str | None:
     """Resolve ``target`` to an absolute path, searching the drop folder.
 
     If ``target`` is already an existing path (absolute or relative to CWD),
@@ -291,8 +290,8 @@ def resolve_binary_target(target: str) -> Optional[str]:
 
 
 def discover_binary_targets(
-    root: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    root: str | None = None,
+) -> list[dict[str, Any]]:
     """Walk the binary drop folder and return recognised binary files.
 
     Yields a list of dicts sorted by path, each with:
@@ -310,7 +309,7 @@ def discover_binary_targets(
     base = root or BINARY_TARGETS_ROOT
     if not os.path.isdir(base):
         return []
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
         for fname in sorted(filenames):
@@ -341,7 +340,7 @@ def discover_binary_targets(
 # ---------------------------------------------------------------------------
 # r2ghidra preflight — cached once per process
 # ---------------------------------------------------------------------------
-_r2ghidra_status: Optional[bool] = None  # None=unchecked, True/False=cached
+_r2ghidra_status: bool | None = None  # None=unchecked, True/False=cached
 
 
 def _r2ghidra_available() -> bool:
@@ -390,7 +389,7 @@ def _r2ghidra_available() -> bool:
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
-def _check_forbidden(value: str, field: str) -> Optional[str]:
+def _check_forbidden(value: str, field: str) -> str | None:
     """Return an error message if ``value`` contains a forbidden char, else None."""
     if value is None:
         return None
@@ -404,7 +403,7 @@ def _check_forbidden(value: str, field: str) -> Optional[str]:
     return None
 
 
-def _validate_addr(addr: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+def _validate_addr(addr: str | None) -> tuple[str | None, str | None]:
     """Validate ``addr`` against the strict charset.
 
     Returns ``(normalized_addr, error_msg)``.  On success ``error_msg`` is
@@ -444,7 +443,7 @@ def _validate_addr(addr: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     )
 
 
-def _validate_count(count: Any, cap: int) -> Tuple[Optional[int], Optional[str]]:
+def _validate_count(count: Any, cap: int) -> tuple[int | None, str | None]:
     """Coerce ``count`` to int and clamp to ``cap``.  Returns (value, error)."""
     if count is None:
         return (None, None)
@@ -462,7 +461,7 @@ def _validate_count(count: Any, cap: int) -> Tuple[Optional[int], Optional[str]]
 # ---------------------------------------------------------------------------
 # Command composition
 # ---------------------------------------------------------------------------
-def _compose_cmd(command: str, addr: Optional[str], count: Optional[int]) -> str:
+def _compose_cmd(command: str, addr: str | None, count: int | None) -> str:
     """Build the r2 ``-c`` string from validated pieces.
 
     The tool owns the ``;`` (chaining ``aaa``) and the ``@`` (seek).  User
@@ -486,9 +485,9 @@ def _compose_cmd(command: str, addr: Optional[str], count: Optional[int]) -> str
 # ---------------------------------------------------------------------------
 # Context-aware next-hints — guide the model's next step
 # ---------------------------------------------------------------------------
-def _hints_for(command: str, output: str) -> List[str]:
+def _hints_for(command: str, output: str) -> list[str]:
     """Return curated next-action hints based on what was just run."""
-    hints: List[str] = []
+    hints: list[str] = []
     if command == "afl":
         hints.append("pdf @ <addr> to disassemble a listed function")
         hints.append("pdg @ <addr> to decompile it (if r2ghidra installed)")
@@ -535,7 +534,7 @@ def _hints_for(command: str, output: str) -> List[str]:
 # The tool
 # ---------------------------------------------------------------------------
 
-def _run_r2_digest(result: Dict[str, Any]) -> Dict[str, Any]:
+def _run_r2_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Digest adapter for ``run_r2`` — command + summary + line count + delta.
 
     The full r2 output (disassembly blobs, string dumps, function lists) is
@@ -621,11 +620,11 @@ def _run_r2_digest(result: Dict[str, Any]) -> Dict[str, Any]:
 def run_r2(
     target: str,
     command: str,
-    addr: Optional[str] = None,
-    count: Optional[int] = None,
+    addr: str | None = None,
+    count: int | None = None,
     cache: bool = True,
     refresh: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run a single radare2 command against a binary and return a structured envelope.
 
     Always opens with ``aaa`` (full analysis) so symbol-dependent commands
@@ -750,7 +749,7 @@ def run_r2(
     # key is computed BEFORE reading so the store step below can reuse it
     # even when lookup was skipped (cache=False, hashing failure, DB error).
     # Any failure in the cache layer degrades silently to a normal run.
-    snapshot_hit: Optional[Dict[str, Any]] = None
+    snapshot_hit: dict[str, Any] | None = None
     content_key = sha256_of_file(target)
     op_key: str = ""
     key: str = ""
@@ -907,10 +906,10 @@ def run_r2(
 # ---------------------------------------------------------------------------
 def _err_envelope(
     target: str,
-    command: Optional[str],
+    command: str | None,
     error: str,
-    r2ghidra: Optional[bool] = None,
-) -> Dict[str, Any]:
+    r2ghidra: bool | None = None,
+) -> dict[str, Any]:
     """Build a consistent error envelope."""
     ghidra = _r2ghidra_available() if r2ghidra is None else r2ghidra
     return {
@@ -931,7 +930,7 @@ def _err_envelope(
     }
 
 
-def _summarize(command: str, clean_lines: List[str], addr: Optional[str]) -> str:
+def _summarize(command: str, clean_lines: list[str], addr: str | None) -> str:
     """One-line human summary of the r2 output."""
     n = len(clean_lines)
     if n == 0:
@@ -948,7 +947,7 @@ def _summarize(command: str, clean_lines: List[str], addr: Optional[str]) -> str
 _TABLE_COMMANDS: frozenset = frozenset({"iz", "izz", "iE", "ii", "is", "iS"})
 
 
-def _delta_note(command: str, clean_lines: List[str], addr: Optional[str]) -> str:
+def _delta_note(command: str, clean_lines: list[str], addr: str | None) -> str:
     """Short note on what this run surfaced (for the model's working memory).
 
     Table-format commands (iz, izz, iE, ii, is, iS) emit a header row and a
@@ -1006,7 +1005,7 @@ def _delta_note(command: str, clean_lines: List[str], addr: Optional[str]) -> st
     next_hints=["run_r2"],
     untrusted_target=True,
 )
-def list_r2_targets() -> Dict[str, Any]:
+def list_r2_targets() -> dict[str, Any]:
     """Enumerate recognised binary files in the drop folder.
 
     Walks :data:`BINARY_TARGETS_ROOT` (default ``binaries/`` at the repo

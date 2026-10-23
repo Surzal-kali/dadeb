@@ -666,7 +666,8 @@ def request_tgs(
             constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value: "aes256",
             constants.EncryptionTypes.des_cbc_md5.value: "des",
         }
-
+#todo: fix Cannot access attribute "value" for class "int"
+#   Attribute "value" is unknown
         if etype == constants.EncryptionTypes.rc4_hmac.value:
             # RC4-HMAC: first 16 bytes = checksum, rest = data
             entry = "$krb5tgs$%d$*%s$%s$%s*$%s$%s" % (

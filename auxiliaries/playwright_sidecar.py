@@ -83,7 +83,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from constants import resolve_workspace_root
@@ -163,7 +163,7 @@ _CHALLENGE_MARKERS = (
 # Scope-gated route handler
 # ---------------------------------------------------------------------------
 
-def _scope_ok(url: str) -> Tuple[bool, str]:
+def _scope_ok(url: str) -> tuple[bool, str]:
     """Live scope verdict for a browser request URL (host-based)."""
     try:
         from utils.scope_gate import check_scan
@@ -175,7 +175,7 @@ def _scope_ok(url: str) -> Tuple[bool, str]:
         return True, f"gate-check-skipped ({type(e).__name__})"
 
 
-def _scan_extra_headers() -> Dict[str, str]:
+def _scan_extra_headers() -> dict[str, str]:
     """Program-mandated identification headers for the ARMED scope (no args).
 
     Zero-arg backstop via ``program_scope.get_armed_scan_config`` — same
@@ -190,16 +190,16 @@ def _scan_extra_headers() -> Dict[str, str]:
         return {}
 
 
-_ACTIVE_SCAN_HEADERS: Dict[str, str] = {}  # snapshot refreshed per /fetch + /crawl/start
+_ACTIVE_SCAN_HEADERS: dict[str, str] = {}  # snapshot refreshed per /fetch + /crawl/start
 
 
-def _refresh_scan_headers() -> Dict[str, str]:
+def _refresh_scan_headers() -> dict[str, str]:
     global _ACTIVE_SCAN_HEADERS
     _ACTIVE_SCAN_HEADERS = _scan_extra_headers()
     return _ACTIVE_SCAN_HEADERS
 
 
-def _scan_rps() -> Optional[float]:
+def _scan_rps() -> float | None:
     """Program-mandated max-requests-per-second from the ARMED scope, if any."""
     try:
         from auxiliaries.program_scope import get_armed_scan_config
@@ -243,10 +243,10 @@ async def _route_handler(route, request) -> None:
         pass  # request already gone (navigation cancelled, etc.)
 
 
-_BLOCKED: List[Dict[str, Any]] = []  # ring buffer; jobs snapshot+trim
+_BLOCKED: list[dict[str, Any]] = []  # ring buffer; jobs snapshot+trim
 
 
-def _snapshot_blocked(since: float) -> List[Dict[str, Any]]:
+def _snapshot_blocked(since: float) -> list[dict[str, Any]]:
     out = [b for b in _BLOCKED if b["ts"] >= since]
     # trim to last 500 to bound memory
     if len(_BLOCKED) > 500:
@@ -273,7 +273,7 @@ _ROUTE_RE = re.compile(
 )
 
 
-def _challenge_detected(title: str, body: str, headers: Dict[str, str]) -> bool:
+def _challenge_detected(title: str, body: str, headers: dict[str, str]) -> bool:
     blob = (title + " " + body[:4000]).lower()
     if any(m in blob for m in _CHALLENGE_MARKERS):
         return True
@@ -281,7 +281,7 @@ def _challenge_detected(title: str, body: str, headers: Dict[str, str]) -> bool:
                for k in headers)
 
 
-async def _extract_envelope(page, since: float) -> Dict[str, Any]:
+async def _extract_envelope(page, since: float) -> dict[str, Any]:
     url = page.url
     status = await _last_status(page)
     title = await page.title()
@@ -289,7 +289,7 @@ async def _extract_envelope(page, since: float) -> Dict[str, Any]:
     text = await page.inner_text("body") if await _has_body(page) else html
     links = sorted({urljoin(url, m) for m in _LINK_RE.findall(html)
                     if m and not m.startswith(("javascript:", "mailto:", "tel:"))})
-    forms: List[Dict[str, Any]] = []
+    forms: list[dict[str, Any]] = []
     for action, inner in _FORM_RE.findall(html):
         inputs = _INPUT_RE.findall(inner)
         forms.append({"action": urljoin(url, action) or url,
@@ -311,7 +311,7 @@ async def _extract_envelope(page, since: float) -> Dict[str, Any]:
     }
 
 
-async def _last_status(page) -> Optional[int]:
+async def _last_status(page) -> int | None:
     try:
         resp = await page.evaluate(
             "() => (performance && performance.getEntriesByType "
@@ -338,7 +338,7 @@ class Sidecar:
         self.pw = None
         self.browser = None
         self.context = None
-        self.jobs: Dict[str, Dict[str, Any]] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}
         self._job_counter = 0
 
     async def start(self) -> None:
@@ -360,7 +360,7 @@ class Sidecar:
         self.browser = await self.pw.chromium.launch(
             headless=True, args=launch_args
         )
-        ctx_kwargs: Dict[str, Any] = {"user_agent": _UA}
+        ctx_kwargs: dict[str, Any] = {"user_agent": _UA}
         if _STORAGE_STATE and os.path.isfile(_STORAGE_STATE):
             ctx_kwargs["storage_state"] = _STORAGE_STATE
         self.context = await self.browser.new_context(**ctx_kwargs)
@@ -387,7 +387,7 @@ class Sidecar:
 
     # -- /fetch ------------------------------------------------------------
     async def fetch(self, url: str, wait_until: str = "networkidle",
-                    timeout_ms: int = _NAV_TIMEOUT_MS) -> Dict[str, Any]:
+                    timeout_ms: int = _NAV_TIMEOUT_MS) -> dict[str, Any]:
         since = time.time()
         scan_headers = _refresh_scan_headers()
         page = await self.new_page()
@@ -407,7 +407,14 @@ class Sidecar:
             return env
         finally:
             await page.close()
-
+            #TODO: FIX
+# Argument of type "str" cannot be assigned to parameter "wait_until" of type "Literal['commit', 'domcontentloaded', 'load', 'networkidle'] | None" in function "goto"
+#   Type "str" is not assignable to type "Literal['commit', 'domcontentloaded', 'load', 'networkidle'] | None"
+#     "str" is not assignable to "None"
+#     "str" is not assignable to type "Literal['commit']"
+#     "str" is not assignable to type "Literal['domcontentloaded']"
+#     "str" is not assignable to type "Literal['load']"
+#     "str" is not assignable to type "Literal['networkidle']"
     # -- /crawl ------------------------------------------------------------
     async def crawl_start(self, url: str, max_pages: int = 25,
                           max_depth: int = 3, wall_cap: float = 120.0,
@@ -431,7 +438,7 @@ class Sidecar:
         job = self.jobs[jid]
         root = job["url"]
         root_host = urlparse(root).netloc
-        queue: List[Tuple[str, int]] = [(root, 0)]
+        queue: list[tuple[str, int]] = [(root, 0)]
         seen = set()
         deadline = job["started"] + job["wall_cap"]
         try:
@@ -483,7 +490,7 @@ class Sidecar:
         finally:
             job["progress"] = 100
 
-    def crawl_status(self, jid: str) -> Dict[str, Any]:
+    def crawl_status(self, jid: str) -> dict[str, Any]:
         j = self.jobs.get(jid)
         if not j:
             return {"ok": False, "error": "unknown job_id"}
@@ -502,7 +509,7 @@ class Sidecar:
             "elapsed_s": round(time.time() - j["started"], 2),
         }
 
-    def crawl_stop(self, jid: str) -> Dict[str, Any]:
+    def crawl_stop(self, jid: str) -> dict[str, Any]:
         j = self.jobs.get(jid)
         if not j:
             return {"ok": False, "error": "unknown job_id"}
@@ -514,7 +521,7 @@ class Sidecar:
 # HTTP wire (asyncio.start_server, JSON line protocol)
 # ---------------------------------------------------------------------------
 
-_sidecar: Optional[Sidecar] = None
+_sidecar: Sidecar | None = None
 
 
 def _json_resp(code: int, obj: Any) -> bytes:
@@ -523,7 +530,7 @@ def _json_resp(code: int, obj: Any) -> bytes:
             f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode() + body
 
 
-async def _read_json(reader: asyncio.StreamReader, max_bytes: int = 1 << 20) -> Dict[str, Any]:
+async def _read_json(reader: asyncio.StreamReader, max_bytes: int = 1 << 20) -> dict[str, Any]:
     raw = await reader.read(max_bytes)
     if not raw:
         return {}
@@ -615,7 +622,7 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             await writer.wait_closed()
         except Exception:
             pass
-
+#TODO: FIX PASS EXCEPTIONS
 
 async def main() -> None:
     global _sidecar

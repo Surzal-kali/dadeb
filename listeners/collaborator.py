@@ -50,8 +50,7 @@ import string
 import struct
 import threading
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool, resolve_workspace_root
 from utils.handles import format_handle, parse_handle
@@ -94,12 +93,12 @@ def _detect_local_ip() -> str:
 
 # --- minimal DNS parser/builder ----------------------------------------------
 
-def _parse_dns_qname(data: bytes) -> Optional[str]:
+def _parse_dns_qname(data: bytes) -> str | None:
     """Extract the QNAME from a DNS query packet (labels → dotted string)."""
     if len(data) < 13:
         return None
     offset = 12  # skip 12-byte header
-    labels: List[str] = []
+    labels: list[str] = []
     while offset < len(data):
         length = data[offset]
         if length == 0:
@@ -141,9 +140,9 @@ class CallbackStore:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._callbacks: List[Dict[str, Any]] = []
+        self._callbacks: list[dict[str, Any]] = []
 
-    def add(self, entry: Dict[str, Any]) -> None:
+    def add(self, entry: dict[str, Any]) -> None:
         with self._lock:
             self._callbacks.append(entry)
             if len(self._callbacks) > _STORE_CAP:
@@ -151,7 +150,7 @@ class CallbackStore:
         self._append_jsonl(entry)
 
     @staticmethod
-    def _append_jsonl(entry: Dict[str, Any]) -> None:
+    def _append_jsonl(entry: dict[str, Any]) -> None:
         """Best-effort durable evidence line under scope/ (gitignored).
 
         Never fatal: a full disk or read-only tree must not take down the
@@ -166,7 +165,7 @@ class CallbackStore:
         except Exception:
             pass
 
-    def poll(self, since: float = 0.0) -> List[Dict[str, Any]]:
+    def poll(self, since: float = 0.0) -> list[dict[str, Any]]:
         with self._lock:
             return [cb for cb in self._callbacks if cb["ts"] >= since]
 
@@ -181,12 +180,12 @@ class _DNSProtocol(asyncio.DatagramProtocol):
     def __init__(self, store: CallbackStore, answer_ip: str):
         self._store = store
         self._answer_ip = answer_ip
-        self._transport: Optional[asyncio.DatagramTransport] = None
+        self._transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:  # type: ignore[override]
         self._transport = transport
 
-    def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:  # type: ignore[override]
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:  # type: ignore[override]
         qname = _parse_dns_qname(data)
         if qname:
             self._store.add({
@@ -215,14 +214,14 @@ class CollaboratorListener:
         # ids minted via generate(), for the token-gated /r/<id> redirect
         # endpoint (public-internet requests to unknown ids get 404, so the
         # endpoint can't be abused as an open redirector).
-        self.active_ids: Dict[str, float] = {}
-        self._http_server: Optional[asyncio.base_events.Server] = None
-        self._https_server: Optional[asyncio.base_events.Server] = None
-        self._dns_transport: Optional[asyncio.DatagramTransport] = None
-        self._tasks: List[asyncio.Task] = []
-        self._handle: Optional[str] = None
+        self.active_ids: dict[str, float] = {}
+        self._http_server: asyncio.base_events.Server | None = None
+        self._https_server: asyncio.base_events.Server | None = None
+        self._dns_transport: asyncio.DatagramTransport | None = None
+        self._tasks: list[asyncio.Task] = []
+        self._handle: str | None = None
 
-    def redirect_decision(self, path: str) -> Tuple[str, str, str]:
+    def redirect_decision(self, path: str) -> tuple[str, str, str]:
         """Token-gated redirect endpoint decision for ``/r/<id>?to=<url>``.
 
         Prefix-tolerant: matches ``/r/<id>`` AND path-prefixed forms such as
@@ -286,7 +285,7 @@ class CollaboratorListener:
             # connects from localhost, so headers are the only forensics).
             host = ""
             ua = ""
-            header_lines: List[str] = []
+            header_lines: list[str] = []
             for line in lines[1:]:
                 if not line:
                     continue
@@ -297,7 +296,7 @@ class CollaboratorListener:
                 elif line.lower().startswith("user-agent:"):
                     ua = line.split(":", 1)[1].strip()
 
-            entry: Dict[str, Any] = {
+            entry: dict[str, Any] = {
                 "proto": proto,
                 "src_ip": addr[0] if addr else "?",
                 "path": path,
@@ -344,14 +343,14 @@ class CollaboratorListener:
             self.store.add(entry)
             writer.write(resp)
             await writer.drain()
-        except (asyncio.TimeoutError, ConnectionResetError, OSError):
+        except (TimeoutError, ConnectionResetError, OSError):
             pass
         finally:
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:
-                pass
+                pass #TODO: discuss possibility of logging here instead of just passing --- IGNORE ---
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -428,7 +427,7 @@ class CollaboratorListener:
             self._handle = None
         return "Collaborator stopped."
 
-    def generate(self) -> Dict[str, str]:
+    def generate(self) -> dict[str, str]:
         """Generate a unique callback ID and return {id, url, dns_name, mode, base}.
 
         Subdomain mode (default): url = http://<id>.<domain>/ — the id rides in
@@ -440,7 +439,7 @@ class CollaboratorListener:
         """
         cid = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
         dns_name = f"{cid}.{self.domain}"
-        result: Dict[str, str] = {
+        result: dict[str, str] = {
             "id": cid,
             "url": f"http://{dns_name}/",
             "dns_name": dns_name,
@@ -463,7 +462,7 @@ class CollaboratorListener:
 
 # --- module-level singleton --------------------------------------------------
 
-_collab: Optional[CollaboratorListener] = None
+_collab: CollaboratorListener | None = None
 
 
 def _get_collab() -> CollaboratorListener:

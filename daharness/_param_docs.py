@@ -8,10 +8,11 @@ to the secretary model instead of being generic placeholders like
 
 import inspect
 import re
-from typing import Any, Callable, Dict
+from collections.abc import Callable
+from typing import Any
 
 
-def parse_param_docs(func: Callable) -> Dict[str, str]:
+def parse_param_docs(func: Callable) -> dict[str, str]:
     """Parse per-parameter descriptions from a function's docstring.
 
     Supports Google-style (``Args:``) and NumPy-style (``Parameters``
@@ -23,7 +24,7 @@ def parse_param_docs(func: Callable) -> Dict[str, str]:
     if not doc:
         return {}
 
-    result: Dict[str, str] = {}
+    result: dict[str, str] = {}
 
     # Google-style: "Args:\n    name: description\n    name2: desc2"
     google_match = re.search(
@@ -147,7 +148,7 @@ def annotation_to_schema_type(annotation: Any) -> str:
     return _TYPE_MAP.get(annotation, "string")
 
 
-def annotation_to_schema_extras(annotation: Any) -> Dict[str, Any]:
+def annotation_to_schema_extras(annotation: Any) -> dict[str, Any]:
     """Return extra JSON Schema constraints an annotation implies, beyond
     its top-level ``type``.
 

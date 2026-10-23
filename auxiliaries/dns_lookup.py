@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import re
 import socket
-from typing import Any, Dict, List, Optional
-
+from typing import Any
+#TODO: FIX. depracated code ^
 from constants import framework_tool
 
 _MAX_HOSTS = 32
@@ -54,7 +54,7 @@ def _validate_hostname(h: str) -> str:
     return h.lower()
 
 
-def _dnspython_query(name: str, rdtype: str, timeout: float) -> List[Dict[str, Any]]:
+def _dnspython_query(name: str, rdtype: str, timeout: float) -> list[dict[str, Any]]:
     """A/AAAA/CNAME via dnspython; returns [{value, ttl}] entries."""
     import dns.exception
     import dns.resolver
@@ -62,7 +62,7 @@ def _dnspython_query(name: str, rdtype: str, timeout: float) -> List[Dict[str, A
     resolver = dns.resolver.Resolver()
     resolver.timeout = timeout
     resolver.lifetime = timeout * 2
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     try:
         answers = resolver.resolve(name, rdtype)
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers):
@@ -76,14 +76,14 @@ def _dnspython_query(name: str, rdtype: str, timeout: float) -> List[Dict[str, A
     return out
 
 
-def _socket_resolve(name: str) -> List[Dict[str, Any]]:
+def _socket_resolve(name: str) -> list[dict[str, Any]]:
     """socket.getaddrinfo fallback (A/AAAA mixed, no TTL)."""
     try:
         infos = socket.getaddrinfo(name, None)
     except (socket.gaierror, OSError):
         return []
     seen: set = set()
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for info in infos:
         ip = info[4][0]
         if ip not in seen:
@@ -92,9 +92,9 @@ def _socket_resolve(name: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _resolve_one(hostname: str, timeout: float) -> Dict[str, Any]:
+def _resolve_one(hostname: str, timeout: float) -> dict[str, Any]:
     name = _validate_hostname(hostname)
-    records: Dict[str, List[Dict[str, Any]]] = {}
+    records: dict[str, list[dict[str, Any]]] = {}
     try:
         import dns.resolver  # noqa: F401 - availability probe
 
@@ -119,7 +119,7 @@ def _resolve_one(hostname: str, timeout: float) -> Dict[str, Any]:
             ]
             records["CNAME_followed"] = alias
         except Exception:  # noqa: BLE001 - best effort alias chase
-            pass
+            pass #TODO: log this? --- IGNORE ---
     return {
         "hostname": name,
         "records": records,
@@ -141,7 +141,7 @@ def _resolve_one(hostname: str, timeout: float) -> Dict[str, Any]:
 def resolve_host(
     hostnames: str,
     timeout: float = 5.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve ``hostnames`` (whitespace/comma separated) to IP records.
 
     Args:
@@ -162,8 +162,8 @@ def resolve_host(
         }
 
     started = time.time()
-    results: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
     for h in parts:
         try:
             results.append(_resolve_one(h, timeout))
@@ -195,10 +195,9 @@ def resolve_host(
     "it claims to be' checks. Passive public-DNS data only.",
     next_hints=["check_scope"],
 )
-def ptr_lookup(ips: str, timeout: float = 5.0) -> Dict[str, Any]:
+def ptr_lookup(ips: str, timeout: float = 5.0) -> dict[str, Any]:
     """Reverse-resolve ``ips`` (whitespace/comma separated, max 32)."""
     import ipaddress
-    import time
 
     raw = (ips or "").strip()
     if not raw:
@@ -207,15 +206,15 @@ def ptr_lookup(ips: str, timeout: float = 5.0) -> Dict[str, Any]:
     if len(parts) > _MAX_HOSTS:
         return {"status": "Failed", "error": f"too many IPs ({len(parts)})"}
 
-    results: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
     for ip_str in parts:
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
             errors.append({"ip": ip_str, "error": "not a valid IP"})
             continue
-        names: List[str] = []
+        names: list[str] = []
         try:
             import dns.reversename
             import dns.resolver

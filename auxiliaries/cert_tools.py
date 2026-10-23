@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 import shutil
 import socket
 import ssl
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from constants import framework_tool, resolve_workspace_root
 
@@ -42,7 +41,7 @@ def _cert_dir() -> Path:
     "or when you want to rotate the cert.",
     next_hints=["framework_health"],
 )
-def generate_certs(common_name: str = "localhost", days: int = 365) -> Dict[str, Any]:
+def generate_certs(common_name: str = "localhost", days: int = 365) -> dict[str, Any]:
     """Generate a self-signed cert + key pair via ``openssl``.
 
     Runs ``openssl req -x509 -newkey rsa:2048`` with no passphrase
@@ -111,7 +110,7 @@ def generate_certs(common_name: str = "localhost", days: int = 365) -> Dict[str,
     "on UDP 53 keep working). The certs directory itself is preserved.",
     next_hints=["framework_health"],
 )
-def clear_certs() -> Dict[str, Any]:
+def clear_certs() -> dict[str, Any]:
     """Remove ``cert.pem`` and ``key.pem`` from the certs directory.
 
     Idempotent: missing files are not an error.  The directory itself is
@@ -138,7 +137,7 @@ def clear_certs() -> Dict[str, Any]:
 # Inspection family — read-only cert analysis
 # ---------------------------------------------------------------------------
 
-def _cert_fields(der: bytes) -> Dict[str, Any]:
+def _cert_fields(der: bytes) -> dict[str, Any]:
     """Extract the inspection field set from a DER-encoded leaf certificate.
 
     The SPKI fields are the money: base64(SHA1(SPKI DER)) is the exact
@@ -249,7 +248,7 @@ def _load_cert_input(cert_data: str) -> tuple:
     "automation-safe checks) use inspect_pem instead.",
     next_hints=["check_scope", "report_finding"],
 )
-def inspect_host(host: str, port: int = 443, sni: str = "", timeout: int = 8) -> Dict[str, Any]:
+def inspect_host(host: str, port: int = 443, sni: str = "", timeout: int = 8) -> dict[str, Any]:
     """Live leaf-certificate inspection of ``host:port``.
 
     Performs ONE TLS handshake. A standard verified handshake is attempted
@@ -335,7 +334,7 @@ def inspect_host(host: str, port: int = 443, sni: str = "", timeout: int = 8) ->
     "arrays without touching the target.",
     next_hints=["report_finding"],
 )
-def inspect_pem(cert_data: str) -> Dict[str, Any]:
+def inspect_pem(cert_data: str) -> dict[str, Any]:
     """Offline certificate inspection from a provided blob or file path.
 
     Args:

@@ -39,7 +39,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import resolve_workspace_root
 
@@ -228,12 +228,12 @@ class ScratchStore:
 
     def store(
         self,
-        result: Dict[str, Any],
+        result: dict[str, Any],
         *,
         agent_id: str,
         tool_id: str,
-        chat_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        chat_id: str | None = None,
+    ) -> dict[str, Any]:
         """Persist a tool result and return a scratch reference envelope.
 
         The envelope is what the projection layer returns to the model when
@@ -325,11 +325,11 @@ class ScratchStore:
         agent_id: str,
         offset: int = 0,
         limit: int = 0,
-        filter_pattern: Optional[str] = None,
-        regex_pattern: Optional[str] = None,
-        fields: Optional[str] = None,
+        filter_pattern: str | None = None,
+        regex_pattern: str | None = None,
+        fields: str | None = None,
         context_lines: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Retrieve a stored result by reference.
 
         Returns the full payload (optionally paged/filtered) or an error
@@ -432,7 +432,7 @@ class ScratchStore:
 
     def list_entries(
         self, agent_id: str, limit: int = 20
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List recent scratch entries for an agent (metadata only, no payloads)."""
         rows = self.conn.execute(
             "SELECT id, tool_id, created_at, expires_at, byte_count "
@@ -451,7 +451,7 @@ class ScratchStore:
             for r in rows
         ]
 
-    def stats(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
+    def stats(self, agent_id: str | None = None) -> dict[str, Any]:
         """Return store statistics (global or per-agent)."""
         if agent_id:
             row = self.conn.execute(
@@ -527,14 +527,14 @@ class ScratchStore:
 
     def _apply_projection(
         self,
-        result: Dict[str, Any],
+        result: dict[str, Any],
         *,
         offset: int,
         limit: int,
-        filter_pattern: Optional[str],
-        regex_pattern: Optional[str] = None,
+        filter_pattern: str | None,
+        regex_pattern: str | None = None,
         context_lines: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Apply paging/filtering/regex to a retrieved result.
 
         This is the generic fallback projection — it operates on the
@@ -568,8 +568,8 @@ class ScratchStore:
                     "error": f"invalid regex pattern {regex_pattern!r}: {exc}",
                 }
 
-        paged_keys: List[str] = []
-        grepped_keys: List[str] = []
+        paged_keys: list[str] = []
+        grepped_keys: list[str] = []
         out = {}
 
         # Threshold for treating a string as grepable text vs. a short scalar.
@@ -605,7 +605,7 @@ class ScratchStore:
             else:
                 out[key] = value
 
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         if paged_keys:
             meta["paged_keys"] = paged_keys
             meta["offset"] = offset
@@ -637,7 +637,7 @@ class ScratchStore:
         return pattern_lower in str(item).lower()
 
     @staticmethod
-    def _item_matches_regex(item: Any, compiled_re: "re.Pattern[str]") -> bool:
+    def _item_matches_regex(item: Any, compiled_re: re.Pattern[str]) -> bool:
         """Regex match on a list item (str or dict)."""
         if isinstance(item, str):
             return compiled_re.search(item) is not None
@@ -648,8 +648,8 @@ class ScratchStore:
     @staticmethod
     def _grep_string(
         text: str,
-        pattern_lower: Optional[str],
-        compiled_re: Optional["re.Pattern[str]"],
+        pattern_lower: str | None,
+        compiled_re: re.Pattern[str] | None,
         context_lines: int,
     ) -> str:
         """Line-based grep on a long string field.
@@ -661,7 +661,7 @@ class ScratchStore:
         filter silently doing nothing).
         """
         lines = text.split("\n")
-        match_indices: List[int] = []
+        match_indices: list[int] = []
         for i, line in enumerate(lines):
             if compiled_re:
                 if compiled_re.search(line):
@@ -683,7 +683,7 @@ class ScratchStore:
             hi = min(len(lines) - 1, idx + context_lines)
             include.update(range(lo, hi + 1))
 
-        result_lines: List[str] = []
+        result_lines: list[str] = []
         prev = -2
         for i in sorted(include):
             if i - prev > 1 and result_lines:
@@ -693,7 +693,7 @@ class ScratchStore:
         return "\n".join(result_lines)
 
     @staticmethod
-    def _parse_ref(ref: str) -> Optional[str]:
+    def _parse_ref(ref: str) -> str | None:
         """Extract the hex ID from a ``scratch:<hex>`` reference."""
         if not isinstance(ref, str):
             return None
@@ -716,7 +716,7 @@ class ScratchStore:
 
 # --- Module-level singleton (lazy) -----------------------------------------
 
-_store: Optional[ScratchStore] = None
+_store: ScratchStore | None = None
 
 
 def get_store() -> ScratchStore:

@@ -39,7 +39,6 @@ Env knobs (all optional):
 from pathlib import Path
 import os
 import shlex
-from typing import Any, Dict, List
 
 from constants import brain_socket_path
 
@@ -85,7 +84,7 @@ def _sanitize_preview(text: str) -> str:
     return text
 
 
-def _user_globals(shell) -> List[tuple]:
+def _user_globals(shell) -> list[tuple]:
     """Return ``[(name, value), ...]`` for user-assigned globals in the shell.
 
     Filters out dunder names, callables (tool wrappers, functions), classes,
@@ -113,7 +112,7 @@ def _user_globals(shell) -> List[tuple]:
     return result
 
 
-def _cell_local_vars(cell_text: str, cursor_row: int = -1) -> List[tuple]:
+def _cell_local_vars(cell_text: str, cursor_row: int = -1) -> list[tuple]:
     """Extract variable names assigned in the current (unexecuted) cell text.
 
     Uses ``ast`` to walk assignment targets — ``ast.parse`` is safe on
@@ -191,7 +190,7 @@ def _cell_local_vars(cell_text: str, cursor_row: int = -1) -> List[tuple]:
     return results
 
 
-def _cell_local_vars_regex(cell_text: str, cursor_row: int = -1) -> List[tuple]:
+def _cell_local_vars_regex(cell_text: str, cursor_row: int = -1) -> list[tuple]:
     """Fallback regex-based extraction when ``ast.parse`` fails.
 
     Catches ``name = ...`` and ``name: type = ...`` patterns.  Less accurate
@@ -291,7 +290,7 @@ def _bottom_toolbar(shell):
                     preview_str += " …"
                 parts.append(("class:toolbar.cellpreview", f" {preview_str} "))
         except Exception:
-            pass
+            print("[toolbar] cell-local vars skipped (IPython version may not support this)")
 
     # ── Committed globals count + compact preview ──────────────────────
     try:
@@ -314,7 +313,7 @@ def _bottom_toolbar(shell):
                 preview_str += " …"
             parts.append(("class:toolbar.preview", f" {preview_str} "))
     except Exception:
-        pass
+        print("[toolbar] committed globals preview skipped (IPython version may not support this)")
 
     # ── Scope-armed marker ─────────────────────────────────────────────
     try:
@@ -322,7 +321,7 @@ def _bottom_toolbar(shell):
         if _is_armed():
             parts.append(("class:toolbar.scope", " [SCOPE ARMED] "))
     except Exception:
-        pass
+        print("[toolbar] scope-armed check skipped (IPython version may not support this)")
 
     # ── Brain socket status ────────────────────────────────────────────
     try:
@@ -332,7 +331,7 @@ def _bottom_toolbar(shell):
         else:
             parts.append(("class:toolbar.brain.down", " brain:✗ "))
     except Exception:
-        pass
+        print("[toolbar] brain socket check skipped (IPython version may not support this)")
 
     return FormattedText(parts)
 
@@ -547,7 +546,7 @@ def _install_toolbar_and_keybindings(shell) -> None:
         pt_app.key_bindings = kb
 
 
-def _ipython_toolbar_styles() -> Dict[str, str]:
+def _ipython_toolbar_styles() -> dict[str, str]:
     """Return Pygments style overrides for the toolbar/rprompt classes.
 
     Merged into ``shell.highlighting_style_overrides`` so the toolbar's

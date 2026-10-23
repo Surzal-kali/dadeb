@@ -71,7 +71,6 @@ def main():
         # Thin CLI passthrough for the pytest macro — same lane the REPL's
         # ``selftest`` command uses; ``--force`` muscle memory is accepted
         # and ignored by run_selftest.
-        from replkit.core import run_selftest as _st
         sys.exit(run_selftest(args[1:]))
 
     elif mode == "scope":

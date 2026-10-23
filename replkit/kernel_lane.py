@@ -17,13 +17,13 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Root-spawned kernel artifacts: chown handling lives here too.
-_KERNEL_NAMESPACE: Dict[str, Any] = {}
+_KERNEL_NAMESPACE: dict[str, Any] = {}
 
 
-def _kernel_owner() -> Optional[tuple]:
+def _kernel_owner() -> tuple | None:
     """Resolve the (uid, gid) to hand root-spawned kernel artifacts to.
 
     The REPL typically runs as root (raw sockets, MSF, ZAP); files it spawns
@@ -119,7 +119,7 @@ def _jupyter_closure_remediation(exc: Exception) -> str:
     )
 
 
-def _launch_kernel(kernel_argv: Optional[List[str]] = None) -> None:
+def _launch_kernel(kernel_argv: list[str] | None = None) -> None:
     """Start a Jupyter kernel with the framework namespace in ``user_ns``.
 
     ``python tool_repl.py --kernel`` (standalone) or spawned by a frontend

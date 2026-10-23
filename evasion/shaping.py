@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
 # Preset values are LISTS so the resolver can merge + de-dup cleanly.
 # Wire semantics live in _WIRE_NOTES so the resolver can self-describe.
-SCAN_SHAPING_PRESETS: Dict[str, Dict[str, Any]] = {
+SCAN_SHAPING_PRESETS: dict[str, dict[str, Any]] = {
     "quiet": {
         "flags": ["-T2", "--max-rate", "50"],
         "lab_only": False,
@@ -76,7 +76,7 @@ SCAN_SHAPING_PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-_WIRE_NOTES: Dict[str, str] = {
+_WIRE_NOTES: dict[str, str] = {
     "-T2": "timing template: slower probe pacing (accuracy/speed trade)",
     "-T4": "timing template: aggressive (speed, no stealth value)",
     "-T1": "timing template: serial probes, slowest",
@@ -98,10 +98,10 @@ class ShapingError(ValueError):
 
 
 def resolve(
-    preset: Optional[str],
+    preset: str | None,
     options: str = "",
-    lab_mode: Optional[bool] = None,
-) -> Dict[str, Any]:
+    lab_mode: bool | None = None,
+) -> dict[str, Any]:
     """Merge a shaping preset with explicit operator options.
 
     Args:
@@ -116,9 +116,9 @@ def resolve(
         lab_mode = os.getenv("SHAPING_LAB_MODE", "").strip().lower() in (
             "1", "true", "yes", "on")
 
-    merged: List[str] = []
+    merged: list[str] = []
     applied = "none"
-    notes: List[str] = []
+    notes: list[str] = []
 
     if preset:
         preset = str(preset).strip().lower()

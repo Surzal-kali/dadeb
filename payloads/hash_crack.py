@@ -61,7 +61,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from constants import framework_tool
 from utils.background_job import get_job, launch_job, poll_job, register_verdict_parser
@@ -90,7 +90,7 @@ _BOX_NOTE = (
 )
 
 
-def _preflight(env_var: str, name: str, candidates: Tuple[str, ...]) -> Optional[str]:
+def _preflight(env_var: str, name: str, candidates: tuple[str, ...]) -> str | None:
     """Resolve a cracker binary; None = not installed (caller reports)."""
     override = os.getenv(env_var, "").strip()
     if override and shutil.which(override):
@@ -127,7 +127,7 @@ def _write_hashfile(hash_input: str) -> str:
     return path
 
 
-def _drop_hashfile(path: Optional[str]) -> None:
+def _drop_hashfile(path: str | None) -> None:
     """Remove a tempfile written by _write_hashfile; ignore failures."""
     if not path:
         return
@@ -137,25 +137,27 @@ def _drop_hashfile(path: Optional[str]) -> None:
         pass
 
 
-def _cleanup_after_exit(proc: "subprocess.Popen", path: str) -> None:
+def _cleanup_after_exit(proc: subprocess.Popen, path: str) -> None:
     """Watcher-thread body: drop the hashfile once the cracker process
     exited.  The cracker has by then fully read the file (or failed on
     its own); nothing races the child's file open."""
     try:
         proc.wait()
-    except Exception:  # noqa: BLE001 - a cleanup watcher must never raise
-        pass
+    except Exception:  # noqa: BLE001 - a cleanup watcher must never raise #TODO: BUT IT SHOULD ATLEAST SAY SOMETHING
+        print("Error occurred while waiting for the cracker process to exit.")
+        print(f"Process: {proc}")
+        print(f"Hashfile: {path}")
     _drop_hashfile(path)
 
 
 def _launch_hash_crack(
-    command: List[str],
+    command: list[str],
     hashfile: str,
     *,
     tool_name: str,
     timeout: float,
     verdict_parser,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """``launch_job`` wrapper that owns the tmp-hashfile lifecycle.
 
     launch_job returns the instant the child is SPAWNED — the child has
@@ -220,15 +222,15 @@ _OPT_VALUE_CONSUMERS = frozenset({
 })
 
 
-def _split_hashcat_positionals(extra: List[str]) -> Tuple[List[str], List[str]]:
+def _split_hashcat_positionals(extra: list[str]) -> tuple[list[str], list[str]]:
     """Split ``extra`` into (options, positionals) for hashcat argv order.
 
     Conservative: a token is a positional (mask/dict) when it does not
     start with ``-`` and is not the value of a known value-taking option.
     Inline ``--opt=value`` forms and bare flags are always options.
     """
-    opts: List[str] = []
-    positionals: List[str] = []
+    opts: list[str] = []
+    positionals: list[str] = []
     expect_value = False
     for tok in extra:
         if expect_value:
@@ -244,7 +246,7 @@ def _split_hashcat_positionals(extra: List[str]) -> Tuple[List[str], List[str]]:
     return opts, positionals
 
 
-def _default_wordlist() -> Optional[str]:
+def _default_wordlist() -> str | None:
     try:
         from utils.wordlists import resolve_wordlist
 
@@ -257,7 +259,7 @@ def _default_wordlist() -> Optional[str]:
 # Mode suggestion (shared with crypto_kit.identify_hash heuristics)
 # --------------------------------------------------------------------------- #
 
-def _suggest_for(hash_string: str) -> Tuple[List[str], List[str], str]:
+def _suggest_for(hash_string: str) -> tuple[list[str], list[str], str]:
     s = (hash_string or "").strip()
     if s.startswith(("$2a$", "$2b$", "$2y$")):
         return (
@@ -300,7 +302,7 @@ def _suggest_for(hash_string: str) -> Tuple[List[str], List[str], str]:
     "guessed.",
     next_hints=["run_hashcat", "run_john", "identify_hash"],
 )
-def suggest_crack_mode(hash_string: str) -> Dict[str, Any]:
+def suggest_crack_mode(hash_string: str) -> dict[str, Any]:
     """Suggest ``-m`` codes and john formats for ``hash_string`` (offline)."""
     modes, formats, note = _suggest_for(hash_string)
     return {
@@ -319,9 +321,9 @@ def suggest_crack_mode(hash_string: str) -> Dict[str, Any]:
 # john the Ripper — launch/poll/show
 # --------------------------------------------------------------------------- #
 
-def _parse_john(log_text: str) -> Dict[str, Any]:
+def _parse_john(log_text: str) -> dict[str, Any]:
     """john stdout: cracked lines look like '<plaintext> (<user-or-hash>)'."""
-    candidates: List[Dict[str, str]] = []
+    candidates: list[dict[str, str]] = []
     for line in log_text.splitlines():
         m = re.match(r"^(\S+)\s+\(([^)]+)\)\s*$", line.strip())
         if m and not m.group(2).startswith("Loaded"):
@@ -350,7 +352,7 @@ def run_john(
     hash_input: str,
     options: str = "",
     wordlist: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Crack ``hash_input`` with john the Ripper (background, poll later).
 
     Args:
@@ -420,7 +422,7 @@ def run_john(
     "status == done, then john_show for the authoritative recovered list.",
     next_hints=["john_show", "report_finding"],
 )
-def john_status(job_id: str) -> Dict[str, Any]:
+def john_status(job_id: str) -> dict[str, Any]:
     """Poll the john job launched by run_john."""
     return poll_job(job_id, tool_name="john")
 
@@ -432,7 +434,7 @@ def john_status(job_id: str) -> Dict[str, Any]:
     "Offline compute only.",
     next_hints=["report_finding"],
 )
-def john_show(hash_input: str, options: str = "") -> Dict[str, Any]:
+def john_show(hash_input: str, options: str = "") -> dict[str, Any]:
     """Run ``john --show`` on ``hash_input`` (one or more hashes).
 
     Args:
@@ -479,9 +481,9 @@ def john_show(hash_input: str, options: str = "") -> Dict[str, Any]:
 # hashcat — launch/poll/show
 # --------------------------------------------------------------------------- #
 
-def _parse_hashcat(log_text: str) -> Dict[str, Any]:
+def _parse_hashcat(log_text: str) -> dict[str, Any]:
     """hashcat stdout: recovered 'hash:plain' pairs + status banner."""
-    pairs: List[Dict[str, str]] = []
+    pairs: list[dict[str, str]] = []
     for line in log_text.splitlines():
         m = re.match(r"^([^\s:]{8,}):(\S{1,128})$", line.strip())
         if m and not re.match(
@@ -518,7 +520,7 @@ def run_hashcat(
     mode: int,
     options: str = "",
     wordlist: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Crack ``hash_input`` with hashcat mode ``mode`` (background).
 
     Args:
@@ -581,7 +583,7 @@ def run_hashcat(
     "lines. Call until done, then hashcat_show for the potfile view.",
     next_hints=["hashcat_show", "report_finding"],
 )
-def hashcat_status(job_id: str) -> Dict[str, Any]:
+def hashcat_status(job_id: str) -> dict[str, Any]:
     """Poll the hashcat job launched by run_hashcat."""
     return poll_job(job_id, tool_name="hashcat")
 
@@ -592,7 +594,7 @@ def hashcat_status(job_id: str) -> Dict[str, Any]:
     "(<30s cap). Offline compute only.",
     next_hints=["report_finding"],
 )
-def hashcat_show(hash_input: str, mode: int) -> Dict[str, Any]:
+def hashcat_show(hash_input: str, mode: int) -> dict[str, Any]:
     """Run ``hashcat -m <mode> --show`` (fast, blocking)."""
     binp = _preflight("HASHCAT_BIN", "hashcat", _HASHCAT_CANDIDATES)
     if not binp:
