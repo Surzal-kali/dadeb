@@ -22,6 +22,7 @@ Inert when ``DACUSTOMS_DIR`` is ``None`` or the directory doesn't exist.
 
 import importlib.abc
 import importlib.machinery
+import os
 import sys
 from pathlib import Path
 
@@ -85,17 +86,97 @@ def register_dacustoms_finder():
 
     Idempotent — safe to call from multiple entry points.
     """
+    status = finder_status()
+    if status["registered"]:
+        return
+    # If not registered but the dir exists and is valid, register now.
+    # (finder_status already logged why if it didn't register.)
+
+
+def finder_status() -> dict:
+    """Trace the full finder registration chain and return a status report.
+
+    This is the answer to "why does ``import dacustoms`` give
+    ModuleNotFoundError?" — the operator can see exactly which step of the
+    chain broke instead of guessing.  Called by the customs doctor provider
+    and safe to call any time (read-only, no side effects).
+
+    Returns a dict with::
+
+        {
+            "registered": bool,      # is the finder in sys.meta_path?
+            "reason": str,           # human-readable status
+            "dir": str | None,       # resolved customs dir (or None)
+            "dir_exists": bool,      # does the dir exist on disk?
+            "init_present": bool,    # does __init__.py exist in the dir?
+            "step": str,             # which step the chain reached
+        }
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
+
+    # Step 1: can we import constants?
     try:
-        from constants import dacustoms_dir
-    except Exception:
-        return  # constants not importable yet (boot ordering) — silent
+        from constants import dacustoms_dir, is_service_home
+    except Exception as exc:
+        return {
+            "registered": False,
+            "reason": f"constants not importable yet (boot ordering): {exc}",
+            "dir": None, "dir_exists": False, "init_present": False,
+            "step": "import_constants",
+        }
+
+    # Step 2: is this a service-user lane?
+    if is_service_home():
+        home = os.path.expanduser("~")
+        return {
+            "registered": False,
+            "reason": (
+                f"running as a service identity (HOME={home}) — "
+                "this lane cannot see the operator's home directory"
+            ),
+            "dir": None, "dir_exists": False, "init_present": False,
+            "step": "service_home_guard",
+        }
+
+    # Step 3: is the lane disabled or does the dir resolve?
     d = dacustoms_dir()
     if d is None:
-        return
-    if not d.is_dir():
-        return
-    # Guard against double registration.
-    for existing in sys.meta_path:
-        if isinstance(existing, DacustomsFinder):
-            return
-    sys.meta_path.append(DacustomsFinder(d))
+        return {
+            "registered": False,
+            "reason": "dacustoms lane disabled (DACUSTOMS_DIR=off)",
+            "dir": None, "dir_exists": False, "init_present": False,
+            "step": "disabled",
+        }
+
+    # Step 4: does the dir exist?
+    dir_exists = d.is_dir()
+    init_present = dir_exists and (d / "__init__.py").is_file()
+
+    # Step 5: is the finder already registered?
+    already = any(isinstance(f, DacustomsFinder) for f in sys.meta_path)
+
+    if already:
+        reason = f"finder registered for {d}"
+        if not init_present:
+            reason += " — but __init__.py is missing, import dacustoms will fail"
+    elif not dir_exists:
+        reason = f"customs dir {d} does not exist — finder not registered"
+    elif not init_present:
+        reason = f"finder not registered: {d}/__init__.py is missing"
+    else:
+        # Register now — all conditions met.
+        sys.meta_path.append(DacustomsFinder(d))
+        already = True
+        reason = f"finder registered for {d}"
+        _log.info("[dacustoms] finder registered for %s", d)
+
+    return {
+        "registered": already,
+        "reason": reason,
+        "dir": str(d),
+        "dir_exists": dir_exists,
+        "init_present": init_present,
+        "step": "done" if already else "not_registered",
+    }

@@ -669,30 +669,39 @@ def _check_customs() -> dict[str, Any]:
     Walks the customs dir with ``ast.parse`` (zero execution — a health
     probe must never import a module that opens sockets).  Reports per-file
     status so the operator sees exactly which file has a syntax error and
-    on which line.  Also verifies the package ``__init__.py`` is present
-    (without it the meta-path finder can't resolve ``dacustoms`` as a
-    package root, and every tool_id loses its prefix).
+    on which line.  Also traces the full finder registration chain so the
+    operator can tell "my module is in the wrong folder" from "the import
+    machinery never wired up."
     """
     try:
-        from constants import dacustoms_dir, is_service_home
-    except Exception:
+        from dacustoms_finder import finder_status
+        from constants import dacustoms_dir
+    except Exception as exc:
         return {
             "available": False, "provider": "customs",
-            "reason": "constants module not importable",
+            "reason": f"dacustoms_finder not importable: {exc}",
             "remediation": "run from the framework root",
         }
 
-    if is_service_home():
+    fst = finder_status()
+
+    # If the finder isn't registered, report exactly why — don't fall
+    # through to a misleading "dir doesn't exist" when the real reason
+    # is "service identity" or "disabled" or "boot ordering."
+    if not fst["registered"]:
         return {
             "available": False, "provider": "customs",
-            "reason": (
-                "running as a service identity (HOME is /var/lib/*) — "
-                "this lane cannot see the operator's home directory"
-            ),
+            "reason": fst["reason"],
             "remediation": (
-                "run from your operator shell: daharness-repl, or "
-                "set DACUSTOMS_DIR explicitly to your ~/.dacustoms path"
+                "mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py"
+                if fst["step"] in ("disabled", "not_registered")
+                and fst["dir"] is not None
+                else "run from your operator shell (daharness-repl) or "
+                     "set DACUSTOMS_DIR explicitly"
+                if fst["step"] == "service_home_guard"
+                else "check framework root is on sys.path"
             ),
+            "finder_status": fst,
         }
 
     d = dacustoms_dir()
