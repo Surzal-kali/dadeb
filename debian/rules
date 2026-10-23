@@ -51,6 +51,11 @@ override_dh_auto_install:
 	  cp -a $$d debian/daharness/usr/share/daharness/; \
 	done
 	cp -a -- *.py debian/daharness/usr/share/daharness/
+	# dacustoms scaffold (operator-authored tools template): ships under
+	# packaging/dacustoms/ so the operator copies it to ~/.dacustoms on
+	# first use. Not a state-root lane — lives in $HOME, not /var/lib.
+	mkdir -p debian/daharness/usr/share/daharness/packaging/dacustoms
+	cp -a packaging/dacustoms/* debian/daharness/usr/share/daharness/packaging/dacustoms/
 	# Bytecode the ENTIRE staging tree, not just vendor/ (purge-residue fix,
 	# 2026-10-20 VM round-trip: runtime imports wrote untracked __pycache__
 	# into the root-owned tree, so dpkg purge left every module dir behind

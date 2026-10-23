@@ -65,6 +65,12 @@ for _LANE in binaries apk; do
 done
 unset _LANE
 
+# dacustoms: operator-authored tools in $HOME (out-of-tree, update-safe).
+# Can't mkdir $HOME here — the operator's UID isn't known at install time.
+# Ship the scaffold template so the operator copies it on first use.
+echo "daharness: dacustoms lane — run 'mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py' to enable operator-authored tools"
+echo "daharness:   example tools at /usr/share/daharness/packaging/dacustoms/"
+
 # Legacy-tree file MODES: UMask=0007 in the units only shapes files created
 # from that unit onward; a state file an older run made under a tighter
 # umask (live 2026-10-20: ids.db 0640) stays group-read-only — the
