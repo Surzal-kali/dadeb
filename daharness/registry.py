@@ -444,7 +444,29 @@ class ToolRegistry(ExecutorMixin):
                 if not include_tests and "tests" in path.parts:
                     continue
 
-                rel_path = path.relative_to(FRAMEWORK_ROOT)
+                # Guard: out-of-tree roots (e.g. ~/.dacustoms) are not
+                # relative to FRAMEWORK_ROOT.  Skip the file with a loud log
+                # instead of letting ValueError euthanize the ENTIRE
+                # discovery pass — one bad path must never kill all indexing.
+                try:
+                    rel_path = path.relative_to(FRAMEWORK_ROOT)
+                except ValueError:
+                    # Out-of-tree file — resolve a synthetic module id from
+                    # the file's own parent.  This lets dacustoms.* and any
+                    # future out-of-tree root index without FRAMEWORK_ROOT
+                    # being an ancestor.  The meta-path finder in
+                    # sitecustomize.py handles the actual import.
+                    root_for_id = next(
+                        (r for r in ALLOWED_TOOL_ROOTS if path.resolve().is_relative_to(r)),
+                        None,
+                    )
+                    if root_for_id is None:
+                        logger.warning(
+                            "[discovery] File %s is not under any allowed tool root — skipping",
+                            path,
+                        )
+                        continue
+                    rel_path = path.resolve().relative_to(root_for_id.resolve())
 
                 # --- PASS 1: Static Analysis (LOCAL_FILE) ---
                 profile = self.extract_module_profile(path)
@@ -633,7 +655,7 @@ class ToolRegistry(ExecutorMixin):
                                 untrusted_target=untrusted_target,
                             )
                         )
-                except Exception as e:
+                except (Exception, SystemExit) as e:
                     logger.error(f"[discovery] Dynamic scan failed for {rel_path}: {e}", exc_info=True)
 
         return manifests

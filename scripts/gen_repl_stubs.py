@@ -69,7 +69,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 # ── Import the framework exactly the way tool_repl.py does ──────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent

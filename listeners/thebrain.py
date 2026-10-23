@@ -215,7 +215,10 @@ def scan_tools(scan_path: str) -> str:
                 for tool_id in registry.tools:
                     if tool_id.startswith(module_path):
                         found_tools.append(f"{tool_id}:{registry.metadata[tool_id]['doc']}")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
+                # SystemExit: a naive script calling argparse.parse_args()
+                # at module level exits 2 — catch it so one bad module
+                # doesn't kill the whole scan pass.
                 print(f"[!] Failed to scan module {module_path}: {e}")
 
         return "SCAN_COMPLETE|" + ",".join(found_tools)
