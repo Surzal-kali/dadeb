@@ -23,7 +23,7 @@ import httpx
 from chromadb.utils import embedding_functions
 from pydantic import ValidationError
 
-from constants import TransportType, resolve_framework_root
+from constants import TransportType, resolve_framework_root, dacustoms_dir
 
 from ._param_docs import parse_param_docs, annotation_to_schema_type, annotation_to_schema_extras
 from .embedding import (
@@ -65,13 +65,60 @@ CHROMA_PORT = int(os.getenv("CHROMA_PORT", "9000"))
 # resolve_framework_root()). The Brain sidecar independently scans the same
 # tree via its own _FRAMEWORK_ROOT, so both walkers agree by construction.
 FRAMEWORK_ROOT = resolve_framework_root()
-ALLOWED_TOOL_ROOTS = [
+
+# In-tree discovery roots — always present.
+_BASE_TOOL_ROOTS = [
     (FRAMEWORK_ROOT / "auxiliaries").resolve(),
     (FRAMEWORK_ROOT / "payloads").resolve(),
     (FRAMEWORK_ROOT / "listeners").resolve(),
     (FRAMEWORK_ROOT / "utils").resolve(),
     (FRAMEWORK_ROOT / "evasion").resolve(),
 ]
+
+
+def _allowed_tool_roots() -> list[Path]:
+    """Discovery roots, including the customs dir when enabled.
+
+    Read per call so env changes (tests, lane switches) take effect without
+    re-import. The customs dir is appended last so in-tree roots keep their
+    scan priority.
+    """
+    roots = list(_BASE_TOOL_ROOTS)
+    d = dacustoms_dir()
+    if d is not None:
+        roots.append(d)
+    return roots
+
+
+# Backwards-compat: many call sites and tests reference ALLOWED_TOOL_ROOTS
+# as a module-level list. Keep it as a property-like alias that resolves
+# through _allowed_tool_roots(). Tests that monkeypatch _BASE_TOOL_ROOTS
+# still work; tests that append to the list directly should use the function.
+class _RootsProxy:
+    """List-like proxy that resolves through _allowed_tool_roots() on every
+    access. Supports iteration, index, containment, and len — the operations
+    the registry and tests actually use."""
+
+    def _roots(self) -> list[Path]:
+        return _allowed_tool_roots()
+
+    def __iter__(self):
+        return iter(self._roots())
+
+    def __contains__(self, item) -> bool:
+        return item in self._roots()
+
+    def __len__(self) -> int:
+        return len(self._roots())
+
+    def __getitem__(self, idx):
+        return self._roots()[idx]
+
+    def __repr__(self) -> str:
+        return repr(self._roots())
+
+
+ALLOWED_TOOL_ROOTS = _RootsProxy()
 
 # Semantic top_k ceiling — bound to the API/MCP search lanes (find_tools
 # clamps per-request top_k with this).
@@ -168,7 +215,16 @@ class ToolRegistry(ExecutorMixin):
     def _resolve_script_path(script_path: str | Path) -> Path:
         candidate = Path(script_path)
         if not candidate.is_absolute():
+            # Try FRAMEWORK_ROOT first (in-tree tools), then the customs
+            # dir (out-of-tree LOCAL_FILE tools whose implementation_path
+            # is relative to ~/.dacustoms, not FRAMEWORK_ROOT).
             candidate = (FRAMEWORK_ROOT / candidate).resolve()
+            if not candidate.is_file():
+                _customs = dacustoms_dir()
+                if _customs is not None:
+                    alt = (_customs / script_path).resolve()
+                    if alt.is_file():
+                        candidate = alt
         candidate = candidate.resolve()
 
         allowed = any(
@@ -406,6 +462,15 @@ class ToolRegistry(ExecutorMixin):
         target_root = Path(root) if root is not None else FRAMEWORK_ROOT
         target_root = target_root.resolve()
 
+        # Ensure the dacustoms finder is registered before PASS 2 tries to
+        # import dacustoms.* modules. Idempotent — no-op if already registered
+        # or if the customs dir is disabled/missing.
+        try:
+            from dacustoms_finder import register_dacustoms_finder
+            register_dacustoms_finder()
+        except Exception:
+            pass
+
         skip_dirs = {
             "venv",
             ".venv",
@@ -445,17 +510,16 @@ class ToolRegistry(ExecutorMixin):
                     continue
 
                 # Guard: out-of-tree roots (e.g. ~/.dacustoms) are not
-                # relative to FRAMEWORK_ROOT.  Skip the file with a loud log
-                # instead of letting ValueError euthanize the ENTIRE
-                # discovery pass — one bad path must never kill all indexing.
+                # relative to FRAMEWORK_ROOT.  Resolve against the matching
+                # allowed root instead of letting ValueError euthanize the
+                # ENTIRE discovery pass — one bad path must never kill all
+                # indexing.  When the file is under the customs dir, the
+                # module_id gets the ``dacustoms.`` prefix so tool_ids are
+                # clearly stamped as user-authored.
+                module_prefix = ""
                 try:
                     rel_path = path.relative_to(FRAMEWORK_ROOT)
                 except ValueError:
-                    # Out-of-tree file — resolve a synthetic module id from
-                    # the file's own parent.  This lets dacustoms.* and any
-                    # future out-of-tree root index without FRAMEWORK_ROOT
-                    # being an ancestor.  The meta-path finder in
-                    # sitecustomize.py handles the actual import.
                     root_for_id = next(
                         (r for r in ALLOWED_TOOL_ROOTS if path.resolve().is_relative_to(r)),
                         None,
@@ -467,6 +531,10 @@ class ToolRegistry(ExecutorMixin):
                         )
                         continue
                     rel_path = path.resolve().relative_to(root_for_id.resolve())
+                    # Check if this root is the customs dir.
+                    _customs = dacustoms_dir()
+                    if _customs is not None and root_for_id.resolve() == _customs.resolve():
+                        module_prefix = "dacustoms"
 
                 # --- PASS 1: Static Analysis (LOCAL_FILE) ---
                 profile = self.extract_module_profile(path)
@@ -495,6 +563,8 @@ class ToolRegistry(ExecutorMixin):
                     params["required"] = required
 
                     module_id = rel_path.with_suffix("").as_posix().replace("/", ".")
+                    if module_prefix:
+                        module_id = f"{module_prefix}.{module_id}"
                     manifests.append(
                         ToolManifest(
                             module_id=module_id,
@@ -514,6 +584,8 @@ class ToolRegistry(ExecutorMixin):
                         sys.path.insert(0, str(FRAMEWORK_ROOT))
 
                     module_name = rel_path.with_suffix("").as_posix().replace("/", ".")
+                    if module_prefix:
+                        module_name = f"{module_prefix}.{module_name}"
                     mod = importlib.import_module(module_name)
 
                     # Candidates: (tool_id, function, is_method)
