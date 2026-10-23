@@ -83,6 +83,15 @@ if _armable and Path(_vendor).is_dir() and _vendor not in sys.path:
 # one kernelspec entry points launch).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# dacustoms finder: sitecustomize does NOT auto-import on bare launches
+# (same reason as the vendor twin above). Register explicitly so the
+# dacustoms.* import prefix resolves in kernel/REPL lanes.
+try:
+    from dacustoms_finder import register_dacustoms_finder
+    register_dacustoms_finder()
+except Exception:
+    pass
+
 # Load .env (same as bootstrap.py) so env-tunable knobs are visible.
 # tool_repl.py is a standalone entry point — without this, os.getenv() only
 # sees the system environment, not .env.

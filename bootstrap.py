@@ -47,6 +47,15 @@ try:
     load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 except Exception:
     pass
+
+# dacustoms finder: register explicitly so the dacustoms.* import prefix
+# resolves in the bootstrap lane (sitecustomize may not auto-load).
+try:
+    from dacustoms_finder import register_dacustoms_finder
+    register_dacustoms_finder()
+except Exception:
+    pass
+
 # --- Setup Logging ---
 logging.basicConfig(
     level=logging.INFO,

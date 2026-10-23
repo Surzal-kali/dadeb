@@ -39,3 +39,19 @@ if _armable and _vendor.is_dir():
 # arm this module through), so tool_repl.py carries the same prepend inline
 # before its heavy imports — one mechanism, two carriers. Keep the two in
 # sync if the arm semantics ever change.
+
+# --- dacustoms meta-path finder ---------------------------------------------
+# Maps the ``dacustoms.*`` import prefix — and ONLY that prefix — to files
+# under ~/.dacustoms (or $DACUSTOMS_DIR).  Never puts $HOME or the customs
+# dir itself on sys.path: a bare dir means one file named ``requests.py``
+# shadows stdlib for the whole process, invisibly, with user-controlled
+# filenames.  The finder class + registration live in ``dacustoms_finder.py``
+# so entry points that launch bare (tool_repl.py, bootstrap.py) can import
+# and register it directly — sitecustomize does NOT auto-import on py3.13/3.14
+# bare launches (same reason as the vendor twin above).  Inert when
+# DACUSTOMS_DIR is None or the directory doesn't exist.
+try:
+    from dacustoms_finder import register_dacustoms_finder
+    register_dacustoms_finder()
+except Exception:
+    pass

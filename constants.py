@@ -284,3 +284,30 @@ def brain_socket_path() -> Path:
         if system_socket.exists():
             return system_socket
     return run_dir / "brain.sock"
+
+
+# --- User customs directory (.dacustoms) -------------------------------------
+# Out-of-tree Python package for operator-authored tools. Lives in $HOME so
+# it survives package updates by construction — dpkg and git never see it.
+# The meta-path finder in sitecustomize.py maps the ``dacustoms.*`` import
+# prefix to files under this directory, so user tool_ids are
+# ``dacustoms.mymod.my_func`` (clear rubber stamp of "user-authored").
+# Empty value disables the lane entirely.
+#
+# Brain inclusion is opt-in via BRAIN_DACUSTOMS=1 (the deb Brain runs as a
+# service user and should not import operator code at boot by default).
+
+def dacustoms_dir() -> Path | None:
+    """Resolve the user customs directory, or ``None`` when disabled.
+
+    ``$DACUSTOMS_DIR`` overrides the default ``~/.dacustoms``. An empty
+    string disables the lane. Read per call so tests can redirect via env.
+    """
+    env = os.getenv("DACUSTOMS_DIR", "").strip()
+    if env == "":
+        # Default: ~/.dacustoms. os.path.expanduser handles the $HOME
+        # resolution and returns the path as-is when there's no home.
+        env = os.path.expanduser("~/.dacustoms")
+    if env.lower() in ("none", "disabled", "off"):
+        return None
+    return Path(env).resolve()
