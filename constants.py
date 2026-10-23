@@ -302,12 +302,34 @@ def dacustoms_dir() -> Path | None:
 
     ``$DACUSTOMS_DIR`` overrides the default ``~/.dacustoms``. An empty
     string disables the lane. Read per call so tests can redirect via env.
+
+    Service-user guard: when ``$HOME`` is a service home (e.g. the deb
+    Brain runs as the ``daharness`` user with home ``/var/lib/daharness``),
+    the default ``~/.dacustoms`` would resolve into the state root —
+    operator content must never live there. Return ``None`` so discovery
+    and the finder skip the lane. The doctor reports the real reason via
+    :func:`is_service_home` before calling this, so the operator gets
+    "running as a service identity" not a silent "disabled".
     """
     env = os.getenv("DACUSTOMS_DIR", "").strip()
-    if env == "":
-        # Default: ~/.dacustoms. os.path.expanduser handles the $HOME
-        # resolution and returns the path as-is when there's no home.
-        env = os.path.expanduser("~/.dacustoms")
     if env.lower() in ("none", "disabled", "off"):
         return None
+    if env == "":
+        home = os.path.expanduser("~")
+        if home.startswith("/var/lib/"):
+            return None
+        env = os.path.join(home, ".dacustoms")
     return Path(env).resolve()
+
+
+def is_service_home() -> bool:
+    """True when ``$HOME`` points at a service-user home.
+
+    The deb Brain runs as the ``daharness`` user with home
+    ``/var/lib/daharness``. The doctor uses this to report honestly:
+    "I'm running as a service identity and can't see your operator home"
+    — not "disabled" (a lie) and not "doesn't exist" (misleading — it
+    might exist, this lane just can't see it).
+    """
+    home = os.path.expanduser("~")
+    return home.startswith("/var/lib/")

@@ -674,7 +674,7 @@ def _check_customs() -> dict[str, Any]:
     package root, and every tool_id loses its prefix).
     """
     try:
-        from constants import dacustoms_dir
+        from constants import dacustoms_dir, is_service_home
     except Exception:
         return {
             "available": False, "provider": "customs",
@@ -682,11 +682,24 @@ def _check_customs() -> dict[str, Any]:
             "remediation": "run from the framework root",
         }
 
+    if is_service_home():
+        return {
+            "available": False, "provider": "customs",
+            "reason": (
+                "running as a service identity (HOME is /var/lib/*) — "
+                "this lane cannot see the operator's home directory"
+            ),
+            "remediation": (
+                "run from your operator shell: daharness-repl, or "
+                "set DACUSTOMS_DIR explicitly to your ~/.dacustoms path"
+            ),
+        }
+
     d = dacustoms_dir()
     if d is None:
         return {
             "available": False, "provider": "customs",
-            "reason": "dacustoms lane disabled (DACUSTOMS_DIR=off or empty)",
+            "reason": "dacustoms lane disabled (DACUSTOMS_DIR=off)",
             "remediation": "mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py",
         }
     if not d.is_dir():
