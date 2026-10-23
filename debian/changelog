@@ -1,3 +1,35 @@
+daharness (0.1.0+pkg14) kali; urgency=medium
+
+  * Modernize typing imports for Python 3.12+ floor (pyupgrade + ruff):
+    List/Dict/Tuple/Optional/Union -> builtins + PEP 604 unions,
+    Callable/Iterable -> collections.abc. 87 files, 260 unused imports
+    removed. All deprecated typing aliases that would break on a future
+    Python removal are gone.
+  * Guard discovery against out-of-tree roots + SystemExit: the unguarded
+    relative_to(FRAMEWORK_ROOT) call no longer euthanizes the entire
+    discovery pass when a file is outside the framework tree. PASS 2 and
+    the Brain's scan_tools now catch SystemExit (argparse.parse_args() at
+    module level exits 2 and punched through the per-module crash
+    isolation).
+  * Add .dacustoms lane — operator-authored tools in ~/.dacustoms:
+    - dacustoms_dir() knob in constants.py (env: DACUSTOMS_DIR, default
+      ~/.dacustoms, off/disabled to disable)
+    - Meta-path finder (dacustoms_finder.py) maps dacustoms.* imports to
+      files under the customs dir; never puts $HOME on sys.path (no
+      stdlib shadowing); registered from sitecustomize + tool_repl +
+      bootstrap (same carrier pattern as the vendor prepend)
+    - Registry discovery includes the customs dir; tool_ids get the
+      dacustoms. prefix (clear rubber stamp of user-authored)
+    - framework_doctor(provider='customs') — tier-1 ast.parse syntax
+      check (zero execution); reports per-file status with line numbers
+    - Scaffold template + example tool + README shipped under
+      packaging/dacustoms/ in the deb tree
+    - postinst echoes the mkdir+touch readiness hint
+    - Brain inclusion is opt-in via BRAIN_DACUSTOMS=1 (off by default:
+      the deb Brain runs as a service user, not the operator)
+
+ -- systempackage <root@kali>  Wed, 22 Oct 2026 12:00:00 +0000
+
 daharness (0.1.0+pkg13) kali; urgency=high
 
   * Hotfix: tree-root sitecustomize.py referenced `_vendor` without
