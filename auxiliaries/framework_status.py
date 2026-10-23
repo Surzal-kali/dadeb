@@ -660,7 +660,88 @@ def _check_postgres() -> dict[str, Any]:
 
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
-                 "snapshot_cache", "postgres", "chroma")
+                 "snapshot_cache", "postgres", "chroma", "customs")
+
+
+def _check_customs() -> dict[str, Any]:
+    """Tier-1 syntax check of operator-authored .dacustoms modules.
+
+    Walks the customs dir with ``ast.parse`` (zero execution — a health
+    probe must never import a module that opens sockets).  Reports per-file
+    status so the operator sees exactly which file has a syntax error and
+    on which line.  Also verifies the package ``__init__.py`` is present
+    (without it the meta-path finder can't resolve ``dacustoms`` as a
+    package root, and every tool_id loses its prefix).
+    """
+    try:
+        from constants import dacustoms_dir
+    except Exception:
+        return {
+            "available": False, "provider": "customs",
+            "reason": "constants module not importable",
+            "remediation": "run from the framework root",
+        }
+
+    d = dacustoms_dir()
+    if d is None:
+        return {
+            "available": False, "provider": "customs",
+            "reason": "dacustoms lane disabled (DACUSTOMS_DIR=off or empty)",
+            "remediation": "mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py",
+        }
+    if not d.is_dir():
+        return {
+            "available": False, "provider": "customs",
+            "reason": f"customs dir {d} does not exist",
+            "remediation": f"mkdir -p {d} && touch {d}/__init__.py",
+        }
+
+    import ast
+    files_checked: list[dict[str, Any]] = []
+    syntax_errors: list[str] = []
+    ok_count = 0
+
+    for py in sorted(d.rglob("*.py")):
+        if "__pycache__" in py.parts:
+            continue
+        rel = py.relative_to(d)
+        try:
+            source = py.read_text(errors="replace")
+            ast.parse(source, filename=str(py))
+            files_checked.append({"file": str(rel), "status": "ok"})
+            ok_count += 1
+        except SyntaxError as exc:
+            detail = f"{exc.msg}"
+            if exc.lineno:
+                detail = f"line {exc.lineno}: {exc.msg}"
+            files_checked.append({
+                "file": str(rel), "status": "syntax_error",
+                "line": exc.lineno, "detail": detail,
+            })
+            syntax_errors.append(f"{rel}:{exc.lineno} — {exc.msg}")
+
+    init_present = (d / "__init__.py").is_file()
+    if not init_present:
+        syntax_errors.insert(
+            0, f"__init__.py missing in {d} — the dacustoms.* prefix won't resolve"
+        )
+
+    available = init_present and not syntax_errors
+    if available:
+        reason = f"{ok_count} module{'s' if ok_count != 1 else ''} checked, all clean"
+        remediation = ""
+    else:
+        reason = f"{ok_count} ok, {len(syntax_errors)} issue{'s' if len(syntax_errors) != 1 else ''}"
+        remediation = "; ".join(syntax_errors)
+
+    return {
+        "available": available, "provider": "customs",
+        "reason": reason,
+        "remediation": remediation,
+        "files": files_checked,
+        "init_present": init_present,
+        "dir": str(d),
+    }
 
 
 def _doctor_gate_error() -> str:
@@ -702,10 +783,11 @@ def _doctor_gate_error() -> str:
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
     "raw-socket capability, msfconsole/msfvenom + RPC port, the scanner "
     "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the ChromaDB "
-    "registry backend, and the engagement-cobweb Postgres lane. Each probe "
+    "registry backend, the engagement-cobweb Postgres lane, and the "
+    "operator-authored .dacustoms modules (tier-1 syntax check). Each probe "
     "returns available/reason/remediation so a 'can I run X' question is "
     "answered before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|chroma). The "
+    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|chroma|customs). "
     "doctor refuses lanes that do not share the framework state root (root, "
     "its owner, or a member of its group) — a non-privileged lane probes "
     "blind and reports false downs, so it gets the refusal and the "
@@ -717,7 +799,7 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
     Args:
         provider: Optional single lane to probe
             (r2|jadx|masscan|msf|scanners|snapshot_cache|
-            postgres|chroma).  Empty = full sweep.
+            postgres|chroma|customs).  Empty = full sweep.
     """
     gate = _doctor_gate_error()
     if gate:
@@ -779,6 +861,8 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
         providers["chroma"] = _check_chroma()
     if p in ("", "postgres"):
         providers["postgres"] = _check_postgres()
+    if p in ("", "customs"):
+        providers["customs"] = _check_customs()
 
     # Contract: every record carries its own provider name (the shape tests
     # assert it, and downstream consumers format it from the record alone).
@@ -791,7 +875,7 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
             "available": False, "provider": p,
             "reason": f"unknown provider {p!r}",
             "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
-                           "snapshot_cache, postgres, chroma",
+                           "snapshot_cache, postgres, chroma, customs",
         }
 
     ok = sum(1 for v in providers.values() if v.get("available"))
