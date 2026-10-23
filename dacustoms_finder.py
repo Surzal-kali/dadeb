@@ -118,7 +118,7 @@ def finder_status() -> dict:
 
     # Step 1: can we import constants?
     try:
-        from constants import dacustoms_dir, is_service_home
+        from constants import dacustoms_dir
     except Exception as exc:
         return {
             "registered": False,
@@ -127,20 +127,7 @@ def finder_status() -> dict:
             "step": "import_constants",
         }
 
-    # Step 2: is this a service-user lane?
-    if is_service_home():
-        home = os.path.expanduser("~")
-        return {
-            "registered": False,
-            "reason": (
-                f"running as a service identity (HOME={home}) — "
-                "this lane cannot see the operator's home directory"
-            ),
-            "dir": None, "dir_exists": False, "init_present": False,
-            "step": "service_home_guard",
-        }
-
-    # Step 3: is the lane disabled or does the dir resolve?
+    # Step 2: is the lane disabled or does the dir resolve?
     d = dacustoms_dir()
     if d is None:
         return {
@@ -150,11 +137,11 @@ def finder_status() -> dict:
             "step": "disabled",
         }
 
-    # Step 4: does the dir exist?
+    # Step 3: does the dir exist?
     dir_exists = d.is_dir()
     init_present = dir_exists and (d / "__init__.py").is_file()
 
-    # Step 5: is the finder already registered?
+    # Step 4: is the finder already registered?
     already = any(isinstance(f, DacustomsFinder) for f in sys.meta_path)
 
     if already:

@@ -687,18 +687,14 @@ def _check_customs() -> dict[str, Any]:
 
     # If the finder isn't registered, report exactly why — don't fall
     # through to a misleading "dir doesn't exist" when the real reason
-    # is "service identity" or "disabled" or "boot ordering."
+    # is "disabled" or "boot ordering."
     if not fst["registered"]:
         return {
             "available": False, "provider": "customs",
             "reason": fst["reason"],
             "remediation": (
-                "mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py"
-                if fst["step"] in ("disabled", "not_registered")
-                and fst["dir"] is not None
-                else "run from your operator shell (daharness-repl) or "
-                     "set DACUSTOMS_DIR explicitly"
-                if fst["step"] == "service_home_guard"
+                f"mkdir -p {fst['dir']} && touch {fst['dir']}/__init__.py"
+                if fst["dir"] is not None
                 else "check framework root is on sys.path"
             ),
             "finder_status": fst,

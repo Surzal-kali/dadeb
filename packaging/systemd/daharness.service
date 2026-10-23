@@ -41,6 +41,13 @@ EnvironmentFile=/etc/daharness/daharness.env
 # (`daharness-pg init` generates /etc/daharness/pg.env); tolerant so the
 # fresh-deb experience is unchanged.
 EnvironmentFile=-/etc/daharness/pg.env
+# No __pycache__ in the shared customs dir — the service user writes into
+# a group-readable path (DACUSTOMS_DIR pinned in daharness.env), and
+# bytecode artifacts would land there with the wrong UID for the operator.
+# Set unconditionally now that the customs lane is lane-agnostic (the
+# BRAIN_DACUSTOMS-conditional PYTHONDONTWRITEBYTECODE was removed with the
+# service-identity guard, 2026-10-23).
+Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/var/lib/daharness
 # Chroma: the registry backend is the daemon's own supervised sidecar now
 # (bootstrap launch_all -> start_chroma_daemon; 2026-10-20 merge of the

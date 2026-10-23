@@ -294,42 +294,32 @@ def brain_socket_path() -> Path:
 # ``dacustoms.mymod.my_func`` (clear rubber stamp of "user-authored").
 # Empty value disables the lane entirely.
 #
-# Brain inclusion is opt-in via BRAIN_DACUSTOMS=1 (the deb Brain runs as a
-# service user and should not import operator code at boot by default).
+# The customs lane is lane-agnostic: every lane (Brain sidecar, in-process
+# fallback, REPL, gateway, kernel) resolves the SAME DACUSTOMS_DIR. On the
+# deb profile the unit EnvironmentFile pins DACUSTOMS_DIR to a group-
+# readable path (default /var/lib/daharness/dacustoms) so the service-user
+# Brain and the operator shell see the same customs modules. An operator
+# who keeps customs in $HOME sets DACUSTOMS_DIR=~/.dacustoms in their shell
+# AND in daharness.env (or a user-profile unit) — both lanes must agree.
 
 def dacustoms_dir() -> Path | None:
     """Resolve the user customs directory, or ``None`` when disabled.
 
     ``$DACUSTOMS_DIR`` overrides the default ``~/.dacustoms``. An empty
-    string disables the lane. Read per call so tests can redirect via env.
+    string (unset) resolves to the default. The sentinels ``none``,
+    ``disabled``, or ``off`` disable the lane. Read per call so tests can
+    redirect via env.
 
-    Service-user guard: when ``$HOME`` is a service home (e.g. the deb
-    Brain runs as the ``daharness`` user with home ``/var/lib/daharness``),
-    the default ``~/.dacustoms`` would resolve into the state root —
-    operator content must never live there. Return ``None`` so discovery
-    and the finder skip the lane. The doctor reports the real reason via
-    :func:`is_service_home` before calling this, so the operator gets
-    "running as a service identity" not a silent "disabled".
+    The default ``~/.dacustoms`` resolves against ``$HOME`` of whichever
+    lane calls this. On the deb profile, pin ``DACUSTOMS_DIR`` in
+    ``/etc/daharness/daharness.env`` so the Brain sidecar (service user)
+    and the operator shell resolve the same path instead of each lane's
+    own ``$HOME`` — the split-brain that made ``framework_doctor`` report
+    customs clean from the in-process fallback and broken from the Brain.
     """
     env = os.getenv("DACUSTOMS_DIR", "").strip()
     if env.lower() in ("none", "disabled", "off"):
         return None
     if env == "":
-        home = os.path.expanduser("~")
-        if home.startswith("/var/lib/"):
-            return None
-        env = os.path.join(home, ".dacustoms")
+        env = os.path.join(os.path.expanduser("~"), ".dacustoms")
     return Path(env).resolve()
-
-
-def is_service_home() -> bool:
-    """True when ``$HOME`` points at a service-user home.
-
-    The deb Brain runs as the ``daharness`` user with home
-    ``/var/lib/daharness``. The doctor uses this to report honestly:
-    "I'm running as a service identity and can't see your operator home"
-    — not "disabled" (a lie) and not "doesn't exist" (misleading — it
-    might exist, this lane just can't see it).
-    """
-    home = os.path.expanduser("~")
-    return home.startswith("/var/lib/")

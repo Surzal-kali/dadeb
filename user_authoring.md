@@ -65,11 +65,18 @@ ergonomics + collision-proofing).
   keep the existing `__module__ == module_name` guard effective.
 - **D2 — knob, not constant:** `DACUSTOMS_DIR` (default `~/.dacustoms`),
   read per call per the constants convention. Empty value disables the lane.
-- **D3 — Brain gets nothing from `$HOME`.** The deb Brain runs as the
-  `daharness` system user; scanning a home/group dir means the service user
-  imports operator code at boot. dacustoms tools route Brain→miss→in-process
-  fallback in the caller's process (documented, jar-style). Session sharing
-  loss is real and known — document it, don't fix it here.
+- **D3 — lane-agnostic, one dir every lane (rescinded 2026-10-23).** The
+  original design gated the customs lane behind a service-identity guard
+  so the deb Brain (service user) would not import operator code from
+  `$HOME`. That guard created a split-brain: `framework_doctor` itself
+  runs on the Brain, so the doctor reported customs clean from the
+  in-process fallback (Brain down) and broken from the Brain (Brain up) —
+  the verdict tracked the socket, not the customs dir. The guard is gone;
+  `DACUSTOMS_DIR` is pinned in `daharness.env` on the deb profile so the
+  service-user Brain and the operator shell resolve the SAME path (default
+  `/var/lib/daharness/dacustoms`, group-readable via the 2770 setgid state
+  root). An operator who keeps customs in `$HOME` sets `DACUSTOMS_DIR` in
+  both their shell and `daharness.env` — both lanes must agree on the path.
 - **D4 — quarantine is visible:** a `dacustoms` provider folded into
   `framework_doctor` (REA-shaped `{available, reason, remediation}`,
   same as r2/jadx/masscan/msf) listing failed/skipped user modules with the
@@ -315,12 +322,12 @@ where they supersede the first-draft wording above.
   remediation strings (`dacustoms/x.py:14 — invalid syntax`).
   Probes stay in-memory (`ast.parse`/`compile()`) — never `py_compile` to
   disk, no pyc artifacts, no snapshot-cache memoization (ms-cheap).
-- **D3 escape hatch + bytecode hygiene:** an operator-opt-in
-  `BRAIN_DACUSTOMS=1` may add the absolute DACUSTOMS_DIR to the Brain scan
-  (documented as "you are feeding operator code to a service identity at
-  boot"). When set, the sidecar runs with `PYTHONDONTWRITEBYTECODE=1` so
-  the service user never drops `__pycache__` into the operator's
-  version-controlled home dir (wrong-UID artifacts in $HOME).
+- **D3 rescinded (2026-10-23) — lane-agnostic resolution:** the
+  `BRAIN_DACUSTOMS=1` escape hatch and the service-identity guard are gone.
+  `DACUSTOMS_DIR` is pinned in `daharness.env` on the deb profile so every
+  lane (Brain, in-process, REPL, gateway, kernel) resolves the same path.
+  The sidecar runs with `PYTHONDONTWRITEBYTECODE=1` regardless (set by the
+  unit) so no lane drops `__pycache__` into a dir it doesn't own.
 - **D6 boundary stated plainly:** module-level import code is operator
   consent (same trust as the operator's shell); the scope gate applies to
   `@framework_tool` calls that code makes later. Static analysis of

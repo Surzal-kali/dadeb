@@ -65,10 +65,24 @@ for _LANE in binaries apk; do
 done
 unset _LANE
 
-# dacustoms: operator-authored tools in $HOME (out-of-tree, update-safe).
-# Can't mkdir $HOME here — the operator's UID isn't known at install time.
-# Ship the scaffold template so the operator copies it on first use.
-echo "daharness: dacustoms lane — run 'mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py' to enable operator-authored tools"
+# dacustoms: operator-authored tools (out-of-tree, update-safe).
+# The deb pins DACUSTOMS_DIR=/var/lib/daharness/dacustoms in daharness.env
+# so the service-user Brain and the operator shell resolve the same path.
+# Create the dir here (state root is provisioned above, group-writable 2770)
+# and seed the package __init__.py so the meta-path finder resolves on
+# first boot. The operator drops .py files in directly — no per-user setup.
+if [ -d /var/lib/daharness ]; then
+    _DC=/var/lib/daharness/dacustoms
+    mkdir -p "$_DC"
+    # Seed __init__.py only if absent — never clobber an operator's edits.
+    if [ ! -f "$_DC/__init__.py" ]; then
+        cp /usr/share/daharness/packaging/dacustoms/__init__.py "$_DC/__init__.py" 2>/dev/null || true
+    fi
+    chown -R daharness:daharness "$_DC" 2>/dev/null || true
+    chmod 2770 "$_DC" 2>/dev/null || true
+    unset _DC
+fi
+echo "daharness: dacustoms lane — drop .py tools in /var/lib/daharness/dacustoms/ (DACUSTOMS_DIR, group-readable)"
 echo "daharness:   example tools at /usr/share/daharness/packaging/dacustoms/"
 
 # Legacy-tree file MODES: UMask=0007 in the units only shapes files created

@@ -100,25 +100,32 @@ framework_doctor(provider='customs')
 Returns per-file status with line numbers. The probe uses `ast.parse` (zero
 execution) — it will never import a module that opens sockets.
 
-## Brain inclusion (opt-in)
+## Lane resolution — one dir, every lane
 
-By default the Brain sidecar does **not** scan your customs dir. Customs tools
-route Brain→miss→in-process fallback in the caller's process. This is
-deliberate: on the deb lane, the Brain runs as the `daharness` service user
-and should not import operator code at boot.
+The customs lane is lane-agnostic: the Brain sidecar, the in-process
+fallback, the REPL, the gateway, and the kernel all resolve the **same**
+`DACUSTOMS_DIR`. There is no "customs under brain vs in-process" split —
+the design that gated the lane behind a service-identity guard was
+rescinded 2026-10-23 because `framework_doctor` itself runs on the Brain,
+so the guard made the doctor report customs clean from the in-process
+fallback (Brain down) and broken from the Brain (Brain up) — a split-brain
+that tracked the socket, not the customs dir.
 
-To opt in (you are feeding operator code to a service identity at boot):
+On the **deb profile**, pin `DACUSTOMS_DIR` in `/etc/daharness/daharness.env`
+so the service-user Brain and the operator shell resolve the same path
+instead of each lane's own `$HOME`:
 
-```bash
-export BRAIN_DACUSTOMS=1
+```
+DACUSTOMS_DIR=/var/lib/daharness/dacustoms
 ```
 
-When set, the sidecar runs with `PYTHONDONTWRITEBYTECODE=1` so the service
-user never drops `__pycache__` into your version-controlled home dir.
+The state root is group-readable (2770 setgid), so the `daharness` group
+sees the customs modules from every lane. An operator who keeps customs in
+`$HOME` sets `DACUSTOMS_DIR=~/.dacustoms` in their shell **and** in
+`daharness.env` — both lanes must agree on the path.
 
 ## Configuration
 
 | Env var | Default | Effect |
 |---|---|---|
-| `DACUSTOMS_DIR` | `~/.dacustoms` | Customs directory path. Empty = default. `off`/`disabled` = lane disabled. |
-| `BRAIN_DACUSTOMS` | unset | Set to `1` to include customs in the Brain's startup scan. |
+| `DACUSTOMS_DIR` | `~/.dacustoms` | Customs directory path. Empty = default (per-lane `$HOME`). `off`/`disabled` = lane disabled. Pin in `daharness.env` on the deb profile so every lane resolves the same dir. |
