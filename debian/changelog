@@ -1,3 +1,16 @@
+daharness (0.1.0+pkg16) kali; urgency=medium
+
+  * Design capture: scope tool-disable list (user_authoring.md, 2026-10-23).
+    Docs-only commit; no code in this version bump.
+    - The scope gate governs wire traffic only — an ARMED gate still permits
+      run_john/run_hashcat on a hash from anywhere (no target IP, nothing
+      check_scan can see). New design: operator-only `scope disable/enable/
+      disabled` CLI verbs storing `disabled_tools` prefixes in the armed-state
+      file; enforced in executor preflight + Brain CALL_TOOL handler;
+      arm()/carry-forward footgun and terminal-lane entrapment refusal pinned.
+
+ -- systempackage <root@kali>  Thu, 23 Oct 2026 15:00:00 +0000
+
 daharness (0.1.0+pkg15) kali; urgency=medium
 
   * Rescind the customs service-identity guard (2026-10-23):

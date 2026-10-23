@@ -5,6 +5,16 @@ the open code review (discovery-roots / engagement cobweb / postinst).
 Implementation begins when review unfreezes, verdict be damned; this doc is
 the spec it follows. Written 2026-10-21.
 
+**Supersession (2026-10-23):** the notebook macro lane (Lane B) supersedes
+`.dacustoms` (Lane A) as the **primary operator tool-authoring surface**.
+`.dacustoms` is demoted to a **helper library** imported by macros, not a
+Brain-discovered tool surface. The identity/traversal problem that broke
+Lane A on the deb profile (the service-user Brain can't traverse the
+operator's `drwx------` `$HOME`) is sidestepped entirely: papermill spawns
+its own kernel per run, so no Brain process ever imports operator code.
+See the Composition story and Sequencing sections below for the revised
+plan. The blue-team adoption angle is noted in the Next steps section.
+
 ---
 
 ## Lane A — `.dacustoms`: user Python modules, out of the tree
@@ -173,31 +183,112 @@ parameters instead of re-typed execute_code blocks.
 
 ---
 
-## Composition story (why the two lanes belong in one doc)
+## Composition story (revised 2026-10-23)
 
-`.dacustoms` is the **helper library**; `notebooks/` is the **orchestration
-that imports from it**. Every lane (REPL, kernel, execute_code,
-papermill-spawned kernel) gets `import dacustoms.<x>` via the same
-sitecustomize/kernelspec hook, so a macro can call operator helpers and
-framework tools in one place, version-controlled in `$HOME`, surviving
-updates by construction. A macro notebook is the parameterized, narrated,
-re-runnable form of a .dacustoms function chain — same author, two lifecycles.
+**Notebook macros are the primary operator tool-authoring lane.** `.dacustoms`
+is a **helper library** that macros import from, not a Brain-discovered tool
+surface. The reason is the identity problem that broke Lane A on the deb
+profile: the Brain runs as the `daharness` service user
+(`HOME=/var/lib/daharness`), the operator's `$HOME` is `drwx------`, and no
+amount of permissions on `.dacustoms` itself fixes the parent-dir traversal
+block. The service user can't even *reach* `~/.dacustoms`.
 
-## Sequencing (review discipline)
+Papermill sidesteps this entirely: it spawns its own kernel per run, the
+kernel resolves `import dacustoms.<x>` via the sitecustomize/kernelspec hook,
+and the kernel runs as whoever launched `notebook_run` — not as the Brain.
+No Brain process ever imports operator code. The framework's tool-discovery
+surface moves from "the Brain semantically searches operator modules" to
+"`notebook_list` parses the `parameters` cell of each macro" — which is
+honest, deterministic, and doesn't ask the Brain a dang thing.
 
-- **Safe to write now (touches nothing under review):** this doc; the
-  `framework_doctor` provider-spec sections; the tracked
-  `notebooks/README.md` + example macro notebook; registry tests for
-  out-of-tree roots; the scaffold template for `dacustoms init`.
-- **Day-of (the review files):** `daharness/registry.py` — append
-  `DACUSTOMS_DIR` to `ALLOWED_TOOL_ROOTS`, guard the implementation-path
-  resolver for absolute paths, guard `relative_to(FRAMEWORK_ROOT)` so one
-  bad path skips one file instead of euthanizing discovery;
-  `pyproject.toml` — add `papermill==2.7.0` to `[jupyter]`;
-  `debian/daharness.postinst` — `notebooks` in the drop-lane loop,
-  `debian/control` — papermill stays out, Suggests at most.
-- **Tracked issue, not part of this feature:** ghost manifest eviction —
-  reindex without `--clear` leaves stale tool_ids after upstream renames.
+A macro notebook is the parameterized, narrated, re-runnable form of an
+operator workflow. `.dacustoms` functions are the reusable helpers it calls.
+Same author, two lifecycles — but the *dispatch surface* is papermill, not
+the Brain.
+
+### What this means for the doctor
+
+`framework_doctor(provider='customs')` stays as a **syntax check**
+(`ast.parse`, zero execution) — it already does this. It's honest about "I
+can check syntax but the Brain doesn't import these; use notebook macros for
+that." The `macros` provider (D12) is the one that answers "can I actually
+run operator workflows."
+
+### What this means for `.dacustoms` provisioning
+
+`.dacustoms` no longer needs to be Brain-readable. It needs to be
+**kernel-readable** — the papermill-spawned kernel and the interactive
+kernel both run as the operator (or whoever invokes `notebook_run`), so
+`~/.dacustoms` in the operator's `$HOME` just works. No ACL, no symlink,
+no state-root pin, no `DACUSTOMS_DIR` in `daharness.env` for the Brain's
+sake. The kernel lane's `.env` may still pin it for dev-checkout
+consistency, but the Brain unit doesn't need it.
+
+The `DACUSTOMS_DIR` pin in `daharness.env` and the `postinst` provisioning
+of `/var/lib/daharness/dacustoms` (added 2026-10-23 for the now-rescinded
+Brain-import path) should be **walked back** when the notebook macro lane
+ships. They're not harmful in the interim, but they're solving a problem
+that the supersession makes moot.
+
+### Blue-team adoption angle
+
+The notebook macro lane gives defensive operators a **floor to adopt the
+framework** without the full offensive tool-chain commitment. A blue-team
+analyst authors a macro notebook that parses logs, enriches IOCs, queries
+the evidence store, and renders a finding — all through the same kernelspec,
+envelope helpers, and `@framework_tool` namespace the red team uses, but
+never touching Brain-discovered attack modules. The macro is the unit of
+work; papermill is the executor; the framework is the library. No scope gate
+on defensive macros that don't contact targets (the gate fires per
+traffic-sending call, same as always). The barrier to entry drops from
+"understand the Brain, the registry, the dispatch envelope" to "write a
+notebook with a parameters cell and call `notebook_run`."
+
+---
+
+## Next steps (revised 2026-10-23)
+
+### Safe to write now (touches nothing under review)
+- This doc (done).
+- `notebooks/README.md` + an example macro notebook (defensive and
+  offensive examples — the defensive one is the blue-team on-ramp).
+- `framework_doctor` provider-spec sections (`macros` provider per D12;
+  `customs` provider stays as syntax check, wording updated to reflect
+  the demotion).
+- Registry tests for out-of-tree roots (still needed — `.dacustoms` is
+  still in `ALLOWED_TOOL_ROOTS` for the kernel lane's import resolution,
+  even though the Brain doesn't import from it).
+- The scaffold template for `dacustoms init` (helper library, not tool
+  surface — the README and example should reflect this).
+
+### Day-of (the review files)
+- `pyproject.toml` — add `papermill==2.7.0` to `[jupyter]`.
+- `debian/daharness.postinst` — `notebooks` in the drop-lane loop (2770,
+  mkdir-if-missing). `debian/control` — papermill Suggests at most.
+- `daharness/registry.py` — guard the implementation-path resolver for
+  absolute paths; guard `relative_to(FRAMEWORK_ROOT)` so one bad path
+  skips one file instead of euthanizing discovery. `DACUSTOMS_DIR`
+  stays in `ALLOWED_TOOL_ROOTS` for kernel-lane import resolution, but
+  the Brain's `BRAIN_SCAN_DIRS` does **not** include it (the Brain never
+  imports operator code in the superseded design).
+- **Walk back the Brain-import provisioning:** remove `DACUSTOMS_DIR`
+  from `/etc/daharness/daharness.env` (the Brain doesn't need it);
+  remove the `postinst` provisioning of
+  `/var/lib/daharness/dacustoms` (operator content lives in `$HOME`);
+  the `PYTHONDONTWRITEBYTECODE=1` in the systemd unit stays (good
+  hygiene regardless).
+- `payloads/notebook_macros.py` — `notebook_list` + `notebook_run`
+  per D9, in `BRAIN_SCAN_DIRS` (payloads/ is already scanned). Sync
+  tool, blocking, worker thread per the blocking-call rule.
+
+### Tracked issues (separate from this feature)
+- Ghost manifest eviction — reindex without `--clear` leaves stale
+  tool_ids after upstream renames.
+- proot raw-socket probe — euid==0 short-circuit (noted in repo memory).
+- Blue-team macro examples — the defensive on-ramp notebook(s) that
+  demonstrate log parsing, IOC enrichment, and finding rendering without
+  any target-contacting tool calls. Ship alongside the offensive example
+  so the framework's dual-use nature is visible from day one.
   Already bites today's users.
 
 ---
@@ -353,3 +444,130 @@ where they supersede the first-draft wording above.
   `untrusted_target=True`. `allow_errors` and timeout are per-call
   parameters with env-derived defaults (`False` / `NOTEBOOK_TIMEOUT`) —
   env knobs are defaults, not ceilings.
+
+---
+
+## Scope tool-disable list (2026-10-23) — operator authority over non-traffic tools
+
+**Status: DESIGN ONLY — nothing wired.** Captured same-day because the gap is
+live: the scenario is a pentester's model ripping `run_john` / `run_hashcat`
+(`payloads/hash_crack.py`) on a hash whose provenance has nothing to do with
+the armed program.
+
+### The gap (why this exists)
+
+The scope gate governs **wire traffic** — every gated call passes
+`check_scan`/`check_send`, which resolves target hosts/IPs against the armed
+manifest. Cracking is **local compute on a hash string**: no target IP, no
+socket, nothing `check_scan` can see. Same blind spot class for other
+non-traffic tools with real-world consequences (offline compute that produces
+credentials, destructive local transforms). The tool budget brakes *volume*
+per turn; it says nothing about *legitimacy*. Network shaping ≠ compute
+authorization. Today, a disarmed... no — even an ARMED gate permits
+`run_hashcat` on any hash pasted from anywhere: a dump the model imagines, an
+artifact from a previous engagement, a file a target tricked it into reading
+(untrusted-target provenance stamps the envelope but stamping is not
+authorization).
+
+### Where the list lives (decision)
+
+**Same armed-state file, new key.** `scope/.armed_packet_scope.json` gains
+`disabled_tools: [<tool_id prefix>, ...]`. No second authority file, no new
+env knob, no split-brain. Inherits for free:
+
+- mtime-checked `_load_state()` — a REPL-side `scope disable` is visible to a
+  running Brain and to the gateway on the very next call (the same mechanism
+  that makes `scope add-ip` live).
+- atomic `_write_state()` (stage + `os.replace`) — no torn half-disabled
+  state.
+- the operator-only authority already enforced in
+  `replkit/operator_cli.py` — no model lane can ever write this key.
+
+**Applies only while armed.** The state file's existence IS the arm, so a
+`scope disable` without `scope on` is refused ("no scope armed") exactly like
+`add_ip`. Disarmed = lab = unrestricted stays the standing posture; the
+disable list is an *engagement posture* control. (Considered and rejected for
+v1: a standalone file that disables even while disarmed — it creates a second
+authority state to keep consistent with arm/purge, and lab-mode means the
+operator is present at the keyboard anyway.)
+
+### CLI surface (operator-only, mirrors the existing verbs)
+
+    scope disable <prefix> [<prefix>...]     # add to the disabled list
+    scope enable <prefix> [<prefix>...]      # remove from it
+    scope disabled                            # list + per-tool verdict probe
+
+`<prefix>` semantics — identical matching rules to `TOOL_BUDGET_TERMINAL_
+ALLOWLIST`:
+
+- **trailing-dot family prefix** (`payloads.hash_crack.`) — kills the whole
+  cracker family in one move (`run_john`, `run_hashcat`, `john_show`,
+  `hashcat_show`, `suggest_crack_mode` — including the offline suggest,
+  because a disabled family that leaks its mode suggestions is a disabled
+  family half-enforced).
+- **bare stem, no dot** — exact tool_id match only (`payloads.hash_crack.run_john`),
+  so a typo can't silently become a family kill.
+
+Footguns to pin at implementation:
+
+- **`arm()` overwrites state wholesale** (`utils/scope_gate.py:arm()` builds
+  a fresh dict). Re-arming must carry an existing `disabled_tools` forward,
+  or `scope on` silently wipes every disable — an operator who disables
+  hashcat, re-arms after a manifest refresh, and assumes the disable survived
+  is the exact drift shape of the 2026-09-20 `--ip-boundary` finding.
+- **terminal-lane entrapment:** refuse `scope disable utils.findings.` /
+  `utils.memory_tools.` without `--force` (tool_budget's terminal-allowlist
+  precedent — a model that can't write findings can't comply with anything).
+- **`scope status`** gains the disabled list so `scope_status()` (the
+  agent-callable kernel wrapper) surfaces it — the model should be able to
+  SEE the posture it's operating under without being able to change it.
+
+### Enforcement points (two, both verified in tree)
+
+1. **`daharness/executor.py:ExecutorMixin.execute_tool` — primary.** Check
+   sits in the preflight block (after `validate_against_manifest`, before any
+   dispatch). This single choke covers the bridge lane (gateway REST
+   `/tools/execute` + MCP), the REPL, and the kernel lane —
+   `replkit/core.py:run_tool` funnels into `execute_tool` — and fires before
+   the Brain socket is ever consulted, so it holds for both transports.
+   Refusal = structured reject envelope (`status: "Failed"`, disable reason +
+   remediation: "operator disabled this tool for the armed scope — ask the
+   operator or use an alternative") + a `_journal_reject` row: the "we never
+   ran that" audit lane preflight already uses.
+2. **`listeners/thebrain.py` CALL_TOOL handler — defense-in-depth.** The
+   Brain has its own `FunctionRegistry` dispatch; a direct-socket caller that
+   skips the registry path must still hit the check there. Same
+   `_load_state()` mtime-cached read — both processes converge on the same
+   list within one call.
+
+**Not an enforcement point:** tool bodies' own `check_scan` calls (that's
+target-scoping — a different layer with different authority); raw
+`subprocess` in kernel cells (execute_code honesty line, unchanged — a
+notebook is the operator's hands); LOCAL_FILE subprocess scripts (the gate
+fires on `@framework_tool` dispatch, not inside arbitrary script bodies —
+disabling the tool_id refuses the manifest before `_execute_local_script`
+spawns).
+
+### What it is NOT
+
+- **Not hash-provenance enforcement.** The list can't tell whether the hash
+  came from an in-scope dump. The real end-state (credentials in the evidence
+  store carrying acquisition source, and the disable list referencing it) is
+  a longer lane; this is the blunt operator brake that exists today. Say so
+  in the refused-call remediation string.
+- **Not a cost limiter.** One authorized-but-huge hashcat run passes this
+  gate and the tool budget legitimately — authorization and budgeting stay
+  separate knobs.
+
+### Sequencing
+
+Touches none of the notebook-macro review files (`pyproject.toml`,
+`postinst`, `daharness/registry.py`) — safe to implement alongside the macro
+lane. Files: `utils/scope_gate.py` (list verbs + `is_disabled(tool_id)`
+verdict helper, mtime-cached like everything else there),
+`daharness/executor.py` (preflight block + reject + journal),
+`listeners/thebrain.py` (CALL_TOOL guard), `replkit/operator_cli.py`
+(CLI verbs + `SCOPE_SUBCOMMANDS` tooltips), `replkit/completer.py`,
+`knowledge/scope_gate.md` (operator docs + the kernel-lane caveat),
+`tests/test_scope_gate.py` (arm-carry-forward, family-vs-exact matching,
+terminal-lane refusal, disarmed refusal, Brain-handler guard).
