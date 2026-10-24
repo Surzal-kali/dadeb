@@ -79,7 +79,6 @@ FRAMEWORK_ROOT = Path(__file__).parent
 MCP_ENDPOINT = os.getenv("MCP_ENDPOINT", "http://127.0.0.1:55553").rstrip("/")
 MCP_STARTUP_DELAY = float(os.getenv("MCP_STARTUP_DELAY", "5"))
 MCP_STARTUP_TIMEOUT = float(os.getenv("MCP_STARTUP_TIMEOUT", "60"))
-MSGRPC_PASSWORD = os.getenv("MSGRPC_PASSWORD", "msfadmin4824")
 MSF_RPC_PORT = int(os.getenv("MSF_RPC_PORT", "55553"))
 
 # OWASP ZAP daemon (auxiliaries/zap.py uses these). The daemon is launched

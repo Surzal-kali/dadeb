@@ -115,14 +115,50 @@ class MetasploitClient:
             await asyncio.sleep(interval)
         return False
 
+    async def _kill_orphan_msfrpcd(self) -> bool:
+        """Kill an already-running msfrpcd we didn't spawn.
+
+        Returns True if a process was found and signalled.  Used by the
+        orphan-recovery path in start_mcp: when the reuse-path auth fails
+        (the daemon was launched with a different password — e.g. a
+        previous harness instance with a rotated token, or a stale
+        daemon from a crashed run), we kill the orphan and relaunch
+        fresh with a new rotated credential instead of slamming into an
+        auth-shaped brick wall.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-f", "[m]sfrpcd",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            killed = proc.returncode == 0
+            if killed:
+                print("[i] killed orphan msfrpcd; waiting for port to clear...")
+                # Give the OS a moment to release the TCP port.
+                await asyncio.sleep(2)
+            return killed
+        except Exception as exc:
+            print(f"[!] failed to kill orphan msfrpcd: {exc}")
+            return False
+
     async def start_mcp(self):
         """
         Start the Metasploit RPC daemon (msfrpcd) and connect to it.
 
-        Launches msfrpcd with a fixed set of credentials and binding options,
-        then polls until the RPC port is accepting connections before
-        creating the MsfRpcClient.
+        Launches msfrpcd with a fresh rotated credential and binding
+        options, then polls until the RPC port is accepting connections
+        before creating the MsfRpcClient.
+
+        Orphan recovery: if msfrpcd is already running but auth fails
+        (the daemon was spawned by a previous harness instance with a
+        different rotated token, or a stale daemon from a crash), we
+        kill the orphan and relaunch fresh instead of failing silently.
         """
+        return await self._start_mcp_attempt(allow_recover=True)
+
+    async def _start_mcp_attempt(self, allow_recover: bool = True):
         user = "msfadmin"
         host = MSF_RPC_HOST
         port = MSF_RPC_PORT
@@ -217,9 +253,28 @@ class MetasploitClient:
                 return launched_process
 
             # Connect to the RPC interface now that the port is confirmed open.
-            self.client = MsfRpcClient(
-                password=pwd, port=port, server=host, username=user
-            )
+            # On the reuse path the daemon may have been spawned with a
+            # different credential (a previous harness instance's rotated
+            # token, or a stale daemon from a crash).  If auth fails we
+            # kill the orphan and relaunch fresh with a new rotated
+            # password — one recovery attempt, then we give up honestly.
+            try:
+                self.client = MsfRpcClient(
+                    password=pwd, port=port, server=host, username=user
+                )
+            except Exception as auth_exc:
+                if not allow_recover:
+                    raise
+                print(f"[!] MSF RPC auth failed against already-running msfrpcd: {auth_exc}")
+                print("[i] attempting orphan recovery: killing stale daemon and relaunching...")
+                killed = await self._kill_orphan_msfrpcd()
+                if not killed:
+                    print("[!] could not kill orphan msfrpcd; giving up.")
+                    self.client = None
+                    return None
+                # Relaunch fresh: _start_mcp_attempt with allow_recover=False
+                # so a second auth failure is surfaced, not buried in a loop.
+                return await self._start_mcp_attempt(allow_recover=False)
             # Return the Process we own so bootstrap can reap it, or None if
             # we reused an already-running msfrpcd (nothing for us to kill).
             return launched_process
