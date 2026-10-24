@@ -33,7 +33,6 @@ if [ -r /etc/daharness/daharness.env ]; then
 	. /etc/daharness/daharness.env
 	set +a
 fi
-fi
 # Embed probe resolves EMBED_URL — the exact knob daharness/embedding.py
 # dials (provider-agnostic: Ollama native /api/embed or OpenAI-compatible
 # /v1/embeddings). OLLAMA_BASE_URL is NOT the embed knob and the deb
