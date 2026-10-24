@@ -44,8 +44,35 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import re
 
 logger = logging.getLogger(__name__)
+
+# Collection names flow into SQLite table identifiers (``vs_<name>``).
+# SQLite does not support parameterized identifiers — the table name is
+# always interpolated into the SQL string. A malicious or careless name
+# like ``"; DROP TABLE vs_tool_inventory; --"`` would reach the parser
+# raw. Validate at construction time: only alphanumeric + underscore
+# are allowed, so the name is always a safe identifier.
+_VALID_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _sanitize_collection_name(name: str) -> str:
+    """Validate a collection name is a safe SQLite identifier.
+
+    Collection names are interpolated into SQL as table identifiers
+    (``vs_<name>``). SQLite has no parameterized-identifier path, so a
+    name containing ``;``, spaces, or quotes would reach the parser raw —
+    enabling DoS (error spam) or error-based information leakage. Reject
+    anything outside ``[A-Za-z0-9_]+`` at construction time so the table
+    name is always a safe identifier.
+    """
+    if not name or not _VALID_NAME.match(name):
+        raise ValueError(
+            f"Invalid collection name {name!r}: must be alphanumeric + "
+            f"underscore only (flows into a SQLite table identifier)"
+        )
+    return name
 
 
 def _serialize_vector(vec: list[float]) -> bytes:
@@ -74,8 +101,12 @@ def _normalize_where(where: dict[str, Any] | None) -> dict[str, Any] | None:
         if isinstance(value, dict) and "$in" in value:
             flat[key] = ("$in", value["$in"])
         elif isinstance(value, dict):
+            # Unsupported operator — degrade to match-NONE, not match-all.
+            # Returning None here would mean "no filter" in _where_matches,
+            # which silently admits every row. A sentinel that _where_matches
+            # treats as always-false is the honest degradation.
             logger.debug("[vector_store] unsupported where operator for %s: %s", key, list(value))
-            return None  # degrade to no-match
+            return {"__unsupported__": True}
         else:
             flat[key] = value
     return flat
@@ -85,6 +116,11 @@ def _where_matches(meta_json: str, where: dict[str, Any] | None) -> bool:
     """Check whether a row's metadata JSON satisfies the ``where`` filter."""
     if not where:
         return True
+    # Sentinel from _normalize_where: an unsupported operator was seen.
+    # Degrade to match-NONE (not match-all) — returning True here would
+    # silently admit every row when the caller asked for a filter.
+    if where.get("__unsupported__"):
+        return False
     try:
         meta = json.loads(meta_json) if meta_json else {}
     except (json.JSONDecodeError, TypeError):
@@ -104,11 +140,13 @@ class Collection:
 
     def __init__(self, conn: sqlite3.Connection, name: str, space: str = "cosine"):
         self._conn = conn
-        self.name = name
+        self.name = _sanitize_collection_name(name)
         self._space = space
         # Table name is the collection name with a prefix to avoid collisions
-        # with SQLite system tables.
-        self._table = f"vs_{name}"
+        # with SQLite system tables. The name is validated (alphanumeric +
+        # underscore only) so it is a safe SQLite identifier — never
+        # interpolated raw from untrusted input.
+        self._table = f"vs_{self.name}"
         self._ensure_table()
         # In-memory vector cache (loaded lazily, invalidated on mutation).
         self._cache: dict[str, np.ndarray] = {}
@@ -388,15 +426,12 @@ class VectorStore:
     ) -> Collection:
         """Get or create a named collection (a SQLite table).
 
-        ``metadata`` is accepted for ChromaDB compat (e.g.
-        ``{"hnsw:space": "cosine"}``) but ignored — we always use cosine.
+        ``metadata`` is accepted for API compatibility but ignored — we
+        always use cosine similarity (no HNSW index to configure).
         """
         with self._lock:
             if name not in self._collections:
-                self._collections[name] = Collection(
-                    self._conn, name,
-                    space=(metadata or {}).get("hnsw:space", "cosine"),
-                )
+                self._collections[name] = Collection(self._conn, name)
             return self._collections[name]
 
     def list_collections(self) -> list[Collection]:

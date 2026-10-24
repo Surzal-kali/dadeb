@@ -283,7 +283,7 @@ async def repl_loop(manifests: list[ToolManifest]):
                     print_manifest(m, verbose=True)
                     print(f"    #{rank}{dist}")
             except Exception as e:
-]                print(f"  Search failed (needs embed endpoint): {e}")
+                print(f"  Search failed (needs embed endpoint): {e}")
 
         elif cmd == "reindex":
             manifests = discover_tools()

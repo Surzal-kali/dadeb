@@ -148,7 +148,7 @@ class MemoryService:
             raise ValueError(f"Collection for namespace '{namespace}' already exists.")
         collection = self.client.get_or_create_collection(
             name=name,
-            metadata={"hnsw:space": "cosine"},
+
         )
 
         self._collections[name] = collection
@@ -171,7 +171,7 @@ class MemoryService:
         if name not in self._collections:
             self._collections[name] = self.client.get_or_create_collection(
                 name=name,
-                metadata={"hnsw:space": "cosine"},
+
             )
         return self._collections[name]
 

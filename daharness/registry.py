@@ -52,11 +52,8 @@ logger = logging.getLogger(__name__)
 # imports the registry (REPL, selftest, gateway, Brain boot) — including
 # the deb lane, which deliberately ships without the knob — and the only
 # live consumer (auxiliaries.framework_status:framework_health) resolves
-# the env itself at call time, where its ollama detail now surfaces the
-# unset→default note. Embeddings ride their own EMBED_URL lane
+# the env itself at call time. Embeddings ride their own EMBED_URL lane
 # (daharness/embedding.py).
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "9000"))
 # --- tool-discovery roots (code checkout, NOT the state root) ---------------
 # Discovery (index, REPL, kernel walker) hangs off the CODE checkout — the
 # deb system profile pins WORKSPACE_ROOT to the state dir (/var/lib/daharness)
@@ -199,7 +196,6 @@ class ToolRegistry(ExecutorMixin):
         self.client = VectorStore(db_path)
         self.collection = self.client.get_or_create_collection(
             name="tool_inventory",
-            metadata={"hnsw:space": "cosine"},
         )
         # Lazily-created class instances for in-process launches of
         # @framework_tool methods (e.g. MetasploitClient, SMBScanner).

@@ -13,37 +13,20 @@ TREE_DIRS := daharness utils auxiliaries payloads listeners evasion replkit test
 override_dh_auto_build:
 	gcc -shared -o listeners/plugins/frameit.so -fPIC listeners/plugins/frameit.c
 
-# Arming gate (pkg13 lesson): a broken sitecustomize.py arm reached pkg12
-# — the `_vendor` NameError rode every /usr/bin wrapper's PYTHONPATH and
-# the vendor prepend silently died until the daemon flapped systemctl
-# exit-1 restarts. tests/test_vendor_arming.py pins both carriers of the
-# arm (sitecustomize + tool_repl shim); run it HERE so a broken arm fails
-# the build before it becomes a deb. Dev-tree lane: no vendor/ present by
-# design, so this stays fast and needs no wheel closure.
-override_dh_auto_test:
-	python3 -m pytest tests/test_vendor_arming.py -q
+# No override_dh_auto_test: the vendor-arming test that ran here was
+# deleted with chromadb (tests/test_vendor_arming.py is gone). The deb's
+# own test suite runs via `daharness-repl selftest` (the operator macro),
+# not at build time — the build lane may be network-isolated.
 
 override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness
-	# Vendored-wheel lane: pytest ships IN the deb for the selftest
-	# macro. chromadb was removed (replaced by a local SQLite + numpy
-	# vector store — no server process, no network dependency at build
-	# time). Lives HERE, not in dh_auto_build: dh's implied sequence runs
-	# dh_prep BETWEEN the build and install overrides, and dh_prep rm -rf's
-	# debian/daharness wholesale — vendor wheels installed in the build
-	# override were wiped before dh_auto_install re-created the staging
-	# tree (observed on VM 2026-10-20: deb size identical with/without).
-	# pip --target is PEP-668-clean (private dir, no system munging);
-	# sitecustomize.py appends <tree>/vendor so apt packages win overlaps.
-	mkdir -p debian/daharness/usr/share/daharness/vendor
-	python3 -m pip install --target \
-	  debian/daharness/usr/share/daharness/vendor \
-	  "pytest==9.1.1"
-	# Bytecode the vendor closure: --no-compile saved build seconds but
-	# charged EVERY import (105-probe floor floor, daemon boots) the full
-	# source parse — vendor .pyc makes repeat imports ~3-6x faster.
-	python3 -m compileall -q -f \
-	  debian/daharness/usr/share/daharness/vendor
+	# No vendored wheels: chromadb was removed (replaced by a local
+	# SQLite + numpy vector store — no server process, no network
+	# dependency at build time). pytest is no longer vendored either —
+	# it rides the apt lane (python3-pytest in Build-Depends) or the
+	# operator's own pip install for the selftest macro. This removes
+	# the last pip-install in the build, making the deb buildable on a
+	# network-isolated host.
 	for d in $(TREE_DIRS); do \
 	  cp -a $$d debian/daharness/usr/share/daharness/; \
 	done
