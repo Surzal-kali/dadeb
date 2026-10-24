@@ -48,8 +48,8 @@ Description: headless orchestration harness for authorized security research
  Privileged lanes (raw sockets, low ports) degrade honestly and are
  documented in daharness-safety(7).
  .
-NOTE: the tool registry uses a local SQLite + numpy vector store
-(no server process, no network dependency at build time);
+ NOTE: the tool registry uses a local SQLite + numpy vector store
+ (no server process, no network dependency at build time).
  python3-mcp
  and python3-pymetasploit3 ride the apt lane pending snapshot-compat
  probes. The Jupyter closure (python3-ipykernel + python3-ipython +
