@@ -91,6 +91,11 @@ def register_dacustoms_finder():
         return
     # If not registered but the dir exists and is valid, register now.
     # (finder_status already logged why if it didn't register.)
+    d = status.get("dir")
+    if d and status.get("dir_exists") and status.get("init_present"):
+        import logging
+        sys.meta_path.append(DacustomsFinder(__import__("pathlib").Path(d)))
+        logging.getLogger(__name__).info("[dacustoms] finder registered for %s", d)
 
 
 def finder_status() -> dict:
@@ -99,7 +104,14 @@ def finder_status() -> dict:
     This is the answer to "why does ``import dacustoms`` give
     ModuleNotFoundError?" — the operator can see exactly which step of the
     chain broke instead of guessing.  Called by the customs doctor provider
-    and safe to call any time (read-only, no side effects).
+    and safe to call any time.
+
+    **Truly read-only:** this function inspects ``sys.meta_path`` and the
+    filesystem but never mutates either. Registration is
+    ``register_dacustoms_finder()``'s job — the two were split so a
+    diagnostic call (doctor, REPL ``info``) can't accidentally self-register
+    as a side effect, and so future maintainers don't find a "read-only"
+    function that appends to ``sys.meta_path`` and think it's a bug to fix.
 
     Returns a dict with::
 
@@ -153,11 +165,13 @@ def finder_status() -> dict:
     elif not init_present:
         reason = f"finder not registered: {d}/__init__.py is missing"
     else:
-        # Register now — all conditions met.
-        sys.meta_path.append(DacustomsFinder(d))
-        already = True
-        reason = f"finder registered for {d}"
-        _log.info("[dacustoms] finder registered for %s", d)
+        # All conditions met but not yet registered — caller should use
+        # register_dacustoms_finder() to register. This function is
+        # read-only; it reports the gap without fixing it.
+        reason = (
+            f"finder not registered (all conditions met for {d} — "
+            "call register_dacustoms_finder() to register)"
+        )
 
     return {
         "registered": already,
