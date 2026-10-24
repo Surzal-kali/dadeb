@@ -40,8 +40,9 @@ import os
 import sqlite3
 import struct
 import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import re
@@ -138,8 +139,17 @@ def _where_matches(meta_json: str, where: dict[str, Any] | None) -> bool:
 class Collection:
     """A named collection of vectors + metadata backed by a SQLite table."""
 
-    def __init__(self, conn: sqlite3.Connection, name: str, space: str = "cosine"):
-        self._conn = conn
+    def __init__(
+        self,
+        get_conn: Callable[[], sqlite3.Connection],
+        name: str,
+        space: str = "cosine",
+    ):
+        # Per-thread connection provider (delegated to VectorStore). Each
+        # call returns the calling thread's own sqlite3.Connection so
+        # concurrent lanes never share a single connection object — which
+        # would raise system errors or corrupt cursor state under load.
+        self._get_conn = get_conn
         self.name = _sanitize_collection_name(name)
         self._space = space
         # Table name is the collection name with a prefix to avoid collisions
@@ -147,22 +157,30 @@ class Collection:
         # underscore only) so it is a safe SQLite identifier — never
         # interpolated raw from untrusted input.
         self._table = f"vs_{self.name}"
-        self._ensure_table()
         # In-memory vector cache (loaded lazily, invalidated on mutation).
         self._cache: dict[str, np.ndarray] = {}
         self._cache_valid = False
-        self._lock = threading.Lock()
+        # RLock (reentrant) so query() can hold the guard and still call
+        # _load_cache() without deadlocking.
+        self._lock = threading.RLock()
+        self._ensure_table()
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """Per-thread connection (resolved lazily via the store's provider)."""
+        return self._get_conn()
 
     def _ensure_table(self) -> None:
-        self._conn.execute(
-            f"""CREATE TABLE IF NOT EXISTS {self._table} (
-                id TEXT PRIMARY KEY,
-                embedding BLOB,
-                document TEXT,
-                metadata TEXT
-            )"""
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                f"""CREATE TABLE IF NOT EXISTS {self._table} (
+                    id TEXT PRIMARY KEY,
+                    embedding BLOB,
+                    document TEXT,
+                    metadata TEXT
+                )"""
+            )
+            self._conn.commit()
 
     def _load_cache(self) -> None:
         """Load all vectors into memory for brute-force search."""
@@ -191,24 +209,25 @@ class Collection:
         """Add entries. Raises if an id already exists (use upsert to replace)."""
         metadatas = metadatas or [None] * len(ids)
         documents = documents or [""] * len(ids)
-        for i, entry_id in enumerate(ids):
-            existing = self._conn.execute(
-                f"SELECT 1 FROM {self._table} WHERE id = ?", (entry_id,)
-            ).fetchone()
-            if existing:
-                raise ValueError(f"Duplicate id: {entry_id}")
-            meta_json = json.dumps(metadatas[i]) if metadatas[i] else None
-            self._conn.execute(
-                f"INSERT INTO {self._table} (id, embedding, document, metadata) VALUES (?, ?, ?, ?)",
-                (
-                    entry_id,
-                    _serialize_vector(embeddings[i]),
-                    documents[i] or "",
-                    meta_json,
-                ),
-            )
-        self._conn.commit()
-        self._invalidate_cache()
+        with self._lock:
+            for i, entry_id in enumerate(ids):
+                existing = self._conn.execute(
+                    f"SELECT 1 FROM {self._table} WHERE id = ?", (entry_id,)
+                ).fetchone()
+                if existing:
+                    raise ValueError(f"Duplicate id: {entry_id}")
+                meta_json = json.dumps(metadatas[i]) if metadatas[i] else None
+                self._conn.execute(
+                    f"INSERT INTO {self._table} (id, embedding, document, metadata) VALUES (?, ?, ?, ?)",
+                    (
+                        entry_id,
+                        _serialize_vector(embeddings[i]),
+                        documents[i] or "",
+                        meta_json,
+                    ),
+                )
+            self._conn.commit()
+            self._invalidate_cache()
 
     def upsert(
         self,
@@ -220,30 +239,32 @@ class Collection:
         """Add or replace entries (INSERT OR REPLACE)."""
         metadatas = metadatas or [None] * len(ids)
         documents = documents or [""] * len(ids)
-        for i, entry_id in enumerate(ids):
-            meta_json = json.dumps(metadatas[i]) if metadatas[i] else None
-            self._conn.execute(
-                f"INSERT OR REPLACE INTO {self._table} (id, embedding, document, metadata) VALUES (?, ?, ?, ?)",
-                (
-                    entry_id,
-                    _serialize_vector(embeddings[i]),
-                    documents[i] or "",
-                    meta_json,
-                ),
-            )
-        self._conn.commit()
-        self._invalidate_cache()
+        with self._lock:
+            for i, entry_id in enumerate(ids):
+                meta_json = json.dumps(metadatas[i]) if metadatas[i] else None
+                self._conn.execute(
+                    f"INSERT OR REPLACE INTO {self._table} (id, embedding, document, metadata) VALUES (?, ?, ?, ?)",
+                    (
+                        entry_id,
+                        _serialize_vector(embeddings[i]),
+                        documents[i] or "",
+                        meta_json,
+                    ),
+                )
+            self._conn.commit()
+            self._invalidate_cache()
 
     def delete(self, ids: list[str]) -> None:
         """Delete entries by id. No-op for missing ids."""
         if not ids:
             return
         placeholders = ",".join("?" * len(ids))
-        self._conn.execute(
-            f"DELETE FROM {self._table} WHERE id IN ({placeholders})", ids
-        )
-        self._conn.commit()
-        self._invalidate_cache()
+        with self._lock:
+            self._conn.execute(
+                f"DELETE FROM {self._table} WHERE id IN ({placeholders})", ids
+            )
+            self._conn.commit()
+            self._invalidate_cache()
 
     def get(
         self,
@@ -261,46 +282,47 @@ class Collection:
         include = include or ["documents", "metadatas", "embeddings"]
         flat_where = _normalize_where(where)
 
-        if ids:
-            placeholders = ",".join("?" * len(ids))
-            rows = self._conn.execute(
-                f"SELECT id, embedding, document, metadata FROM {self._table} "
-                f"WHERE id IN ({placeholders})",
-                ids,
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                f"SELECT id, embedding, document, metadata FROM {self._table}"
-            ).fetchall()
+        with self._lock:
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                rows = self._conn.execute(
+                    f"SELECT id, embedding, document, metadata FROM {self._table} "
+                    f"WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    f"SELECT id, embedding, document, metadata FROM {self._table}"
+                ).fetchall()
 
-        result_ids: list[str] = []
-        result_docs: list[str] = []
-        result_metas: list[dict[str, Any]] = []
-        result_embs: list[list[float]] = []
+            result_ids: list[str] = []
+            result_docs: list[str] = []
+            result_metas: list[dict[str, Any]] = []
+            result_embs: list[list[float]] = []
 
-        for row in rows:
-            entry_id, emb_blob, doc, meta_json = row
-            if flat_where and not _where_matches(meta_json or "", flat_where):
-                continue
-            result_ids.append(entry_id)
+            for row in rows:
+                entry_id, emb_blob, doc, meta_json = row
+                if flat_where and not _where_matches(meta_json or "", flat_where):
+                    continue
+                result_ids.append(entry_id)
+                if "documents" in include:
+                    result_docs.append(doc or "")
+                if "metadatas" in include:
+                    try:
+                        result_metas.append(json.loads(meta_json) if meta_json else {})
+                    except (json.JSONDecodeError, TypeError):
+                        result_metas.append({})
+                if "embeddings" in include:
+                    result_embs.append(_deserialize_vector(emb_blob) if emb_blob else [])
+
+            out: dict[str, Any] = {"ids": result_ids}
             if "documents" in include:
-                result_docs.append(doc or "")
+                out["documents"] = result_docs
             if "metadatas" in include:
-                try:
-                    result_metas.append(json.loads(meta_json) if meta_json else {})
-                except (json.JSONDecodeError, TypeError):
-                    result_metas.append({})
+                out["metadatas"] = result_metas
             if "embeddings" in include:
-                result_embs.append(_deserialize_vector(emb_blob) if emb_blob else [])
-
-        out: dict[str, Any] = {"ids": result_ids}
-        if "documents" in include:
-            out["documents"] = result_docs
-        if "metadatas" in include:
-            out["metadatas"] = result_metas
-        if "embeddings" in include:
-            out["embeddings"] = result_embs
-        return out
+                out["embeddings"] = result_embs
+            return out
 
     def query(
         self,
@@ -319,87 +341,90 @@ class Collection:
         """
         include = include or ["documents", "metadatas", "distances"]
         flat_where = _normalize_where(where)
-        self._load_cache()
 
-        # Load all rows for metadata/document filtering.
-        all_rows = self._conn.execute(
-            f"SELECT id, embedding, document, metadata FROM {self._table}"
-        ).fetchall()
+        with self._lock:
+            self._load_cache()
 
-        # Build filtered candidate list.
-        candidates: list[tuple[str, np.ndarray, str, str]] = []
-        for row in all_rows:
-            entry_id, emb_blob, doc, meta_json = row
-            if flat_where and not _where_matches(meta_json or "", flat_where):
-                continue
-            vec = self._cache.get(entry_id)
-            if vec is None:
-                vec = np.frombuffer(emb_blob, dtype=np.float32) if emb_blob else np.zeros(1, dtype=np.float32)
-            candidates.append((entry_id, vec, doc or "", meta_json or ""))
+            # Load all rows for metadata/document filtering.
+            all_rows = self._conn.execute(
+                f"SELECT id, embedding, document, metadata FROM {self._table}"
+            ).fetchall()
 
-        all_ids: list[list[str]] = []
-        all_docs: list[list[str]] = []
-        all_metas: list[list[dict[str, Any]]] = []
-        all_dists: list[list[float]] = []
-
-        for query_vec in query_embeddings:
-            q = np.asarray(query_vec, dtype=np.float32)
-            q_norm = np.linalg.norm(q)
-            if q_norm == 0:
-                # Zero query vector — can't compute similarity; return empty.
-                all_ids.append([])
-                all_docs.append([])
-                all_metas.append([])
-                all_dists.append([])
-                continue
-
-            scored: list[tuple[float, str, str, str]] = []
-            for entry_id, vec, doc, meta_json in candidates:
-                v_norm = np.linalg.norm(vec)
-                if v_norm == 0:
+            # Build filtered candidate list.
+            candidates: list[tuple[str, np.ndarray, str, str]] = []
+            for row in all_rows:
+                entry_id, emb_blob, doc, meta_json = row
+                if flat_where and not _where_matches(meta_json or "", flat_where):
                     continue
-                cosine = float(np.dot(q, vec) / (q_norm * v_norm))
-                distance = 1.0 - cosine
-                scored.append((distance, entry_id, doc, meta_json))
+                vec = self._cache.get(entry_id)
+                if vec is None:
+                    vec = np.frombuffer(emb_blob, dtype=np.float32) if emb_blob else np.zeros(1, dtype=np.float32)
+                candidates.append((entry_id, vec, doc or "", meta_json or ""))
 
-            scored.sort(key=lambda x: x[0])
-            scored = scored[: max(1, n_results)]
+            all_ids: list[list[str]] = []
+            all_docs: list[list[str]] = []
+            all_metas: list[list[dict[str, Any]]] = []
+            all_dists: list[list[float]] = []
 
-            ids_list: list[str] = []
-            docs_list: list[str] = []
-            metas_list: list[dict[str, Any]] = []
-            dists_list: list[float] = []
-            for dist, entry_id, doc, meta_json in scored:
-                ids_list.append(entry_id)
-                if "documents" in include:
-                    docs_list.append(doc)
-                if "metadatas" in include:
-                    try:
-                        metas_list.append(json.loads(meta_json) if meta_json else {})
-                    except (json.JSONDecodeError, TypeError):
-                        metas_list.append({})
-                if "distances" in include:
-                    dists_list.append(round(dist, 6))
+            for query_vec in query_embeddings:
+                q = np.asarray(query_vec, dtype=np.float32)
+                q_norm = np.linalg.norm(q)
+                if q_norm == 0:
+                    # Zero query vector — can't compute similarity; return empty.
+                    all_ids.append([])
+                    all_docs.append([])
+                    all_metas.append([])
+                    all_dists.append([])
+                    continue
 
-            all_ids.append(ids_list)
-            all_docs.append(docs_list)
-            all_metas.append(metas_list)
-            all_dists.append(dists_list)
+                scored: list[tuple[float, str, str, str]] = []
+                for entry_id, vec, doc, meta_json in candidates:
+                    v_norm = np.linalg.norm(vec)
+                    if v_norm == 0:
+                        continue
+                    cosine = float(np.dot(q, vec) / (q_norm * v_norm))
+                    distance = 1.0 - cosine
+                    scored.append((distance, entry_id, doc, meta_json))
 
-        out: dict[str, Any] = {"ids": all_ids}
-        if "documents" in include:
-            out["documents"] = all_docs
-        if "metadatas" in include:
-            out["metadatas"] = all_metas
-        if "distances" in include:
-            out["distances"] = all_dists
-        return out
+                scored.sort(key=lambda x: x[0])
+                scored = scored[: max(1, n_results)]
+
+                ids_list: list[str] = []
+                docs_list: list[str] = []
+                metas_list: list[dict[str, Any]] = []
+                dists_list: list[float] = []
+                for dist, entry_id, doc, meta_json in scored:
+                    ids_list.append(entry_id)
+                    if "documents" in include:
+                        docs_list.append(doc)
+                    if "metadatas" in include:
+                        try:
+                            metas_list.append(json.loads(meta_json) if meta_json else {})
+                        except (json.JSONDecodeError, TypeError):
+                            metas_list.append({})
+                    if "distances" in include:
+                        dists_list.append(round(dist, 6))
+
+                all_ids.append(ids_list)
+                all_docs.append(docs_list)
+                all_metas.append(metas_list)
+                all_dists.append(dists_list)
+
+            out: dict[str, Any] = {"ids": all_ids}
+            if "documents" in include:
+                out["documents"] = all_docs
+            if "metadatas" in include:
+                out["metadatas"] = all_metas
+            if "distances" in include:
+                out["distances"] = all_dists
+            return out
 
     def count(self) -> int:
-        row = self._conn.execute(
-            f"SELECT COUNT(*) FROM {self._table}"
-        ).fetchone()
-        return int(row[0])
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM {self._table}"
+            ).fetchone()
+            return int(row[0])
 
 
 class VectorStore:
@@ -410,16 +435,73 @@ class VectorStore:
     dependency, no HNSW index — brute-force cosine similarity on an
     in-memory numpy matrix is sub-millisecond at the harness's scale
     (~200 tool entries, ~768-dim vectors).
+
+    Concurrency: each thread gets its own ``sqlite3.Connection`` via a
+    ``threading.local`` slot, so concurrent lanes never share a single
+    connection object (which would raise system errors under load). WAL
+    mode allows concurrent readers + one writer; ``busy_timeout`` makes
+    writers wait instead of failing instantly on lock contention. The
+    WAL switch itself is retried on cold-start lock races.
     """
+
+    # SQLite busy-timeout (ms): how long a writer waits for a lock before
+    # raising SQLITE_BUSY. 5 s is generous for the harness's scale.
+    _BUSY_TIMEOUT_MS = 5000
+    # WAL cold-start retry: the first connection on a fresh or recovering
+    # store may race another process holding the recovery lock.
+    _WAL_RETRIES = 5
+    _WAL_RETRY_BASE_SLEEP = 0.1
 
     def __init__(self, path: str):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._local = threading.local()
         self._collections: dict[str, Collection] = {}
         self._lock = threading.Lock()
+        # Prime the calling thread's connection eagerly so WAL is set up
+        # before any collection is created (and before another thread
+        # races us on the journal-mode switch).
+        self._local.conn = self._connect()
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open a new per-thread connection with WAL + busy_timeout."""
+        conn = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+            timeout=self._BUSY_TIMEOUT_MS / 1000,
+        )
+        conn.execute(f"PRAGMA busy_timeout={self._BUSY_TIMEOUT_MS}")
+        # WAL switch with cold-start retry: on a fresh or recovering store
+        # another process (or the hot recovery lock) may hold the DB,
+        # making the journal-mode switch fail with "database is locked".
+        # Retry a few times before giving up — a failure here leaves the
+        # store in default rollback-journal mode, which serializes all
+        # readers and is the exact contention we're trying to avoid.
+        for attempt in range(self._WAL_RETRIES):
+            try:
+                row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                if row and str(row[0]).lower() == "wal":
+                    break
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and attempt < self._WAL_RETRIES - 1:
+                    time.sleep(self._WAL_RETRY_BASE_SLEEP * (attempt + 1))
+                    continue
+                raise
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """Per-thread connection (lazily created, cached in thread-local)."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._connect()
+            self._local.conn = conn
+        return conn
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Per-thread connection provider (passed to Collection instances)."""
+        return self._conn
 
     def get_or_create_collection(
         self, name: str, metadata: dict[str, Any] | None = None,
@@ -431,21 +513,32 @@ class VectorStore:
         """
         with self._lock:
             if name not in self._collections:
-                self._collections[name] = Collection(self._conn, name)
+                self._collections[name] = Collection(self._get_conn, name)
             return self._collections[name]
 
     def list_collections(self) -> list[Collection]:
         """Return all known collections. Mirrors ChromaDB's API."""
-        # Discover any tables that exist in the DB but aren't cached.
-        rows = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vs_%'"
-        ).fetchall()
-        for row in rows:
-            table_name = row[0]
-            coll_name = table_name[3:]  # strip "vs_" prefix
-            if coll_name not in self._collections:
-                self._collections[coll_name] = Collection(self._conn, coll_name)
-        return list(self._collections.values())
+        with self._lock:
+            # Discover any tables that exist in the DB but aren't cached.
+            rows = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vs_%'"
+            ).fetchall()
+            for row in rows:
+                table_name = row[0]
+                coll_name = table_name[3:]  # strip "vs_" prefix
+                if coll_name not in self._collections:
+                    self._collections[coll_name] = Collection(self._get_conn, coll_name)
+            return list(self._collections.values())
 
     def close(self) -> None:
-        self._conn.close()
+        """Close the calling thread's connection.
+
+        With per-thread connections, only the current thread's connection
+        is closed; other threads' connections are left for their own
+        ``close()`` call or process teardown. This is fine for the harness
+        shutdown path (the process exits after).
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
