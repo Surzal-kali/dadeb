@@ -28,6 +28,17 @@
 # OK/STALE/SKIP without writing.
 set -u
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
+# Group-share writes: files this lane creates (tool_registry.db + its
+# -wal/-shm sidecars) take g=rw (0007) and — inside the setgid state
+# root (postinst/units shape it 2770) — the daharness group. Without
+# this the index run inherits the operator shell's umask (022 on WSL,
+# 002 on native Kali), so the DB lands 644/664 and the next lane that
+# opens it in WAL mode cannot create the -wal/-shm sidecars — SQLite
+# reports "attempt to write a readonly database" (live on WSL after a
+# wsl --update, 2026-10-24). Every other wrapper sets this; the index
+# wrapper was missed. The setgid dir cascade alone is not enough: SQLite
+# needs the main DB file itself group-writable for its WAL dance.
+umask 0007
 if [ -r /etc/daharness/daharness.env ]; then
 	set -a
 	. /etc/daharness/daharness.env
@@ -67,6 +78,7 @@ err() { echo "daharness-index: $*" >&2; }
 
 if ! command -v curl >/dev/null 2>&1 || ! command -v ss >/dev/null 2>&1; then
 	# Probe tooling absent: skip the probes and let python report honestly.
+	# umask 0007 set above still applies (group-share the DB files).
 	exec python3 -m daharness.core "$@"
 fi
 

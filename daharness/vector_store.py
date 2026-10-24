@@ -462,6 +462,41 @@ class VectorStore:
         # before any collection is created (and before another thread
         # races us on the journal-mode switch).
         self._local.conn = self._connect()
+        # Reconcile DB + WAL sidecar modes after the first connection:
+        # sqlite3.connect + PRAGMA journal_mode=WAL create the main file
+        # and the -wal/-shm sidecars under the *process* umask, not the
+        # setgid-state-root convention. On WSL (default umask 022, and the
+        # index wrapper historically did not set umask 0007) the DB landed
+        # 644 — no group write — so the next lane that opened it in WAL
+        # mode could not create/extend the sidecars and SQLite reported
+        # "attempt to write a readonly database" (live 2026-10-24 after a
+        # wsl --update). chmod g+rw on the main file + sidecars is the
+        # in-process backstop; the wrapper umask is the primary fix, and
+        # the postinst's find-chmod is the offline backstop. Best effort —
+        # a chmod failure (read-only mount, dropped privilege) must never
+        # crash the store.
+        self._reconcile_db_modes()
+
+    def _reconcile_db_modes(self) -> None:
+        """Ensure the DB + WAL/SHM sidecars are group-writable.
+
+        The setgid state root (2770) makes the *directory* group-writable,
+        but SQLite's WAL protocol needs the main DB file itself to be
+        group-writable so the -wal/-shm dance works across lanes. A file
+        created under a 022 umask (the WSL default) lands 644 and blocks
+        the next WAL opener. This is a no-op on a healthy tree (the file
+        is already g+rw) and a silent heal on a broken one.
+        """
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(self.path + suffix)
+            if not p.exists():
+                continue
+            try:
+                mode = p.stat().st_mode & 0o777
+                if not mode & 0o020:  # group-write bit missing
+                    p.chmod(mode | 0o066)
+            except OSError:
+                pass
 
     def _connect(self) -> sqlite3.Connection:
         """Open a new per-thread connection with WAL + busy_timeout."""

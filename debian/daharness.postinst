@@ -87,14 +87,34 @@ echo "daharness:   example tools at /usr/share/daharness/packaging/dacustoms/"
 
 # Legacy-tree file MODES: UMask=0007 in the units only shapes files created
 # from that unit onward; a state file an older run made under a tighter
-# umask (live 2026-10-20: ids.db 0640) stays group-read-only — the
-# operator's SQLite write then dies with "attempt to write a readonly
-# database" even on a 2770 root (SQLite needs the main file group-writable
-# for its -wal/-shm dance). Reconcile just the top-level state files to the
-# shape the umask now produces. Best effort: 2>/dev/null || true — a
-# genuinely unsharable oddity must not fail the install.
+# umask (live 2026-10-20: ids.db 0640; live 2026-10-24 on WSL:
+# tool_registry.db 644 after a wsl --update — the index wrapper ran under
+# the WSL default umask 022 and SQLite's WAL sidecars inherited it) stays
+# group-read-only — the operator's SQLite write then dies with "attempt to
+# write a readonly database" even on a 2770 root (SQLite needs the main
+# file group-writable for its -wal/-shm dance, and the sidecars too).
+# Reconcile just the top-level state files to the shape the umask now
+# produces. The maxdepth=1 sweep catches the main DB files; the -wal/-shm
+# sidecars may not exist yet at postinst time (created on first DB open),
+# but if they do they're caught here too (they are top-level files).
+# Best effort: 2>/dev/null || true — a genuinely unsharable oddity must
+# not fail the install.
 find "$STATE_ROOT" -maxdepth 1 -type f ! -perm -g+w \
     -exec chmod g+rw {} + 2>/dev/null || true
+
+# Explicit SQLite sidecar reconcile: even after the generic find above, a
+# -wal or -shm sidecar created mid-session (after the postinst's find ran
+# on a previous upgrade) can land 644 under a 022-umask process. The
+# VectorStore.__init__ now self-heals at open time, but this sweep is the
+# offline backstop for an upgrade that restarts the service before any
+# index/gateway open touches the DB — so the first WAL write doesn't die.
+# Pattern: any *.db, *.db-wal, *.db-shm, *.db-journal in the state root.
+for _dbpat in "$STATE_ROOT"/*.db "$STATE_ROOT"/*.db-wal "$STATE_ROOT"/*.db-shm \
+              "$STATE_ROOT"/*.db-journal; do
+    [ -f "$_dbpat" ] 2>/dev/null || continue
+    chmod g+rw "$_dbpat" 2>/dev/null || true
+done
+unset _dbpat
 
 # Shared-state access provisioning: the state root and brain socket are
 # group-shared by design (UMask 0007, RuntimeDirectoryMode=0770), but the
