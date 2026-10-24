@@ -82,8 +82,10 @@ if [ -d /var/lib/daharness ]; then
     chmod 2770 "$_DC" 2>/dev/null || true
     unset _DC
 fi
-echo "daharness: dacustoms lane — drop .py tools in /var/lib/daharness/dacustoms/ (DACUSTOMS_DIR, group-readable)"
+echo "daharness: dacustoms lane ready — drop .py tools in /var/lib/daharness/dacustoms/"
+echo "daharness:   out-of-tree operator macros (DACUSTOMS_DIR, group-readable, update-safe)"
 echo "daharness:   example tools at /usr/share/daharness/packaging/dacustoms/"
+echo "daharness:   verify with: daharness doctor customs"
 
 # Legacy-tree file MODES: UMask=0007 in the units only shapes files created
 # from that unit onward; a state file an older run made under a tighter

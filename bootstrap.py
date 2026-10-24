@@ -1162,8 +1162,11 @@ def _print_doctor(provider: str = "") -> int:
     print(f"framework doctor — {report.get('overall')} "
           f"({report.get('available')} providers up)")
     for name, rep in report.get("providers", {}).items():
+        tier = ""
+        if name in report.get("neutral", []):
+            tier = " [optional, not deployed]"
         state = "up" if rep.get("available") else "down"
-        print(f"  {name:<16} {state:<4} {rep.get('reason', '')}")
+        print(f"  {name:<16} {state:<4} {rep.get('reason', '')}{tier}")
         if not rep.get("available") and rep.get("remediation"):
             print(f"    fix: {rep['remediation']}")
     return 0 if report.get("overall") == "ok" else 1  # scriptable exit code

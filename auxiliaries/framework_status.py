@@ -636,11 +636,22 @@ def _check_postgres() -> dict[str, Any]:
     base: dict[str, Any] = {"provider": "postgres", "remediation": ""}
     if up:
         base["available"] = True
+        base["deployed"] = True
         base["reason"] = f"cluster answering on {host}:{port}"
         return base
 
-    if not (shutil.which("psql") and shutil.which("pg_createcluster")):
+    tooling_present = bool(shutil.which("psql") and shutil.which("pg_createcluster"))
+    env_present = os.path.exists(env_file)
+    # deployed = the operator opted into the lane at all: either the
+    # postgresql packages are installed OR the lane was initialized (pg.env
+    # exists). Neither → absent by choice → neutral in the tier-aware
+    # aggregate, not a degrade. Both absent is the dev-box / minimal-install
+    # case the framework genuinely doesn't care about.
+    deployed = tooling_present or env_present
+
+    if not tooling_present:
         base["available"] = False
+        base["deployed"] = deployed
         base["reason"] = (
             "postgres tooling absent on this lane (psql/pg_createcluster "
             "not in PATH)"
@@ -653,8 +664,9 @@ def _check_postgres() -> dict[str, Any]:
         )
         return base
 
-    if not os.path.exists(env_file):
+    if not env_present:
         base["available"] = False
+        base["deployed"] = deployed
         base["reason"] = (
             f"postgres present but the lane was never initialized (no "
             f"{env_file})"
@@ -667,6 +679,7 @@ def _check_postgres() -> dict[str, Any]:
         return base
 
     base["available"] = False
+    base["deployed"] = deployed
     base["reason"] = (
         f"cluster provisioned (pg.env present) but not answering on "
         f"{port} (tried {', '.join(candidates)})"
@@ -679,6 +692,20 @@ def _check_postgres() -> dict[str, Any]:
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
                  "snapshot_cache", "postgres", "registry", "customs")
+
+# Tier model: a lane is "required" (the framework expects it on every
+# install — missing = degrade) or "optional" (the framework genuinely
+# doesn't depend on it — absent by choice = neutral, not degraded).
+# Postgres is the canonical optional lane: the engagement cobweb degrades
+# silently to SQLite stores when it's absent, so a box that never installed
+# postgresql is not "degraded" — it's just not using that lane. Every other
+# lane is required: a missing r2/msf/registry is a real capability gap.
+# The ``deployed`` field (set per-probe, defaulted True) lifts the "did the
+# operator opt in?" signal out of the reason string so the aggregate can
+# distinguish "optional + never deployed" (neutral) from "deployed but
+# broken" (degraded). Required lanes default deployed=True — if the binary
+# is missing that IS a degrade, not an opt-out.
+PROVIDER_TIERS: dict[str, str] = {"postgres": "optional"}
 
 
 def _check_customs() -> dict[str, Any]:
@@ -708,7 +735,7 @@ def _check_customs() -> dict[str, Any]:
     # is "disabled" or "boot ordering."
     if not fst["registered"]:
         return {
-            "available": False, "provider": "customs",
+            "available": False, "provider": "customs", "deployed": False,
             "reason": fst["reason"],
             "remediation": (
                 f"mkdir -p {fst['dir']} && touch {fst['dir']}/__init__.py"
@@ -721,13 +748,13 @@ def _check_customs() -> dict[str, Any]:
     d = dacustoms_dir()
     if d is None:
         return {
-            "available": False, "provider": "customs",
+            "available": False, "provider": "customs", "deployed": False,
             "reason": "dacustoms lane disabled (DACUSTOMS_DIR=off)",
             "remediation": "mkdir -p ~/.dacustoms && touch ~/.dacustoms/__init__.py",
         }
     if not d.is_dir():
         return {
-            "available": False, "provider": "customs",
+            "available": False, "provider": "customs", "deployed": False,
             "reason": f"customs dir {d} does not exist",
             "remediation": f"mkdir -p {d} && touch {d}/__init__.py",
         }
@@ -771,7 +798,7 @@ def _check_customs() -> dict[str, Any]:
         remediation = "; ".join(syntax_errors)
 
     return {
-        "available": available, "provider": "customs",
+        "available": available, "provider": "customs", "deployed": True,
         "reason": reason,
         "remediation": remediation,
         "files": files_checked,
@@ -821,12 +848,15 @@ def _doctor_gate_error() -> str:
     "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the tool registry "
     "(SQLite vector store), the engagement-cobweb Postgres lane, and the "
     "operator-authored .dacustoms modules (tier-1 syntax check). Each probe "
-    "returns available/reason/remediation so a 'can I run X' question is "
-    "answered before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|registry|customs). "
-    "doctor refuses lanes that do not share the framework state root (root, "
-    "its owner, or a member of its group) — a non-privileged lane probes "
-    "blind and reports false downs, so it gets the refusal and the "
+    "returns available/reason/remediation plus a deployed flag for optional "
+    "lanes, so a 'can I run X' question is answered before X is attempted. "
+    "Optional lanes (postgres) that were never deployed are NEUTRAL in the "
+    "aggregate — a box without postgresql is 'ok', not 'degraded'; a "
+    "deployed optional lane that's down IS degraded. Pass provider to drill "
+    "into one lane (r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|"
+    "registry|customs). doctor refuses lanes that do not share the framework "
+    "state root (root, its owner, or a member of its group) — a non-privileged "
+    "lane probes blind and reports false downs, so it gets the refusal and the "
     "remediation instead of a lying report."
 )
 def framework_doctor(provider: str = "") -> dict[str, Any]:
@@ -836,6 +866,16 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
         provider: Optional single lane to probe
             (r2|jadx|masscan|msf|scanners|snapshot_cache|
             postgres|registry|customs).  Empty = full sweep.
+
+    The aggregate verdict is **tier-aware**: required lanes (everything
+    except postgres) always count toward ``overall``; optional lanes
+    (postgres) count only when ``deployed`` is True (the operator installed
+    postgresql or ran ``daharness-pg init``). An optional lane that was
+    never deployed is *neutral* — listed in the ``neutral`` key with its
+    reason/remediation, but excluded from the ``available`` fraction so a
+    minimal install without postgresql reports ``ok`` instead of
+    ``degraded``. In a drill-down (``provider=`` set) every lane counts —
+    the operator asked about that one specifically.
     """
     gate = _doctor_gate_error()
     if gate:
@@ -902,23 +942,47 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
 
     # Contract: every record carries its own provider name (the shape tests
     # assert it, and downstream consumers format it from the record alone).
+    # deployed defaults to True — required lanes that don't set it are
+    # always "opted in" (a missing binary IS a degrade, not an opt-out).
     for name, rec in providers.items():
         rec.setdefault("provider", name)
+        rec.setdefault("deployed", True)
 
     unknown = p not in ("",) + PROVIDER_KEYS
     if unknown:
         providers["_unknown_provider"] = {
-            "available": False, "provider": p,
+            "available": False, "provider": p, "deployed": True,
             "reason": f"unknown provider {p!r}",
             "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
                            "snapshot_cache, postgres, registry, customs",
         }
 
-    ok = sum(1 for v in providers.values() if v.get("available"))
-    return {
-        "overall": "ok" if ok == len(providers) else (
-            "degraded" if ok else "down"),
-        "available": f"{ok}/{len(providers)}",
+    # Tier-aware verdict: in a full sweep, an optional lane the operator
+    # never deployed (deployed=False) is NEUTRAL — excluded from the
+    # fraction so a box without postgresql reports "ok" instead of
+    # "degraded." Required lanes and deployed optional lanes count
+    # normally. In a drill-down (operator named a specific provider) every
+    # lane counts — they asked. Every provider appears in the report with
+    # its reason/remediation regardless of tier; only the math changes.
+    is_sweep = not p
+    neutral: list[str] = []
+    counted: dict[str, Any] = {}
+    for name, rec in providers.items():
+        tier = PROVIDER_TIERS.get(name, "required")
+        if is_sweep and tier == "optional" and not rec.get("deployed", True):
+            neutral.append(name)
+        else:
+            counted[name] = rec
+
+    ok = sum(1 for v in counted.values() if v.get("available"))
+    total = len(counted)
+    overall = "ok" if ok == total else ("degraded" if ok > 0 else "down")
+    report: dict[str, Any] = {
+        "overall": overall,
+        "available": f"{ok}/{total}",
         "providers": providers,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
+    if neutral:
+        report["neutral"] = neutral
+    return report
