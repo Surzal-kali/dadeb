@@ -16,7 +16,7 @@ bind-mounts it, so there is no inode/staleness class of bug at all.
 kali                                          containers (workbench net)
 └─ /etc/hosts  ◄── edited every HTB session      jupyter: dns: [172.28.0.1]
    └─ dnsmasq (inotify re-read)                  └─ Docker DNS keeps resolving
-      listens: 127.0.0.1, 172.28.0.1                container names (chroma…)
+      listens: 127.0.0.1, 172.28.0.1                container names
                 ▲                                  and forwards the rest here
                 └──────────────────────────────────┘
 ```

@@ -45,7 +45,7 @@ House rules, inherited from `pyproject.toml`:
 - Lanes with inputs a hermetic test cannot ship skip honestly, with a
   lane-specific reason: packaging-source asserts that read `debian/` +
   `packaging/systemd/` (the deb ships the built artifact, not the
-  packaging sources — `test_daharness_pg.py` and the chroma wrapper
+  packaging sources — `test_daharness_pg.py` instead falls back to the
   instead fall back to the rules-installed twins so those contracts stay
   REAL on the deb), and `test_tool_addition_lane.py` when `payloads/` is
   unwritable (the deb's root-owned tool tree — its author contract

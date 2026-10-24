@@ -85,8 +85,9 @@ def _embed_env_note() -> str:
 
 @framework_tool(
     "Report the operational health of the penetration testing framework: "
-    "Brain sidecar socket, embedding endpoint (EMBED_URL), ChromaDB vector "
-    "store, ZAP daemon, and SQLite findings database. Returns a structured "
+    "Brain sidecar socket, embedding endpoint (EMBED_URL), tool registry "
+    "(SQLite vector store), ZAP daemon, and SQLite findings database. "
+    "Returns a structured "
     "JSON report with per-subsystem up/down verdicts and the tool count "
     "in the registry. Use this to verify the harness is alive before "
     "starting an engagement or after a crash."
@@ -97,13 +98,13 @@ def framework_health() -> dict[str, Any]:
     Checks:
     - Brain sidecar UDS socket (checkout run/brain.sock, via brain_socket_path())
     - Embedding endpoint at the configured EMBED_URL (daharness/embedding.py)
-    - ChromaDB at the configured CHROMA_HOST:CHROMA_PORT
+    - Tool registry (SQLite vector store at tool_registry.db)
     - ZAP daemon at the configured ZAP_PORT
     - SQLite findings database at ids.db
 
     Returns a dict with ``overall`` (``"ok"`` / ``"degraded"``), a
     ``subsystems`` map of name -> {``up``: bool, ``detail``: str}, and
-    ``tool_count`` if ChromaDB is reachable.  Subsystems that failed only
+    ``tool_count`` if the registry DB is reachable.  Subsystems that failed only
     because this lane lacks permission to see them (operator lane looking at
     a service-user-owned state root) carry ``lane_blocked: true`` — a
     permission mismatch reported honestly, not an outage claim.
@@ -125,8 +126,6 @@ def framework_health() -> dict[str, Any]:
     except Exception:
         pass
 
-    chroma_host = os.getenv("CHROMA_HOST", "localhost")
-    chroma_port = int(os.getenv("CHROMA_PORT", "9000"))
     zap_port = int(os.getenv("ZAP_PORT", "8090"))
 
     workspace = resolve_workspace_root()
@@ -177,38 +176,46 @@ def framework_health() -> dict[str, Any]:
         ),
     }
 
-    # ChromaDB
-    chroma_up = _check_tcp(chroma_host, chroma_port)
+    # Tool registry — SQLite-backed vector store (no server process).
+    # The registry DB lives under the workspace root alongside ids.db.
     tool_count = None
-    if chroma_up:
-        try:
-            import chromadb
-            client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
-            coll = client.get_or_create_collection(
-                name="tool_inventory",
-                embedding_function=type("DummyEF", (), {
-                    "__call__": lambda self, input: [[0.0] * 768],
-                    "name": lambda self: "dummy",
-                })(),
-            )
-#             #TODO: FIX Argument of type "DummyEF" cannot be assigned to parameter "embedding_function" of type "EmbeddingFunction[Embeddable] | None" in function "get_or_create_collection"
-#   Type "DummyEF" is not assignable to type "EmbeddingFunction[Embeddable] | None"
-#     "DummyEF" is incompatible with protocol "EmbeddingFunction[Embeddable]"
-#       "__call__" is not present
-#       "embed_query" is not present
-#       "__init_subclass__" is not present
-#       "embed_with_retries" is not present
-#       "__init__" is not present
-            tool_count = len(coll.get(include=[]).get("ids", []))
-        except Exception as exc:
-            chroma_up = False
-            subsystems["chromadb"] = {"up": False, "detail": f"reachable but error: {exc}"}
-    subsystems.setdefault("chromadb", {
-        "up": chroma_up,
-        "detail": f"{chroma_host}:{chroma_port}" if chroma_up else f"unreachable at {chroma_host}:{chroma_port}",
+    registry_up = False
+    registry_db_path = None
+    try:
+        from daharness.registry import ToolRegistry
+        registry_db_path = ToolRegistry._registry_db_path()
+        if registry_db_path.exists():
+            import sqlite3
+            conn = sqlite3.connect(str(registry_db_path), timeout=2.0)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vs_tool_inventory'"
+            ).fetchone()
+            if row and row[0] > 0:
+                count_row = conn.execute(
+                    "SELECT COUNT(*) FROM vs_tool_inventory"
+                ).fetchone()
+                tool_count = int(count_row[0]) if count_row else 0
+                registry_up = True
+            conn.close()
+        # If the DB doesn't exist yet, the registry is "down" (not indexed).
+        # This is an honest state, not an error — run `daharness-index` or
+        # `python -m daharness.core` to build it.
+    except Exception as exc:
+        registry_up = False
+        subsystems["tool_registry"] = {
+            "up": False,
+            "detail": f"error opening registry DB: {exc}",
+        }
+    subsystems.setdefault("tool_registry", {
+        "up": registry_up,
+        "detail": (
+            f"{registry_db_path} ({tool_count} tools)" if registry_up and tool_count is not None
+            else str(registry_db_path) if registry_up
+            else f"not indexed — run `daharness-index` or `python -m daharness.core`"
+        ),
     })
     if tool_count is not None:
-        subsystems["chromadb"]["tool_count"] = tool_count
+        subsystems["tool_registry"]["tool_count"] = tool_count
 
     # ZAP daemon
     zap_up = _check_tcp("127.0.0.1", zap_port)
@@ -520,40 +527,58 @@ def _check_scan_tools() -> list[dict[str, Any]]:
     return out
 
 
-def _check_chroma() -> dict[str, Any]:
-    """ChromaDB registry backend — the semantic lifeblood lane.
+def _check_registry() -> dict[str, Any]:
+    """Tool registry — SQLite-backed vector store (no server process).
 
-    The daemon launches it as a supervised sidecar (2026-10-20 merge of
-    the old daharness-chroma.service); a container lane can also serve this
-    port. ONE probe question: does the store answer
-    on CHROMA_HOST:CHROMA_PORT (the same knobs registry.py dials)? If the
-    lane is silent, the registry's semantic search / the gateway's
-    find_best_tool / indexing are ALL down — the remediation names the
-    sidecar path first, the manual dev lane second.
+    ONE probe question: does the registry DB file exist and answer? If the
+    file is missing, the registry hasn't been indexed yet. If it's present
+    but unreadable, the lane lacks permission. The registry's semantic
+    search / the gateway's find_best_tool / indexing all ride on this file.
     """
-    import socket as _socket
-
-    host = os.getenv("CHROMA_HOST", "localhost")
-    port = int(os.getenv("CHROMA_PORT", "9000"))
-    rec: dict[str, Any] = {"provider": "chroma", "remediation": ""}
+    rec: dict[str, Any] = {"provider": "registry", "remediation": ""}
     try:
-        with _socket.create_connection((host, port), timeout=1.0):
+        from daharness.registry import ToolRegistry
+        db_path = ToolRegistry._registry_db_path()
+    except Exception as exc:
+        rec["available"] = False
+        rec["reason"] = f"could not resolve registry DB path: {exc}"
+        rec["remediation"] = "run from the framework root"
+        return rec
+    if not db_path.exists():
+        rec["available"] = False
+        rec["reason"] = (
+            f"registry DB not found at {db_path} — the tool registry "
+            f"hasn't been indexed yet"
+        )
+        rec["remediation"] = (
+            "run `daharness-index` or `python -m daharness.core` to build "
+            "the registry (needs EMBED_URL for embeddings)"
+        )
+        return rec
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), timeout=2.0)
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name='vs_tool_inventory'"
+        ).fetchone()
+        if row and row[0] > 0:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM vs_tool_inventory"
+            ).fetchone()[0]
+            conn.close()
             rec["available"] = True
-            rec["reason"] = f"registry backend answering at {host}:{port}"
+            rec["reason"] = f"registry DB at {db_path} ({count} tools)"
             return rec
-    except OSError:
-        pass
+        conn.close()
+    except Exception as exc:
+        rec["available"] = False
+        rec["reason"] = f"registry DB exists but unreadable: {exc}"
+        rec["remediation"] = "check workspace-root permissions (daharness group)"
+        return rec
     rec["available"] = False
-    rec["reason"] = (
-        f"registry backend not answering on {host}:{port} — registry "
-        f"tool search, gateway find_best_tool and indexing are DOWN"
-    )
-    rec["remediation"] = (
-        "boot the stack (systemctl start daharness / python bootstrap.py) "
-        "— the daemon launches chroma as a supervised sidecar and reuses "
-        "a live backend; dev lane: daharness-chroma (CHROMA_BIN=... for "
-        "pip installs)"
-    )
+    rec["reason"] = f"registry DB at {db_path} exists but has no tool_inventory table"
+    rec["remediation"] = "re-index: `daharness-index` or `python -m daharness.core`"
     return rec
 
 
@@ -653,7 +678,7 @@ def _check_postgres() -> dict[str, Any]:
 
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
-                 "snapshot_cache", "postgres", "chroma", "customs")
+                 "snapshot_cache", "postgres", "registry", "customs")
 
 
 def _check_customs() -> dict[str, Any]:
@@ -793,12 +818,12 @@ def _doctor_gate_error() -> str:
     "Run capability probes for the framework's analysis and attack tooling "
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
     "raw-socket capability, msfconsole/msfvenom + RPC port, the scanner "
-    "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the ChromaDB "
-    "registry backend, the engagement-cobweb Postgres lane, and the "
+    "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the tool registry "
+    "(SQLite vector store), the engagement-cobweb Postgres lane, and the "
     "operator-authored .dacustoms modules (tier-1 syntax check). Each probe "
     "returns available/reason/remediation so a 'can I run X' question is "
     "answered before X is attempted. Pass provider to drill into one lane "
-    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|chroma|customs). "
+    "(r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|registry|customs). "
     "doctor refuses lanes that do not share the framework state root (root, "
     "its owner, or a member of its group) — a non-privileged lane probes "
     "blind and reports false downs, so it gets the refusal and the "
@@ -810,7 +835,7 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
     Args:
         provider: Optional single lane to probe
             (r2|jadx|masscan|msf|scanners|snapshot_cache|
-            postgres|chroma|customs).  Empty = full sweep.
+            postgres|registry|customs).  Empty = full sweep.
     """
     gate = _doctor_gate_error()
     if gate:
@@ -868,8 +893,8 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
                 ),
                 "remediation": "",
             }
-    if p in ("", "chroma"):
-        providers["chroma"] = _check_chroma()
+    if p in ("", "registry"):
+        providers["registry"] = _check_registry()
     if p in ("", "postgres"):
         providers["postgres"] = _check_postgres()
     if p in ("", "customs"):
@@ -886,7 +911,7 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
             "available": False, "provider": p,
             "reason": f"unknown provider {p!r}",
             "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
-                           "snapshot_cache, postgres, chroma, customs",
+                           "snapshot_cache, postgres, registry, customs",
         }
 
     ok = sum(1 for v in providers.values() if v.get("available"))

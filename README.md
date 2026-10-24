@@ -49,7 +49,7 @@ and `daharness-safety(7)`. The same rule applies to the embeddings provider
 ## Quick start (system package)
 
 Prereqs: the deb pulls its own dependencies; Metasploit/ZAP/jadx/radare2 are
-optional lanes in `Recommends`. On a fresh install the ChromaDB registry is
+optional lanes in `Recommends`. On a fresh install the tool registry is
 **empty** — index it once before anything can search:
 
 ```bash
@@ -64,7 +64,7 @@ sudo usermod -aG daharness $USER && newgrp daharness
 
 daharness doctor          # per-provider capability report (r2, msf, scanners, ...)
 daharness                 # run the services stack (Brain, ZAP, MSF RPC,
-                          # Chroma sidecar, gateway)
+                          # gateway)
                           # ... or: sudo systemctl enable --now daharness.service
 curl -s 127.0.0.1:5000/health
 ```
@@ -98,7 +98,7 @@ python -m venv venv && source venv/bin/activate
 pip install -e ".[web,jupyter,dev]"   # core runtime + optional lanes + test deps
 cp .env.example .env                  # annotated key list; set EMBED_URL etc.
 python -m daharness.core              # index the tool registry (--clear to wipe)
-python bootstrap.py --daemon          # Brain, ZAP, MSF MCP, Chroma, API gateway
+python bootstrap.py --daemon          # Brain, ZAP, MSF MCP, API gateway
 pytest tests/                         # registry + dispatch suite
 python tool_repl.py selftest          # same suite via the REPL macro
 ```
@@ -212,7 +212,7 @@ daharness/              Semantic tool registry + dispatch (core package)
 constants.py            @framework_tool decorator + TransportType enum
 bootstrap.py            Daemon entry point; launches all sidecars (= deb's daharness)
 api_gateway.py          FastAPI gateway + streamable-HTTP MCP server (port 5000)
-memories.py             ChromaDB-backed namespaced vector memory
+memories.py             SQLite-backed namespaced vector memory
 tool_repl.py            REPL shim over the replkit/ package (= deb's daharness-repl)
 replkit/                REPL internals: completer, aliases, kernel lane, safe args
 sitecustomize.py        Vendored-closure import path armer (deb lane)

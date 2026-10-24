@@ -34,9 +34,7 @@ from constants import brain_socket_path  # noqa: E402  -- after .env load
 #
 # NOTE: this load deliberately sits AFTER the daharness import. The package
 # __init__ now loads .env itself (without override) before registry.py bakes
-# its module-level env constants (CHROMA_HOST/CHROMA_PORT; OLLAMA_BASE_URL's
-# only consumer — framework_status's health probe — reads the env at call
-# time); this block then re-applies with
+# its module-level env constants; this block then re-applies with
 # override=True for the rest of the stack's authoritative-.env semantics.
 # Keeping both gives: registry constants see .env, and shell exports are still
 # overridden by .env for the operator's decision above. Do not move the
@@ -101,29 +99,13 @@ ZAP_PROXY_BIND = os.getenv("ZAP_PROXY_BIND", "127.0.0.1")
 # via shell export before restart, e.g.  export ZAP_XMX=2g
 ZAP_XMX = os.getenv("ZAP_XMX", "512m")
 
-# ChromaDB registry backend (daharness/registry.py dials the same knobs —
-# keep the env names identical). NOT optional: everything semantic (the
-# tool secretary's search_tools, the gateway's find_best_tool, indexing,
-# vector memory recall) rides on this store, so the daemon launches it as
-# a supervised sidecar like Brain/ZAP — the old standalone
-# daharness-chroma.service + degraded-boot hack were retired 2026-10-20.
-# Persistence default: the deb StateDirectory when present, else the dev
-# tree's run/ dir (chroma needs a writable path; /usr/share trees are not).
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "9000"))
-_CHROMA_DEFAULT_PATH = os.getenv("CHROMA_PATH", "")
-if not _CHROMA_DEFAULT_PATH:
-    if os.path.isdir("/var/lib/daharness"):
-        _CHROMA_DEFAULT_PATH = "/var/lib/daharness/chroma"
-    else:
-        _CHROMA_DEFAULT_PATH = str(FRAMEWORK_ROOT / "run" / "chroma")
-CHROMA_PATH = _CHROMA_DEFAULT_PATH
-# The deb's vendored chromadb closure ships the `chroma` server CLI under
-# vendor/bin (pip --target entry point). Module constant, not a
-# function-local literal: the selftest's absent-backend premise must be
-# able to neutralize the deb's vendored candidate
-# (tests/test_chroma_sidecar.py monkeypatches this to ()).
-CHROMA_SERVER_FALLBACKS = ("/usr/share/daharness/vendor/bin/chroma",)
+# The tool registry is now backed by a local SQLite + numpy vector store
+# (daharness/vector_store.py) — no ChromaDB server process, no network
+# dependency, no sidecar to supervise. The registry DB lives under the
+# workspace root (tool_registry.db) alongside ids.db and scratch.db. The
+# old CHROMA_HOST/CHROMA_PORT/CHROMA_PATH/CHROMA_SERVER_FALLBACKS
+# constants and the start_chroma_daemon/wait_for_chroma sidecar lifecycle
+# are gone with it.
 
 # API gateway (bootstrap-assembled service, api_gateway.run()): bind +
 # port knobs. Loopback default mirrors the ZAP pattern — the tool-execution
@@ -191,17 +173,6 @@ def _open_child_log(name: str):
 
 
 # --- FrameworkLoader ---
-def _chroma_answering(timeout: float = 1.0) -> bool:
-    """Cheap chroma-lane readiness probe (read-side twin of
-    start_chroma_daemon's reuse-first check). Never raises: True when
-    something is already listening where the backend will bind."""
-    import socket as _socket
-    try:
-        with _socket.create_connection((CHROMA_HOST, CHROMA_PORT), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
 
 class FrameworkLoader:
     def __init__(self, framework_root: Path):
@@ -214,23 +185,14 @@ class FrameworkLoader:
         self.packet_tool = None
         self.vector_registry = None
 
-        # Initialize ToolRegistry — readiness-gated (2026-10-21 boot-race
-        # fix): chromadb's HttpClient handshakes in its constructor, so
-        # dialing here before launch_all has started the backend was a
-        # doomed connect + traceback on every daemon boot. When the backend
-        # already answers (REPL/kernel lanes riding the running unit),
-        # construct now; otherwise defer to launch_all's post-wait init.
-        if _chroma_answering():
-            try:
-                self._init_vector_registry()
-            except Exception as exc:
-                logger.error("[!] Tool vector registry failed: %s", exc, exc_info=True)
-        else:
-            logger.info(
-                "[i] Chroma backend not answering at %s:%s — vector "
-                "registry init deferred to launch_all's readiness wait.",
-                CHROMA_HOST, CHROMA_PORT,
-            )
+        # Initialize ToolRegistry — no server process to wait for (the
+        # SQLite-backed vector store opens a local file), so construct now.
+        # On failure the registry stays None and consumers hold the
+        # degraded-registry lane.
+        try:
+            self._init_vector_registry()
+        except Exception as exc:
+            logger.error("[!] Tool vector registry failed: %s", exc, exc_info=True)
 
         # Initialize PacketCraft
         try:
@@ -242,10 +204,10 @@ class FrameworkLoader:
     def _init_vector_registry(self) -> None:
         """Construct the semantic ToolRegistry.
 
-        Callers must ensure the chroma backend is answering first — the
-        constructor dials it eagerly. On failure the registry stays None
-        and consumers hold the degraded-registry lane (api_gateway.run()
-        surfaces `daharness doctor chroma` remediation instead of a 500).
+        The registry is backed by a local SQLite vector store (no server
+        process) — the constructor opens the DB file directly, so there's
+        no readiness wait. On failure the registry stays None and consumers
+        hold the degraded-registry lane.
         """
         from daharness import ToolRegistry, OllamaEmbeddingFunction
         self.vector_registry = ToolRegistry(
@@ -711,165 +673,6 @@ class FrameworkLoader:
                        "zap_* tools will fail until it does", timeout)
         return False
 
-    async def start_chroma_daemon(self, host=None, port=None, path=None):
-        """Start the vendored ChromaDB registry backend as a sidecar.
-
-        Same lifecycle shape as ``start_brain_server``/``start_zap_daemon``:
-        asyncio subprocess appended to ``active_tasks`` so ``stop()`` reaps
-        it via the SIGTERM-then-SIGKILL filter. This is the merge of the
-        retired daharness-chroma.service (2026-10-20): the registry backend
-        is the semantic lifeblood — secretary search, gateway semantic
-        lookup, indexing — so it lives and dies with the daemon instead of
-        booting the stack "degraded" against a dead backend (and the old
-        unit's chroma binary SILENTLY exited 0 on an occupied port, which
-        Restart=on-failure read as success — the quiet death that started
-        this).
-
-        Reuse-first: something already ANSWERING on the lane port means a
-        live backend (compose container, dev-tree manual run) — adopt it,
-        never double-spawn. Spawning is only for silent lanes.
-        """
-        import shutil
-        host = host or CHROMA_HOST
-        port = port or CHROMA_PORT
-        path = path or CHROMA_PATH
-
-        def _lane_up() -> bool:
-            import socket as _socket
-            try:
-                with _socket.create_connection((host, port), timeout=1.0):
-                    return True
-            except OSError:
-                return False
-
-        if _lane_up():
-            logger.info("[+] ChromaDB already answering at %s:%s — reusing "
-                        "the live backend (compose container or manual "
-                        "daharness-chroma lane)", host, port)
-            return "reused"
-
-        chroma_candidates = [
-            os.getenv("CHROMA_BIN", ""),
-            *CHROMA_SERVER_FALLBACKS,
-            shutil.which("chroma") or "",
-        ]
-        chroma_bin = next(
-            (c for c in chroma_candidates if c and Path(c).exists()), None
-        )
-        if not chroma_bin:
-            logger.error(
-                "[!] chroma server binary not found (tried: %s). The "
-                "registry backend is the semantic lifeblood — install the "
-                "deb vendored closure or `pip install chromadb`, or point "
-                "CHROMA_BIN at the server binary.",
-                ", ".join(c or "<unset>" for c in chroma_candidates),
-            )
-            # Same "permanent answer" contract as ZAP's absent launcher:
-            # wait_for_chroma skips its budget instead of dead-waiting,
-            # and the chroma doctor provider names the remediation.
-            self.chroma_backend_absent = True
-            return None
-
-        # Persistence path must exist before chroma's sqlite opens; the
-        # state root itself is provisioned by the unit's StateDirectory /
-        # the dev tree's run/ dir, so only the leaf is ours.
-        Path(path).mkdir(parents=True, exist_ok=True)
-
-        log_fd, log_path = _open_child_log("chroma")
-        # wait_for_chroma's dead-process short-circuit + log pointer ride on
-        # these: the uid-scoped path (not a hard-coded /tmp/chroma.log — the
-        # actual file _open_child_log picked) and the Popen handle whose
-        # returncode flips when the child dies mid-wait.
-        self._chroma_log_path = log_path
-        self._chroma_process = None
-        try:
-            logger.info("[+] Starting ChromaDB backend on %s:%s "
-                        "(persist: %s, log: %s)", host, port, path, log_path)
-            process = await asyncio.create_subprocess_exec(
-                chroma_bin, "run",
-                "--path", str(path),
-                "--host", str(host),
-                "--port", str(port),
-                stdout=log_fd,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            self._chroma_process = process
-            self.active_tasks.append(process)
-            if hasattr(log_fd, "close"):
-                self._child_log_fds = getattr(self, "_child_log_fds", {})
-                self._child_log_fds[id(process)] = log_fd
-            return process
-        except Exception as e:
-            logger.error("[!] ChromaDB backend failed to start: %s",
-                         e, exc_info=True)
-            self.chroma_backend_absent = True
-            return None
-
-    async def wait_for_chroma(self, host=None, port=None, timeout=30):
-        """Block until the ChromaDB registry backend answers on its lane.
-
-        Polls a socket connect() once a second up to ``timeout`` seconds
-        (chroma boots in ~2-5s). Semantic search stays DOWN until this
-        returns True — a warning here is the honest signal that the tool
-        secretary / gateway lookup lane is degraded, not a silent dial
-        failure later. Callers after an unavailable backend must surface
-        the same remediation the chroma doctor provider does.
-
-        Dead-sidecar short-circuit: if the launched backend PROCESS has
-        already exited (crashed on a poisoned persist dir, port stolen
-        then lost, ...), keep polling is a pure lie — the lane cannot
-        self-heal inside this timeout, so bail early and hand the caller
-        a concrete reason. Consumers must treat chroma-down as a degraded
-        lane, never a fatal one (the gateway's ToolRegistry constructor
-        dials chroma eagerly; its run() tolerates registry=None).
-        """
-        host = host or CHROMA_HOST
-        port = port or CHROMA_PORT
-        if getattr(self, "chroma_backend_absent", False):
-            logger.error("[i] chroma backend absent — skipping the %ss "
-                         "readiness wait. Semantic search stays down until "
-                         "`chroma` is installed; see `daharness doctor "
-                         "chroma`.", timeout)
-            return False
-        import socket as _socket
-
-        def _spawned_process_dead() -> bool:
-            """True when start_chroma_daemon launched a process that already
-            died (its returncode is set). Reused-lanes (\"reused\") never
-            set _chroma_process, so a foreign backend dying mid-wait keeps
-            the full budget — we merely adopted it, not supervise it."""
-            proc = getattr(self, "_chroma_process", None)
-            return proc is not None and proc.returncode is not None
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                with _socket.create_connection((host, port), timeout=2.0):
-                    logger.info("[+] ChromaDB backend is up at %s:%s",
-                                host, port)
-                    return True
-            except OSError:
-                if _spawned_process_dead():
-                    rc = self._chroma_process.returncode
-                    logger.error(
-                        "[!] ChromaDB backend process exited rc=%s before "
-                        "answering on %s:%s — aborting the readiness wait "
-                        "(a dead process cannot self-heal; the persist dir "
-                        "is the first suspect: %s). Sidecar log: %s. "
-                        "Check `daharness doctor chroma`.",
-                        rc, host, port, CHROMA_PATH, self._chroma_log_path,
-                    )
-                    return False
-                await asyncio.sleep(1)
-        logger.error(
-            "[!] ChromaDB backend did not answer on %s:%s within %ss — "
-            "SEMANTIC SEARCH IS DOWN (secretary search_tools, gateway "
-            "find_best_tool, indexing). The sidecar log is at %s. "
-            "Check `daharness doctor chroma`; manual lane: daharness-chroma.",
-            host, port, timeout, self._chroma_log_path,
-        )
-        return False
-
     async def wait_for_burp_mcp(self, timeout=15):
         """Probe the Burp MCP Server BApp's SSE endpoint.
 
@@ -1151,23 +954,12 @@ class FrameworkLoader:
         # surfaced as a launch warning, not a silent ffuf/hydra failure later.
         self._preflight_wordlists()
 
-        # Chroma FIRST: the registry backend is the semantic lifeblood
-        # (secretary search, gateway find_best_tool, indexer, vector
-        # recall) and the slowest-starting lane — launch + readiness-wait
-        # before any consumer can dial a dead store (2026-10-20 merge:
-        # replaced the old standalone unit + degraded-boot toleration).
-        self.active_tasks.append(
-            asyncio.create_task(self.start_chroma_daemon())
-        )
-        chroma_ready = await self.wait_for_chroma()
-
-        # Deferred ToolRegistry init (2026-10-21 boot-race fix): __init__
-        # used to dial chroma before the backend had even started — a doomed
-        # connect + traceback every boot, then the gateway recovered via its
-        # degraded standalone-registry lane seconds later. Chroma has now
-        # passed (or failed) readiness: construct only on a live backend,
-        # keep registry=None otherwise so the degraded lane holds.
-        if chroma_ready and self.vector_registry is None:
+        # The tool registry is backed by a local SQLite vector store —
+        # no server process to launch or wait for. The registry was
+        # initialised in __init__ (it just opens a file). If it failed
+        # there, try once more now (the workspace root may not have been
+        # writable at __init__ time on some deb boot orderings).
+        if self.vector_registry is None:
             try:
                 self._init_vector_registry()
             except Exception as exc:
@@ -1251,7 +1043,6 @@ async def _zap_protect_launch_sync() -> None:
 
 SERVICES_STACK = (
     ("brain", "brain socket"),
-    ("chroma", "chroma lane"),
     ("gateway", "API gateway"),
     ("zap", "OWASP ZAP"),
     ("msf", "msfrpcd"),
@@ -1276,7 +1067,6 @@ def _stack_live_probes() -> dict:
             return False
 
     probes["gateway"] = _tcp_up("127.0.0.1", GATEWAY_PORT)
-    probes["chroma"] = _tcp_up(CHROMA_HOST, CHROMA_PORT)
     probes["zap"] = _tcp_up(ZAP_HOST, ZAP_PORT)
     probes["msf"] = _tcp_up("127.0.0.1", MSF_RPC_PORT)
     probes["brain"] = False
@@ -1343,7 +1133,7 @@ def _build_cli():
                         help="doctor: probe framework capabilities and exit")
     parser.add_argument(
         "provider", nargs="?", default="",
-        help="doctor drill-down (single provider, e.g. 'chroma', "
+        help="doctor drill-down (single provider, e.g. 'registry', "
              "'postgres'); omitted = full report")
     return parser
 
@@ -1440,7 +1230,7 @@ async def run_framework():
     if args.command == "doctor":
         sys.exit(_print_doctor(provider=args.provider))
     if args.provider:
-        # `daharness chroma` (provider without 'doctor') would otherwise
+        # `daharness registry` (provider without 'doctor') would otherwise
         # fall into a full stack launch — refuse honestly instead.
         print("daharness: unknown command '%s' (did you mean "
               "`daharness doctor %s`?)" % (args.provider, args.provider),

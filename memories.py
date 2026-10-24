@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import chromadb
+from daharness.vector_store import VectorStore
 
 from constants import resolve_workspace_root
 from listeners.thebrain import framework_tool
@@ -56,7 +56,7 @@ class MemoryService:
         # write an existing foreign DB. After the client: align whatever
         # mode the client's own creations landed at under this umask.
         self._repair_chroma_permissions()
-        self.client = chromadb.PersistentClient(path=self.storage_path)
+        self.client = VectorStore(self.storage_path)
         self._repair_chroma_permissions()
         self._collections: dict[str, Any] = {}
 
@@ -83,8 +83,10 @@ class MemoryService:
         """
         log = logging.getLogger(__name__)
         root = Path(self.storage_path)
+        # The storage path is now a single SQLite file (vectors.db); ensure
+        # its parent dir exists with the group-shareable shape.
         try:
-            root.mkdir(parents=True, exist_ok=True, mode=0o2770)
+            root.parent.mkdir(parents=True, exist_ok=True, mode=0o2770)
         except OSError:
             return  # no writable parent — let the client surface the real error
         try:
@@ -95,30 +97,33 @@ class MemoryService:
         foreign_root_owned = False
         blocked_not_group_writable = False
 
-        for p in [root, *root.rglob("*")]:
-            try:
-                if p.is_symlink():
+        for p in [root.parent, root]:
+            # Also check for WAL sidecar files.
+            for suffix in ("", "-wal", "-shm"):
+                p_s = p.with_name(p.name + suffix) if suffix else p
+                if not p_s.exists():
                     continue
-                st = p.stat()
-                if is_root and ws_stat and st.st_uid != ws_stat.st_uid:
-                    os.chown(p, ws_stat.st_uid, ws_stat.st_gid)
-                if st.st_uid == 0 and not is_root:
-                    foreign_root_owned = True
-                # Owner (or root-after-repair) restores the unit's intended
-                # group-shareable shape: dirs 2770, files 0660.
-                if is_root or st.st_uid == os.geteuid():
-                    if p.is_dir():
-                        os.chmod(p, 0o2770)
-                    else:
-                        os.chmod(p, 0o660)
-                elif (st.st_mode & 0o020) == 0 and p.suffix in (
-                    ".sqlite3", ".sqlite3-wal", ".sqlite3-shm",
-                ):
-                    # Not owner, not root, and group-write missing on an
-                    # existing file — exactly the sqlite code-8 trap.
-                    blocked_not_group_writable = True
-            except OSError:
-                continue
+                try:
+                    if p_s.is_symlink():
+                        continue
+                    st = p_s.stat()
+                    if is_root and ws_stat and st.st_uid != ws_stat.st_uid:
+                        os.chown(p_s, ws_stat.st_uid, ws_stat.st_gid)
+                    if st.st_uid == 0 and not is_root:
+                        foreign_root_owned = True
+                    # Owner (or root-after-repair) restores the unit's
+                    # intended group-shareable shape: dirs 2770, files 0660.
+                    if is_root or st.st_uid == os.geteuid():
+                        if p_s.is_dir():
+                            os.chmod(p_s, 0o2770)
+                        else:
+                            os.chmod(p_s, 0o660)
+                    elif (st.st_mode & 0o020) == 0:
+                        # Not owner, not root, and group-write missing on
+                        # an existing DB file — the sqlite code-8 trap.
+                        blocked_not_group_writable = True
+                except OSError:
+                    continue
 
         if blocked_not_group_writable:
             log.warning(
@@ -227,7 +232,7 @@ class MemoryService:
             payload["session_id"] = normalized_session_id
         if normalized_agent_id is not None:
             payload["agent_id"] = normalized_agent_id
-        # ChromaDB rejects an empty metadata dict; pass None when there is
+        # The vector store stores None metadata as NULL; pass None when there is
         # nothing to tag (no session_id / agent_id / extra metadata).
         collection.upsert(
             ids=[str(memory_id)],
@@ -420,14 +425,15 @@ class MemoryService:
 
 
 def default_chroma_path() -> str:
-    """Lane-safe default chroma dir — under the workspace root, never CWD.
+    """Lane-safe default vector store path — under the workspace root, never CWD.
 
-    The pre-fix default (".memory/chroma") was CWD-relative: the deb lane
-    runs service processes with CWD inside the read-only /usr/share/daharness
-    tree, so chroma init died there with sqlite "attempt to write a readonly
-    database".
+    Returns a single SQLite file (``vectors.db``) under ``.memory/`` — the
+    SQLite+numpy vector store replaces the old ChromaDB PersistentClient
+    which used a directory. The path is kept under the workspace root (state
+    root on the deb) so the DB lives in a writable location, not the
+    read-only code tree.
     """
-    return str(resolve_workspace_root() / ".memory" / "chroma")
+    return str(resolve_workspace_root() / ".memory" / "vectors.db")
 
 
 _DEFAULT_SERVICE: MemoryService | None = None

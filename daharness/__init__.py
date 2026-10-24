@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Load .env before any submodule import. daharness/registry.py bakes
-# OLLAMA_BASE_URL into a module-level constant at import time, so os.environ
+# env constants at import time, so os.environ must already be populated
 # must already be populated the moment this package is first touched —
 # whichever entry point that is. bootstrap.py historically imported
 # `daharness` before its own load_dotenv(), pinning the secretary + embeddings

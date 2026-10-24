@@ -29,7 +29,7 @@ Modes (unchanged — see ``replkit.cli:main``):
   selftest [args]             — run the pytest suite (replaces legacy sweep;
                                 works from any working directory)
   info <id>                   — show a tool's manifest without running it
-  search <query>              — semantic search (needs ChromaDB + Ollama);
+  search <query>              — semantic search (needs embed endpoint);
                                 best match prints LAST, nearest the prompt
   scope / engagement          — operator-only gate/cobweb commands
   --kernel [-f <file>]        — start a Jupyter ZMQ kernel with every tool
@@ -53,9 +53,9 @@ from pathlib import Path
 # `python3 <tree>/tool_repl.py --kernel` BARE (no PYTHONPATH), and script-dir
 # sitecustomize does NOT auto-import on py3.13/3.14 (verified — the tree arm
 # only runs when PYTHONPATH carries the tree). Without this, daharness/
-# __init__ -> registry.py's top-level `import chromadb` kills every
+# __init__ -> registry.py's top-level imports could kill every
 # frontend-launched kernel (jupyter console, nbconvert --execute,
-# KernelManager) the moment a fresh deb exists whose chromadb lives only in
+# KernelManager) the moment a fresh deb exists whose dependencies live only in
 # <tree>/vendor. Same semantics as sitecustomize: prepend so the exact-pinned
 # closure wins overlaps; inert when vendor/ is absent (dev-tree lanes keep
 # pristine behavior) and idempotent, so wrapper-armed lanes (sitecustomize

@@ -23,7 +23,7 @@ a second loader:
 1. *systemd system units* (*daharness*, *daharness-kernel*) —
    `EnvironmentFile=/etc/daharness/daharness.env`; the manager injects
    every key into the unit environment before `ExecStart`, so the daemon
-   and kernel lanes all see it (the chroma registry backend is the
+   and kernel lanes all see it (the tool registry is a local
    daemon's own sidecar and reads the same unit environment).
 2. *operator REPL / dev-tree lanes* — the *env* file next to the tree
    (*bootstrap.py*, *api_gateway.py*, *tool_repl.py* load it with

@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "daharness maintainers" }]
 keywords = [
     "security", "pentesting", "bug-bounty", "ollama", "llm",
-    "mcp", "chromadb", "offensive-security", "authorized-testing",
+    "mcp", "offensive-security", "authorized-testing",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -29,7 +29,7 @@ classifiers = [
 dependencies = [
     # Core runtime — derived from actual framework imports. Keep pins aligned
     # with requirements.txt (the tracked freeze).
-    "chromadb==1.5.9",
+    "numpy>=2.0",
     "httpx==0.28.1",
     "pydantic==2.13.4",
     "fastapi==0.141.1",

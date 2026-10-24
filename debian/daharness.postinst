@@ -35,13 +35,13 @@ chmod 2770 "$STATE_ROOT"
 # Ghost-uid reconcile (2026-10-21 VM round-trip): dpkg purge keeps
 # /var/lib/daharness (operator work product), but dpkg ALSO deletes the
 # system user — so a reinstall mints a NEW uid under the SAME state root.
-# The tree's deep dirs (chroma/, .cache/, .config/, ids.db, ...) keep the
+# The tree's deep dirs (.cache/, .config/, ids.db, ...) keep the
 # OLD uid, which now maps to nothing. systemd's StateDirectory= only
 # re-asserts the TOP dir (daharness:daharness 2770) on every start, so the
-# wrong-owner subtree survives untouched: observed live — chroma opened its
+# wrong-owner subtree survives untouched: observed live — sqlite opened its
 # persisted sqlite under ghost-uid ownership and panicked with "attempt to
 # write a readonly database" 31s after every spawn (pyo3 PanicException),
-# wait_for_chroma burned its full budget on the corpse, and the gateway
+# waited its full budget on the corpse, and the gateway
 # then died on the ToolRegistry handshake. find-chown the whole tree: a
 # reinstall is exactly the moment ghost uids exist; chowning operator
 # files back to the (re-minted) daharness identity is the healing the
@@ -160,20 +160,18 @@ if [ -r /etc/daharness/daharness.env ] && \
     fi
 fi
 
-# Chroma merge (2026-10-20): the standalone chroma unit is retired — the
-# daemon launches chroma as a supervised sidecar that reuses (never
-# double-spawns) an answering lane. Upgrades from pkg<=4 ship a still-
-# RUNNING daharness-chroma.service whose unit file this package no longer
-# carries: stop+disable it here, before the sidecar can boot, so the
-# zombie cannot keep :9000 (the merged sidecar's reuse-probe would adopt
-# it and its Restart= keeps respawning a process systemd no longer
-# supervises properly).
+# ChromaDB retirement (2026-10-23): chromadb was removed entirely — the
+# tool registry is now backed by a local SQLite + numpy vector store (no
+# server process). Upgrades from earlier packages may still have a
+# daharness-chroma.service unit (standalone or merged sidecar): stop +
+# disable it here so the orphan doesn't keep :9000 or respawn a binary
+# this package no longer ships.
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     systemctl stop daharness-chroma.service 2>/dev/null || true
     systemctl disable daharness-chroma.service 2>/dev/null || true
     if systemctl is-active daharness-chroma.service >/dev/null 2>&1 || \
        systemctl list-unit-files daharness-chroma.service 2>/dev/null | grep -q daharness-chroma; then
-        echo "daharness: retired daharness-chroma.service (chroma is a daemon sidecar now)"
+        echo "daharness: retired daharness-chroma.service (chromadb removed — SQLite vector store)"
     fi
 fi
 

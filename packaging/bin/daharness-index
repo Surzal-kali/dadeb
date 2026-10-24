@@ -1,26 +1,28 @@
 #!/bin/sh
-# daharness-index(1) — (re-)build the tool-registry index in chroma.
+# daharness-index(1) — (re-)build the tool-registry index.
 #
 # Every discovery lane reads this index — gateway /tools/search,
 # /tools/execute (both exact-id and semantic), /mcp tools/list, REPL ghost
-# text, memory recall. A fresh deb ships an EMPTY collection and nothing
+# text, memory recall. A fresh deb ships an EMPTY registry and nothing
 # indexes it for you (the daemon never runs bootstrap_registry), so this
 # command is the operator's one-typing re-index pass.
 #
-# The indexer writes through the chroma HTTP server — the caller needs no
-# filesystem ownership of the registry data, so this runs as any user.
-# Two live dependencies are probed first (vendored chroma server; Ollama
-# + the embed model) and a DOWN probe prints the exact fix instead of a
-# python traceback. Probes read the same knobs the units do from
-# /etc/daharness/daharness.env (tolerant source), so a conffile retune of
-# CHROMA_PORT / EMBED_MODEL / OLLAMA_BASE_URL is honored here too.
+# The indexer writes through a local SQLite vector store (no server
+# process) — the caller needs filesystem ownership of the registry data
+# (tool_registry.db under the workspace root), so this runs as the
+# operator (or root on the deb lane). One live dependency is probed first
+# (the embed endpoint + model) and a DOWN probe prints the exact fix
+# instead of a python traceback. Probes read the same knobs the units do
+# from /etc/daharness/daharness.env (tolerant source), so a conffile
+# retune of EMBED_MODEL / EMBED_URL is honored here too.
 #
-# Flags pass straight through: `--clear` wipes the collection first, re-run
+# Flags pass straight through: `--clear` wipes the registry first, re-run
 # to refresh (idempotent upsert; new tools appear without a rebuild).
 #
 # --stubs is the IDE lane: pyright stubs + ruff builtins from the same
-# discovery, offline compute (no chroma, no Ollama) — routed to the stub
-# generator BEFORE any probe, so a down registry never blocks it. Output dir:
+# discovery, offline compute (no embeddings) — routed to the stub
+# generator BEFORE any probe, so a down embed endpoint never blocks it.
+# Output dir:
 # FRAMEWORK_STUBS_DIR (default ~/.local/share/framework-stubs) — point the
 # editor's stubPath there. `daharness-index --stubs --check` reports
 # OK/STALE/SKIP without writing.
@@ -31,8 +33,7 @@ if [ -r /etc/daharness/daharness.env ]; then
 	. /etc/daharness/daharness.env
 	set +a
 fi
-CHROMA_HOST=${CHROMA_HOST:-localhost}
-CHROMA_PORT=${CHROMA_PORT:-9000}
+fi
 # Embed probe resolves EMBED_URL — the exact knob daharness/embedding.py
 # dials (provider-agnostic: Ollama native /api/embed or OpenAI-compatible
 # /v1/embeddings). OLLAMA_BASE_URL is NOT the embed knob and the deb
@@ -50,11 +51,9 @@ case "$EMBED_URL" in
         *)               EMBED_PROBE_BASE=${EMBED_URL%/*} ;;
 esac
 
-# Route --stubs before the probes: the stub lane needs no chroma/Ollama
+# Route --stubs before the probe: the stub lane needs no embed
 # backend (static AST + dynamic import, zero embedding), same rule as
-# msfvenom generation — offline compute is not gated. The generator enforces
-# its own prerequisite (a complete typeshed builtins.pyi to fork) with a
-# loud message instead of a traceback.
+# msfvenom generation — offline compute is not gated.
 stubs_route=0
 for arg in "$@"; do
 	case "$arg" in
@@ -72,12 +71,9 @@ if ! command -v curl >/dev/null 2>&1 || ! command -v ss >/dev/null 2>&1; then
 	exec python3 -m daharness.core "$@"
 fi
 
-if ! ss -ltnH 2>/dev/null | grep -q ":${CHROMA_PORT} "; then
-	err "chroma is not listening on ${CHROMA_HOST}:${CHROMA_PORT} — discovery has no backend."
-	err "  fix: sudo systemctl start daharness   (the daemon spawns chroma as"
-	err "       a supervised sidecar; manual lane: daharness-chroma)"
-	exit 1
-fi
+# No chroma server to probe — the registry is a local SQLite file.
+# The embed endpoint probe below is the only live dependency.
+
 # Embed-provider probe: shape-derived inventory endpoint (see the EMBED_URL
 # block above). Keyed providers carry their Bearer header on OpenAI-shape.
 # The Ollana-native check is hard (model MUST be listed — a listening Ollama

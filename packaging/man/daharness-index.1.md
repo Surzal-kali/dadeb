@@ -12,25 +12,25 @@ daharness-index — build or refresh the semantic tool-registry index
 
 # DESCRIPTION
 
-The packaged deb ships an **empty** tool registry: the chroma collection
-`tool_inventory` starts unpopulated and nothing fills it for you (the
+The packaged deb ships an **empty** tool registry: the SQLite vector
+store `tool_inventory` starts unpopulated and nothing fills it for you (the
 services daemon never indexes — indexing was removed from its boot path
 deliberately). **daharness-index** is the operator's one-typing pass that
 builds it: discovery (static AST sweep + `@framework_tool` dynamic scan)
-over the installed tree, embedding of every manifest through Ollama, and
-upsert into the chroma collection that every discovery lane reads —
+over the installed tree, embedding of every manifest through the embed
+endpoint, and upsert into the registry that every discovery lane reads —
 *tools/search*, *tools/execute* (exact-id and semantic), */mcp*
 *tools/list*, the operator REPL, and memory recall.
 
-Before doing any work it probes its two live dependencies and prints the
-exact fix rather than a traceback: the chroma registry backend (the
-*daharness* daemon's own sidecar — or a manual *daharness-chroma* lane
-when running outside the service) and the Ollama host with the embed
-model (default **nomic-embed-text**). Probe knobs are read from
-/etc/daharness/daharness.env (CHROMA_PORT, EMBED_MODEL, EMBED_URL),
-so a conffile retune is honored. The indexer writes
-only through the chroma HTTP server, so it runs as **any user** — no
-sudo needed (unless your conffile points at something privileged).
+Before doing any work it probes its live dependency and prints the
+exact fix rather than a traceback: the embed endpoint (EMBED_URL, default
+http://localhost:11434/api/embed) with the embed model (default
+**nomic-embed-text**). Probe knobs are read from
+/etc/daharness/daharness.env (EMBED_MODEL, EMBED_URL),
+so a conffile retune is honored. The indexer writes to a local SQLite
+file (tool_registry.db under the workspace root), so it needs filesystem
+write access to the state root (run as root on the deb lane, or as a
+member of the daharness group).
 
 Re-runs are idempotent (upsert by tool id): newly added tools appear
 without rebuilding. **--clear** wipes the collection first, for
@@ -52,9 +52,9 @@ without this pass an editor flags *every framework call* undefined — the
 stubs close that gap from the alias/signature pipeline verbatim, so they
 cannot drift from what actually executes.
 
-This lane is **offline compute** (static AST + dynamic import — no chroma,
-no Ollama), so it routes *before* the index probes: a down registry or
-embed host never blocks it. The one prerequisite it enforces itself is a
+This lane is **offline compute** (static AST + dynamic import — no embed
+endpoint), so it routes *before* the index probes: a down embed host
+never blocks it. The one prerequisite it enforces itself is a
 complete typeshed `builtins.pyi` to fork (the Pylance-extension, wheel-pyright, or
 the deb's own bundled `scripts/pyright_typeshed_builtins.pyi` copy) —
 refused loudly rather than shipping a partial fork that un-defines `print`/`len`. Output lands in *FRAMEWORK_STUBS_DIR*

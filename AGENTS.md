@@ -18,7 +18,7 @@ The registry/dispatch machinery lives in `daharness/registry.py` +
 `daharness/executor.py`. The driving model reaches it through the API
 gateway, the MCP endpoint, the tool REPL, or the Jupyter kernel:
 
-- **Search** — semantic search over the ChromaDB tool registry
+- **Search** — semantic search over the SQLite-backed tool registry
   (`ToolRegistry.find_tools`, bounded by `SECRETARY_MAX_TOP_K`), returns
   full manifests.
 - **Dispatch** — `find_best_tool` resolves an intent to one tool (abstains
@@ -31,7 +31,7 @@ wants sign-off adds its own layer in front of the gateway.
 
 The `daharness/` package splits imports across focused modules:
 - `daharness.core` — backwards-compat shim re-exporting legacy public names
-- `daharness.executor` — standalone execution helpers (no ChromaDB client)
+- `daharness.executor` — standalone execution helpers (no vector store client)
 - `daharness.registry` — `ToolRegistry`, `OllamaEmbeddingFunction`, discovery
 - `daharness.preflight` — argument preflight (manifest-schema validation +
   `_coerce_arg_value` type coercion)
@@ -333,7 +333,7 @@ call. Rules that keep it honest:
 ### Capability doctor (`auxiliaries/framework_status.py:framework_doctor`)
 
 `framework_health` answers "is the harness alive" (Brain/embedding endpoint/
-Chroma/ZAP/ids.db up/down). `framework_doctor` answers "can I actually run X" —
+registry/ZAP/ids.db up/down). `framework_doctor` answers "can I actually run X" —
 REA-style per-provider probes returning `{available, reason, remediation}`:
 r2 + r2ghidra plugin + drop dir, jadx + java + apk dir, masscan + raw-socket
 (CAP_NET_RAW) capability, msfconsole/msfvenom + RPC port, PATH probes for
@@ -385,7 +385,7 @@ Deterministic, reference-keyed store the model retrieves from via
 
 ### Memory Service (`memories.py`)
 
-ChromaDB persistent client (`.memory/chroma`). Namespaced collections
+SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections
 (`memory_<namespace>`). Operations: `remember`, `search` (keyword),
 `recall` (vector), `get`, `forget`. Session-scoped filtering via
 `where` clauses. All five operations are `@framework_tool`-decorated.

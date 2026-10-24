@@ -33,7 +33,7 @@ Embedding: ``tagged_doc`` appends ``"\\n\\nCategories: <csv>"`` to the tool doc.
 Because the doc IS the embedded text (``internal_semantic_capability``), a tag
 change alters the doc -> ``register_tool``'s change-detection re-embeds it on
 the next ``python -m daharness.core`` with no extra logic.  Tags also persist
-in ChromaDB metadata (``tags_json``) and surface in ``describe_manifest`` so
+in registry metadata (``tags_json``) and surface in ``describe_manifest`` so
 the secretary sees the category next to every search hit.
 
 OPERATOR DECISION 2026-09-22 — 13th bucket ``net.services`` ADDED as the

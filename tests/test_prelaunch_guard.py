@@ -56,12 +56,11 @@ def test_stack_probe_down_ports(monkeypatch, closed_port, tmp_path):
     monkeypatch.setattr(bootstrap, "GATEWAY_PORT", closed_port)
     monkeypatch.setattr(bootstrap, "ZAP_PORT", closed_port)
     monkeypatch.setattr(bootstrap, "MSF_RPC_PORT", closed_port)
-    monkeypatch.setattr(bootstrap, "CHROMA_PORT", closed_port)
     dead = tmp_path / "no-such.sock"
     monkeypatch.setattr(bootstrap, "brain_socket_path", lambda: str(dead))
     live = bootstrap._stack_live_probes()
     assert live == {"brain": False, "gateway": False, "zap": False,
-                    "msf": False, "chroma": False}
+                    "msf": False}
 
 
 def test_stack_probe_detects_real_listener(monkeypatch, tcp_listener,
@@ -69,7 +68,6 @@ def test_stack_probe_detects_real_listener(monkeypatch, tcp_listener,
     monkeypatch.setattr(bootstrap, "GATEWAY_PORT", tcp_listener)
     monkeypatch.setattr(bootstrap, "ZAP_PORT", closed_port)
     monkeypatch.setattr(bootstrap, "MSF_RPC_PORT", closed_port)
-    monkeypatch.setattr(bootstrap, "CHROMA_PORT", closed_port)
     dead = tmp_path / "no-such.sock"
     monkeypatch.setattr(bootstrap, "brain_socket_path", lambda: str(dead))
     live = bootstrap._stack_live_probes()
@@ -91,18 +89,6 @@ def test_stack_probe_detects_live_brain_socket(monkeypatch, tmp_path):
     finally:
         server.close()
         sock_path.unlink(missing_ok=True)
-
-
-def test_stack_probe_detects_chroma_listener(monkeypatch, tcp_listener,
-                                             closed_port):
-    """The chroma member probes the registry backend's TCP port."""
-    monkeypatch.setattr(bootstrap, "CHROMA_PORT", tcp_listener)
-    monkeypatch.setattr(bootstrap, "CHROMA_HOST", "127.0.0.1")
-    monkeypatch.setattr(bootstrap, "GATEWAY_PORT", closed_port)
-    monkeypatch.setattr(bootstrap, "ZAP_PORT", closed_port)
-    monkeypatch.setattr(bootstrap, "MSF_RPC_PORT", closed_port)
-    probe = bootstrap._stack_live_probes()
-    assert probe["chroma"] is True
 
 
 # ---------------------------------------------------------------- guard
@@ -139,8 +125,7 @@ def test_guard_refuse_message_names_remediations(monkeypatch, capsys):
     assert "systemctl stop daharness" in out
     assert "daharness --force" in out
     assert "daharness-repl" in out
-    for label in ("brain socket", "API gateway", "OWASP ZAP", "msfrpcd",
-                  "chroma lane"):
+    for label in ("brain socket", "API gateway", "OWASP ZAP", "msfrpcd"):
         assert label in out
 
 
@@ -192,23 +177,23 @@ def test_cli_doctor_command():
 
 
 def test_cli_doctor_provider_drilldown(monkeypatch, capsys):
-    """`daharness doctor chroma` routes the provider into framework_doctor
+    """`daharness doctor registry` routes the provider into framework_doctor
     (the wait-timeout error text advertises exactly this spelling)."""
     import auxiliaries.framework_status as fstat
     seen = {}
     fake = {"overall": "ok", "available": "1/1",
-            "providers": {"chroma": {"available": True,
+            "providers": {"registry": {"available": True,
                                      "reason": "answering", "remediation": "",
-                                     "provider": "chroma"}},
+                                     "provider": "registry"}},
             "timestamp": "t"}
 
     def spy(provider=""):
         seen["p"] = provider
         return fake
     monkeypatch.setattr(fstat, "framework_doctor", spy)
-    assert bootstrap._print_doctor(provider="chroma") == 0
-    assert seen["p"] == "chroma"
-    assert "chroma" in capsys.readouterr().out
+    assert bootstrap._print_doctor(provider="registry") == 0
+    assert seen["p"] == "registry"
+    assert "registry" in capsys.readouterr().out
 
 
 def test_cli_rejects_unknown_command(capsys):

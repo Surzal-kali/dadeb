@@ -2,9 +2,8 @@
 # directory at build time (pip install --target, see debian/rules).
 # PREPENDED to sys.path: the vendored closure must WIN overlaps. Proven on
 # the VM 2026-10-20 — apt ships PARTIAL/OLDER copies of the same namespace
-# family (python3-opentelemetry-api 1.44.0 only, no sdk/exporters) and under
-# append order its dist-packages shadow of `opentelemetry.attributes` broke
-# chromadb's exporter chain (ImportError: _clean_attribute_value). The
+# family and under append order its dist-packages shadow broke vendored
+# packages' exporter chains. The
 # closure is an exact-pinned, internally-consistent set rebuilt with every
 # deb; the import floor arbitrates any skew it creates. Inert when vendor/
 # is absent (every dev-tree lane keeps pristine behavior).

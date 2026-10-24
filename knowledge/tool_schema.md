@@ -741,7 +741,7 @@ whole lane degrades silently when Postgres is down.
 ## utils/memory_tools.py — text memory store (shared with framework_memory_search)
 
 > **`remember_text`/`recall_text` and the bridge `framework_memory_search`
-> tool are the same store.** Both read/write the same ChromaDB-backed
+> tool are the same store.** Both read/write the same SQLite-backed
 > vector memory. `remember_text` is the in-kernel write path;
 > `framework_memory_search` is the bridge read path. Both accept
 > `namespace` and `agent_id` for scoping. Use `remember_text` inside

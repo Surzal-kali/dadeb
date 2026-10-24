@@ -92,7 +92,7 @@ if you want a fully clean machine — `postrm` prints this ledger at purge
 time and never scrubs it silently:
 
 - `/var/lib/daharness/` — state root (ids.db, scratch.db, cookie_jar.db,
-  scope/, engagement/, dropbox, chroma, run). Operator work product; the
+  scope/, engagement/, dropbox, run). Operator work product; the
   engagement purge command erases per-engagement rows while you still want
   the rest. `rm -rf /var/lib/daharness` discards everything (the system user
   is gone at this point, so no service recreates it).

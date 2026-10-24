@@ -14,7 +14,7 @@ All commands assume the repo root and your venv active.
 python tool_repl.py selftest
 
 # Subsystem health: Brain socket, embedding endpoint (EMBED_URL),
-# ChromaDB, ZAP, findings DB, plus the registry tool count.
+# embedding endpoint, tool registry, ZAP, findings DB, plus the registry tool count.
 # Also works after bootstrap:
 python tool_repl.py run framework_status
 ```
@@ -25,7 +25,7 @@ Read them together:
 | --- | --- |
 | `selftest` fails for tool X, but `framework_status` is all-up | The tool (or its external CLI) — check that tool's backend binary is on `PATH` |
 | `framework_status` shows Ollama down | Your model endpoint. Check `.env` → `OLLAMA_BASE_URL`, and that Ollama is actually running (`ollama list`) |
-| `framework_status` shows ChromaDB down but the REPL `list` works | Discovery works; only *semantic search* needs ChromaDB. Start the server (`docker run -p 9000:8000 chromadb/chroma`) |
+| `framework_status` shows tool_registry down but the REPL `list` works | Discovery works; only *semantic search* needs the registry. Run `daharness-index` to build it |
 | Brain socket down | `bootstrap.py` starts it; check `/tmp/brain.log`. In-process fallback still executes `BRAIN_DISPATCH` tools, but sessions held by the Brain are invisible to it (see AGENTS.md pitfalls) |
 
 ## 2. The three setup mistakes everyone makes first

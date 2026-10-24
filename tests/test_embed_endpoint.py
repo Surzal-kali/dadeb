@@ -204,20 +204,13 @@ def _install_capture_transport(monkeypatch, responder):
 
 
 def _unwrapped_call(fn, texts):
-    """Invoke the async __call__ the chroma wrapper hides.
+    """Invoke the async __call__ directly.
 
-    chromadb 1.5.9's ``EmbeddingFunction.__init_subclass__`` re-wraps every
-    subclass ``__call__`` into a sync function that immediately validates
-    the result — a coroutine has no ``len()``, so the wrapped lane explodes
-    before any HTTP logic runs. The registry never lets chroma call this EF
-    with text inputs (documents are embedded via ``ToolRegistry._embed_text``
-    and upserted as vectors), so the wrapper lane never executes in
-    production either. The true async original survives in the wrapper's
-    closure; grab it and test the actual HTTP lane.
+    The OllamaEmbeddingFunction no longer inherits from chromadb's
+    EmbeddingFunction (chromadb was removed), so ``__call__`` is the
+    async function we defined — no wrapper to unwrap. Just await it.
     """
-    wrapper = type(fn).__dict__["__call__"]
-    original = wrapper.__closure__[0].cell_contents
-    return asyncio.run(original(fn, texts))
+    return asyncio.run(fn(texts))
 
 
 def _native_response(request: httpx.Request) -> httpx.Response:

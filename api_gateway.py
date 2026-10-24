@@ -427,21 +427,19 @@ class APIGateway:
         self.tool_budget = ToolBudget()
 
         # Registry availability guard (degraded-mode lane). ``tool_registry``
-        # is None when chroma was unreachable at gateway boot; the manifest
-        # store IS the registry, so every tool op (exact-id included) needs
-        # it on this lane. Semantic lookup + dispatch return the same
-        # remediation the chroma doctor provider emits; /health, scratch
-        # (the durable store, no chroma) and memory (own embedded store)
-        # are registry-independent and stay fully live.
+        # is None when the SQLite-backed vector store failed to open at
+        # gateway boot; the manifest store IS the registry, so every tool
+        # op (exact-id included) needs it on this lane. Semantic lookup +
+        # dispatch return the same remediation; /health, scratch (the
+        # durable store) and memory (own embedded store) are registry-
+        # independent and stay fully live.
         self.registry_down_reason = None
         if tool_registry is None:
             self.registry_down_reason = (
-                "chroma registry backend unreachable — semantic search and "
-                "tool dispatch are DOWN until it answers on "
-                "CHROMA_HOST:CHROMA_PORT. Remediation: `sudo daharness doctor "
-                "chroma` grades the lane; boot the stack (systemctl start "
-                "daharness — the daemon spawns chroma as a supervised "
-                "sidecar) or run daharness-chroma manually."
+                "tool registry unavailable — the SQLite vector store "
+                "failed to open. Remediation: `sudo daharness doctor` "
+                "grades the lane; check that the workspace root is "
+                "writable and tool_registry.db is not locked."
             )
         # Build self.app (FastAPI + MCP transport + every route) — kept in a
         # named method so the degraded-guard above and the app assembly have
@@ -456,7 +454,7 @@ class APIGateway:
         callers wrap). Never a bare 500: an operator mid-incident gets the
         doctor's remediation, not a stack dump."""
         assert self.registry_down_reason
-        logging.info("Refused %s: registry unavailable (chroma down)", what)
+        logging.info("Refused %s: registry unavailable (vector store down)", what)
         return self.registry_down_reason
 
     def _init_mcp_and_app(self) -> None:
@@ -530,7 +528,7 @@ class APIGateway:
             return {
                 "status": "degraded" if self.tool_registry is None else "ok",
                 "registry": ("down — " + self.registry_down_reason
-                             if self.tool_registry is None else "chroma-backed, ready"),
+                             if self.tool_registry is None else "ready (SQLite vector store)"),
             }
 
         @self.app.post("/tools/execute")
@@ -760,7 +758,7 @@ class APIGateway:
         async def search_memory(req: MemorySearchRequest):
             if not req.query_text:
                 raise HTTPException(400, "query_text is required for text-based search")
-            # ChromaDB calls are synchronous and would block the event loop
+            # Vector store calls are synchronous and would block the event loop
             # (and every concurrent MCP session / REST request) for the duration
             # of the query; run them in a worker thread instead.
             return await asyncio.to_thread(
@@ -1024,7 +1022,7 @@ class APIGateway:
                     if not query_text:
                         return self._error(f"{MEMORY_SEARCH}: 'query_text' is required for text-based search")
                     agent_id = arguments.get("agent_id")
-                    # Run the blocking ChromaDB query off the event loop.
+                    # Run the blocking vector store query off the event loop.
                     result = await asyncio.to_thread(
                         self.memory_service.search,
                         namespace=namespace, query_text=query_text, agent_id=agent_id,
@@ -1173,23 +1171,21 @@ class APIGateway:
 
 async def run(loader, host="127.0.0.1", port=5000):
     # Reuse the loader's already-initialized ToolRegistry instead of building a
-    # second one.  The loader's registry shares the same ChromaDB collection,
+    # second one.  The loader's registry shares the same SQLite vector store,
     # cached tool instances (MetasploitClient, SMBScanner, ...), and Brain
     # dispatch state that bootstrap spent startup time priming.  Constructing a
     # fresh registry here would create a parallel set of class instances and
     # silently desync state (e.g. two MetasploitClient objects fighting over
     # the same console handle).
     #
-    # Degraded-registry lane: chromadb's HttpClient handshakes IN ITS
-    # CONSTRUCTOR (get_user_identity), so a down backend raises before any
-    # lane can serve — observed live 2026-10-21 (ghost-uid persist dir killed
-    # the chroma sidecar, then "API server failed to start: Could not connect
-    # to a Chroma server" took the whole unit to failed). The framework's
-    # contract is degrade-honestly: exact tool_id dispatch, scratch, memory,
-    # and /health must stay callable past a dead registry — the same posture
-    # the Brain's in-process fallback lane already holds. Semantic lookup
-    # returns the doctor's remediation instead of a 500; the lane self-heals
-    # when the sidecar returns (recreated registry, same collection).
+    # Degraded-registry lane: the SQLite-backed vector store opens a local
+    # file in its constructor — if the workspace root is unwritable or the
+    # DB file is locked, the constructor raises and the registry stays None.
+    # The framework's contract is degrade-honestly: exact tool_id dispatch,
+    # scratch, memory, and /health must stay callable past a dead registry —
+    # the same posture the Brain's in-process fallback lane already holds.
+    # Semantic lookup returns the remediation instead of a 500; the lane
+    # self-heals when the DB becomes writable (recreated registry).
     tool_registry = loader.vector_registry
     if tool_registry is None:
         # Fallback: if the loader failed to init its registry, construct one
@@ -1203,13 +1199,10 @@ async def run(loader, host="127.0.0.1", port=5000):
             )
         except Exception as exc:
             logger.error(
-                "[gateway] registry unavailable (chroma backend down on "
-                "%s:%s?) — booting in degraded mode: exact tool_id dispatch, "
+                "[gateway] registry unavailable (vector store failed to "
+                "open) — booting in degraded mode: exact tool_id dispatch, "
                 "scratch, memory and /health stay up; semantic lookup "
-                "returns the chroma remediation until the backend returns "
-                "(daharness doctor chroma). Error: %s",
-                os.getenv("CHROMA_HOST", "localhost"),
-                os.getenv("CHROMA_PORT", "9000"),
+                "returns the remediation until the DB is writable. Error: %s",
                 exc,
             )
             tool_registry = None

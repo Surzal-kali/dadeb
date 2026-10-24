@@ -7,8 +7,8 @@ discovered tool, keyed by short alias.  Static analysis can't see those names �
 they don't exist until discovery scans the repo.  This script closes that gap
 for the editor lane:
 
-  1. Run the same no-ChromaDB discovery the REPL itself uses
-     (``tool_repl.discover_tools`` — static AST + dynamic import, zero ChromaDB).
+  1. Run the same no-vector-store discovery the REPL itself uses
+     (``tool_repl.discover_tools`` — static AST + dynamic import, zero embed calls).
   2. Feed the manifests through ``tool_repl.build_tool_aliases`` VERBATIM — the
      alias map this emits is the same one that executes inside the REPL.
      Reimplementing alias logic here would guarantee drift.

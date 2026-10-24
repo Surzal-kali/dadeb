@@ -1,7 +1,7 @@
 """Tool discovery and semantic registry API.
 
 Owns the configuration constants, the Ollama embedding function and the
-:class:`ToolRegistry` — the ChromaDB-backed inventory of tool manifests plus
+:class:`ToolRegistry` — the SQLite-backed inventory of tool manifests plus
 discovery/embedding/search. Execution behaviour is mixed in from :mod:`daharness.executor`, so this
 module stays focused on the registry itself.
 """
@@ -18,9 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import chromadb
 import httpx
-from chromadb.utils import embedding_functions
 from pydantic import ValidationError
 
 from constants import TransportType, resolve_framework_root, dacustoms_dir
@@ -37,6 +35,7 @@ from .embedding import (
 from .tool_tags import resolve_tags, tagged_doc
 from .models import ToolManifest
 from .executor import ExecutorMixin
+from .vector_store import VectorStore
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -125,7 +124,7 @@ ALLOWED_TOOL_ROOTS = _RootsProxy()
 SECRETARY_MAX_TOP_K = 10
 # Router abstention: with no human in the loop, the API dispatch path
 # refuses to run anything whose semantic match is not this close.
-# Distance is chromadb L2 on nomic-embed-text normalized vectors
+# Distance is cosine (1 - similarity) on nomic-embed-text normalized vectors
 # (0 = identical). 1.1 calibrated live: good matches ~0.3-0.9.
 ROUTER_MAX_DISTANCE = float(os.getenv("ROUTER_MAX_DISTANCE", "1.1"))
 # The chat lane's own knobs (SECRETARY_MODEL, SECRETARY_MAX_APPROVAL_ROUNDS,
@@ -139,9 +138,14 @@ ROUTER_MAX_DISTANCE = float(os.getenv("ROUTER_MAX_DISTANCE", "1.1"))
 # shapes (Ollama native + OpenAI-compat). utils/memory_tools.py shares the
 # same helpers, so the registry and memory lanes can't drift. The class
 # name stays OllamaEmbeddingFunction for call-site/export compatibility.
+#
+# The chromadb.utils.embedding_functions.EmbeddingFunction base class was
+# removed with chromadb — it was a Protocol whose only runtime effect was
+# __init_subclass__ checking for __call__. Our class defines __call__ and
+# name directly.
 
 
-class OllamaEmbeddingFunction(embedding_functions.EmbeddingFunction):
+class OllamaEmbeddingFunction:
     """HTTP embeddings client for the tool registry.
 
     Posts ``{"model", "input"}`` to ``EMBED_URL`` (default: the shipped
@@ -170,6 +174,20 @@ class OllamaEmbeddingFunction(embedding_functions.EmbeddingFunction):
 
 # --- Tool Registry ---
 class ToolRegistry(ExecutorMixin):
+    # Path to the SQLite-backed vector store. Resolved from the workspace
+    # root (state root on the deb, checkout on dev) so the registry DB lives
+    # alongside ids.db, scratch.db, etc. — not inside the read-only code tree.
+    _DB_PATH: Path | None = None
+
+    @classmethod
+    def _registry_db_path(cls) -> Path:
+        """Resolve the vector store SQLite path under the workspace root."""
+        if cls._DB_PATH is not None:
+            return cls._DB_PATH
+        from constants import resolve_workspace_root
+        cls._DB_PATH = resolve_workspace_root() / "tool_registry.db"
+        return cls._DB_PATH
+
     def __init__(
         self,
         embedding_model: OllamaEmbeddingFunction,
@@ -177,11 +195,11 @@ class ToolRegistry(ExecutorMixin):
     ):
         self.embedding_model = embedding_model
         self.rpc_registry = rpc_servers or {}
-        self.client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+        db_path = str(self._registry_db_path())
+        self.client = VectorStore(db_path)
         self.collection = self.client.get_or_create_collection(
             name="tool_inventory",
             metadata={"hnsw:space": "cosine"},
-            embedding_function=self.embedding_model,
         )
         # Lazily-created class instances for in-process launches of
         # @framework_tool methods (e.g. MetasploitClient, SMBScanner).
@@ -319,7 +337,7 @@ class ToolRegistry(ExecutorMixin):
                 self.collection.delete(ids=[m.module_id])
 
             vector = await self._embed_text(m.internal_semantic_capability)
-            self.collection.add(
+            self.collection.upsert(
                 ids=[m.module_id],
                 embeddings=[vector],
                 metadatas=[
@@ -623,7 +641,7 @@ class ToolRegistry(ExecutorMixin):
                         # The tags are appended to the doc ("Categories: ...")
                         # BEFORE embedding so category keywords match
                         # semantically, and carried on the manifest so they
-                        # persist in ChromaDB metadata + describe_manifest.
+                        # persist in registry metadata + describe_manifest.
                         tags = resolve_tags(
                             tool_id,
                             getattr(func, "_tool_tags", ()) or (),
@@ -746,7 +764,7 @@ class ToolRegistry(ExecutorMixin):
         for i, manifest in enumerate(discovered, 1):
             print(f"[{i}/{len(discovered)}] Registering {manifest.module_id}...")
             await self.register_tool(manifest)
-        total = len(self.collection.get(include=[]).get("ids", []))
+        total = self.collection.count()
         print(f"[bootstrap] Complete! Total tools registered: {total}")
         return total
 
@@ -823,7 +841,7 @@ class ToolRegistry(ExecutorMixin):
         return ()
 
     async def find_tools(self, user_intent: str, top_k: int = 5) -> list[ToolManifest]:
-        """Semantic search using ChromaDB's HNSW index, returning up to `top_k` manifests."""
+        """Semantic search using cosine similarity (brute-force numpy), returning up to `top_k` manifests."""
         if not user_intent or not user_intent.strip():
             return []
 
@@ -876,7 +894,7 @@ class ToolRegistry(ExecutorMixin):
                 )
             )
         # T-002: Explicitly sort by distance ascending so array position ==
-        # relevance order. ChromaDB's HNSW query usually returns ascending
+        # relevance order. The brute-force cosine sort returns ascending
         # order, but this is not contractually guaranteed across versions /
         # configurations; an unsorted (or worst-first) array causes agents
         # that read array position instead of the distance field to

@@ -72,34 +72,34 @@ def test_default_service_is_lazy_and_path_is_lane_safe(state_root):
 
     svc = memories.get_default_service()
     assert memories._default_service is svc
-    assert svc.storage_path == str(state_root / ".memory" / "chroma")
+    assert svc.storage_path == str(state_root / ".memory" / "vectors.db")
 
 
-def test_fresh_chroma_dir_gets_group_shareable_shape(state_root):
+def test_fresh_db_dir_gets_group_shareable_shape(state_root):
     """Fresh dir: dirs 2770 / files 0660 regardless of the process umask —
     the systemd unit's StateDirectoryMode=2770 + UMask=0007 intent."""
     from memories import MemoryService
 
-    svc = MemoryService(storage_path=str(state_root / "chroma"))
-    root = Path(svc.storage_path)
-    db = root / "chroma.sqlite3"
+    svc = MemoryService(storage_path=str(state_root / "vectors.db"))
+    root = Path(svc.storage_path).parent
+    db = Path(svc.storage_path)
     assert stat.S_IMODE(os.stat(root).st_mode) == 0o2770
     assert stat.S_IMODE(os.stat(db).st_mode) == 0o660
     assert svc.list_namespaces() == []
 
 
 def test_owner_heals_tight_umask_db(state_root):
-    """A 0640 chroma.sqlite3 (observed live on the deb 2026-10-21) made the
+    """A 0640 vectors.db (observed live on the deb 2026-10-21) made the
     file read-only for every group member. The owner process restores g+w
     at construction so one service boot repairs it for the group."""
     from memories import MemoryService
 
-    chroma = state_root / "chroma2"
-    chroma.mkdir()
-    db = chroma / "chroma.sqlite3"
+    vdir = state_root / ".memory2"
+    vdir.mkdir()
+    db = vdir / "vectors.db"
     db.write_text("")
     os.chmod(db, 0o640)
 
-    svc = MemoryService(storage_path=str(chroma))
+    svc = MemoryService(storage_path=str(db))
     assert stat.S_IMODE(os.stat(db).st_mode) == 0o660
     assert svc.list_namespaces() == []

@@ -25,23 +25,20 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	mkdir -p debian/daharness/usr/share/daharness
-	# Vendored-wheel lane (decided 2026-10-20): chromadb ships IN the deb —
-	# the daemon boot path imports it at top level (daharness/registry.py);
-	# uncaught ImportError = systemctl exit 1. pydantic-ai is not vendored
-	# because it is not a dependency at all — the chat lane
-	# (daharness/agent.py) was removed 2026-10-20.
-	# Lives HERE, not in dh_auto_build: dh's implied sequence runs dh_prep
-	# BETWEEN the build and install overrides, and dh_prep rm -rf's
+	# Vendored-wheel lane: pytest ships IN the deb for the selftest
+	# macro. chromadb was removed (replaced by a local SQLite + numpy
+	# vector store — no server process, no network dependency at build
+	# time). Lives HERE, not in dh_auto_build: dh's implied sequence runs
+	# dh_prep BETWEEN the build and install overrides, and dh_prep rm -rf's
 	# debian/daharness wholesale — vendor wheels installed in the build
 	# override were wiped before dh_auto_install re-created the staging
 	# tree (observed on VM 2026-10-20: deb size identical with/without).
 	# pip --target is PEP-668-clean (private dir, no system munging);
 	# sitecustomize.py appends <tree>/vendor so apt packages win overlaps.
-	# Network needed here; ~100-250MB disk weight accepted in the ledger.
 	mkdir -p debian/daharness/usr/share/daharness/vendor
 	python3 -m pip install --target \
 	  debian/daharness/usr/share/daharness/vendor \
-	  "chromadb==1.5.9" "pytest==9.1.1"
+	  "pytest==9.1.1"
 	# Bytecode the vendor closure: --no-compile saved build seconds but
 	# charged EVERY import (105-probe floor floor, daemon boots) the full
 	# source parse — vendor .pyc makes repeat imports ~3-6x faster.
@@ -88,13 +85,10 @@ override_dh_auto_install:
 	install -D -m 0755 packaging/bin/daharness debian/daharness/usr/bin/daharness
 	install -D -m 0755 packaging/bin/daharness-kernel debian/daharness/usr/bin/daharness-kernel
 	install -D -m 0755 packaging/bin/daharness-repl debian/daharness/usr/bin/daharness-repl
-	# vendored chroma server: the registry dials CHROMA_HOST/PORT (9000);
-	# no docker on the deb lane, the vendored closure serves it natively
-	install -D -m 0755 packaging/bin/daharness-chroma debian/daharness/usr/bin/daharness-chroma
 	# optional engagement-Postgres lane (daharness-pg(1)) + its init bundle:
 	# installed but inert until `sudo apt install postgresql` + `daharness-pg init`.
 	install -D -m 0755 packaging/bin/daharness-pg debian/daharness/usr/bin/daharness-pg
-	# operator re-index pass: fresh deb ships an EMPTY chroma registry;
+	# operator re-index pass: fresh deb ships an EMPTY registry;
 	# nothing fills it for you (daemon boot never indexes — deliberate).
 	install -D -m 0755 packaging/bin/daharness-index debian/daharness/usr/bin/daharness-index
 	# The IDE-facing stub lane ships with the wrapper that routes to it

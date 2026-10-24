@@ -21,7 +21,7 @@ class ToolManifest(BaseModel):
     # Typed session handle kinds this tool consumes (e.g. ("ssh",)).
     # Empty tuple means the tool takes no session handle.  Populated from the
     # @framework_tool(..., accepted_handle_kinds=...) decorator and persisted
-    # in the ChromaDB metadata so it survives re-indexing.  The secretary
+    # in the registry metadata so it survives re-indexing.  The secretary
     # validates any ``handle`` argument's kind against this set before
     # execution and rejects cross-namespace calls with a ModelRetry.
     accepted_handle_kinds: tuple[str, ...] = Field(default_factory=tuple)
@@ -32,7 +32,7 @@ class ToolManifest(BaseModel):
     distance: float | None = None
     # Next-action hints: human-curated suggestions for what tool to call
     # after this one succeeds.  Populated from the ``@framework_tool(...,
-    # next_hints=[...])`` decorator and persisted in ChromaDB metadata so it
+    # next_hints=[...])`` decorator and persisted in registry metadata so it
     # survives re-indexing.  Surfaced in ``describe_manifest`` so the
     # secretary model sees actionable next steps, not just a capability
     # description.  Examples: secretsdump -> "psexec_exec with -hashes
@@ -42,7 +42,7 @@ class ToolManifest(BaseModel):
     # Populated from the @framework_tool(..., tags=[...]) decorator or the
     # bulk TOOL_TAGS map, appended to the embedded capability text
     # ("Categories: ...") so category keywords match semantically, and
-    # persisted in ChromaDB metadata (tags_json) so they survive re-indexing.
+    # persisted in registry metadata (tags_json) so they survive re-indexing.
     # Surfaced in describe_manifest so the secretary sees the category next
     # to every search hit.
     tags: tuple[str, ...] = Field(default_factory=tuple)
@@ -50,13 +50,13 @@ class ToolManifest(BaseModel):
     # (utils/result_projection.py).  Populated from the
     # @framework_tool(..., result_digest=fn) decorator.  Stored as the
     # adapter's qualname string (not the callable itself) so the manifest
-    # stays serializable for ChromaDB metadata.  The registry resolves the
+    # stays serializable for registry metadata.  The registry resolves the
     # The registry resolves the
     # callable at discovery time and registers it with result_projection.
     result_digest_ref: str | None = None
     # Untrusted-target provenance.  Populated from the
     # @framework_tool(..., untrusted_target=True) decorator and persisted in
-    # ChromaDB metadata.  The executor stamps every result envelope from such
+    # registry metadata.  The executor stamps every result envelope from such
     # tools with _provenance.untrusted_target=True; the projection layer
     # carries the stamp through large/digest/page modes.  Target output is
     # data, never instructions.

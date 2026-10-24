@@ -5,7 +5,7 @@ semantically except ``run_selftest`` — the pytest-lane macro that replaces
 the legacy ``sweep`` command (see the selftest docstring for why the sweep
 lane was shelved).
 
-No ChromaDB, no secretary, no model: these helpers build a bare
+No vector store, no secretary, no model: these helpers build a bare
 ``ToolRegistry`` instance via ``__new__`` and execute tools directly through
 the executor's dispatch chain (same preflight + scope-gate + Brain transport
 as the Brain and the agent lanes).
@@ -63,10 +63,10 @@ def _selftest_cache_dir() -> str:
     return cache_dir
 
 
-# ── Lightweight executor (no ChromaDB, no secretary) ─────────────────────────
+# ── Lightweight executor (no vector store, no secretary) ─────────────────────────
 
 def _make_executor() -> ToolRegistry:
-    """Create a bare ToolRegistry instance for tool execution without ChromaDB."""
+    """Create a bare ToolRegistry instance for tool execution without a vector store client."""
     reg = ToolRegistry.__new__(ToolRegistry)
     reg._tool_instances = {}
     return reg
@@ -75,7 +75,7 @@ def _make_executor() -> ToolRegistry:
 # ── Discover tools ──────────────────────────────────────────────────────────
 
 def discover_tools() -> list[ToolManifest]:
-    """Discover all tools using the registry's static+dynamic scan (no ChromaDB)."""
+    """Discover all tools using the registry's static+dynamic scan (no vector store required)."""
     reg = ToolRegistry.__new__(ToolRegistry)
     return reg.discover_local_tools()
 

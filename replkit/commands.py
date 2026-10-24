@@ -83,7 +83,7 @@ def repl_help():
     print("""
 Tool REPL commands:
   list [filter]          List all tools (optional substring filter)
-  search <query>         Semantic search via ChromaDB (needs Ollama + ChromaDB);
+  search <query>         Semantic search via the registry (needs embed endpoint);
                          results render worst-first so rank #1 sits right above the prompt
   info <tool_id>         Show full manifest for a tool
   resolve <tool_id>      Resolve a tool_id to its Python callable (dry run)
@@ -283,7 +283,7 @@ async def repl_loop(manifests: list[ToolManifest]):
                     print_manifest(m, verbose=True)
                     print(f"    #{rank}{dist}")
             except Exception as e:
-                print(f"  Search failed (needs ChromaDB + Ollama): {e}")
+]                print(f"  Search failed (needs embed endpoint): {e}")
 
         elif cmd == "reindex":
             manifests = discover_tools()

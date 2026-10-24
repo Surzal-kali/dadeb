@@ -666,7 +666,7 @@ def _new_registry():
 
 
 async def execute_tool(manifest: ToolManifest, arguments: dict, *, session_id: str = "0"):
-    """Execute a manifest without creating a ChromaDB client."""
+    """Execute a manifest without creating a vector store client."""
     return await _new_registry().execute_tool(manifest, arguments, session_id=session_id)
 
 
