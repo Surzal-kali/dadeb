@@ -332,8 +332,8 @@ call. Rules that keep it honest:
 
 ### Capability doctor (`auxiliaries/framework_status.py:framework_doctor`)
 
-`framework_health` answers "is the harness alive" (Brain/Ollama/Chroma/ZAP/
-ids.db up/down). `framework_doctor` answers "can I actually run X" —
+`framework_health` answers "is the harness alive" (Brain/embedding endpoint/
+Chroma/ZAP/ids.db up/down). `framework_doctor` answers "can I actually run X" —
 REA-style per-provider probes returning `{available, reason, remediation}`:
 r2 + r2ghidra plugin + drop dir, jadx + java + apk dir, masscan + raw-socket
 (CAP_NET_RAW) capability, msfconsole/msfvenom + RPC port, PATH probes for

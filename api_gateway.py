@@ -19,6 +19,18 @@ try:
 except Exception:
     pass
 
+# Load the engagement-cobweb Postgres lane env (/etc/daharness/pg.env on the
+# deb). The systemd units pick this up via EnvironmentFile=-, but a non-
+# systemd launch (sudo python api_gateway.py, dev lane) does not. override=False
+# so systemd-provided vars and explicit env exports still win.
+try:
+    from dotenv import load_dotenv as _ld
+    _pg_env = Path("/etc/daharness/pg.env")
+    if _pg_env.is_file():
+        _ld(_pg_env, override=False)
+except Exception:
+    pass
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel

@@ -55,21 +55,24 @@ def test_unreadable_state_root_reports_lane_block(state_root):
     assert "lane-permission" in finding["detail"]
 
 
-def test_ollama_unset_pointer_lives_in_the_probe(monkeypatch):
-    """OLLAMA_BASE_URL's unset note belongs here, not at registry import.
+def test_embed_endpoint_note_lives_in_the_probe(monkeypatch):
+    """The embedding endpoint note belongs here, not at registry import.
 
-    daharness.registry used to log an "unset" INFO on every import — every
-    lane (REPL, selftest, gateway, Brain boot) heard it, including the deb
-    lane that deliberately ships without the knob. The knob's only live
-    consumer is this health probe, so the note surfaces in its ollama
-    detail instead.
+    The harness's semantic lanes (tool registry + memory) ride EMBED_URL
+    (daharness/embedding.py), NOT OLLAMA_BASE_URL (that knob was decoupled
+    from embeddings and is the driving-LLM/health endpoint only).  The
+    health probe surfaces the resolved embed endpoint + model so the
+    operator can tell whether the semantic lanes are pointing at the right
+    place.
     """
-    from auxiliaries.framework_status import _ollama_env_note
+    from auxiliaries.framework_status import _embed_env_note
 
-    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    note = _ollama_env_note()
-    assert "OLLAMA_BASE_URL unset" in note
-    assert "EMBED_URL" in note
+    monkeypatch.delenv("EMBED_URL", raising=False)
+    note = _embed_env_note()
+    assert "EMBED_URL unset" in note
+    assert "nomic-embed-text" in note
 
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://10.40.0.9:11434/v1")
-    assert _ollama_env_note() == ""
+    monkeypatch.setenv("EMBED_URL", "http://10.40.0.9:8080/v1/embeddings")
+    note = _embed_env_note()
+    assert "EMBED_URL set" in note
+    assert "10.40.0.9" in note

@@ -150,20 +150,19 @@ def print_result(result: dict[str, Any]):
 
     # Result and stdout are mutually exclusive in the new envelope: when
     # structured data is present under "result", there is no stringified
-    # "stdout" copy of it.  Print whichever exists — never both.
+    # "stdout" copy of it.  Print whichever exists — never both.  No
+    # truncation: the REPL is the operator's debugging surface, so eliding
+    # output here forces a drop into the full IPython shell just to read a
+    # large tool result (framework_doctor's full provider sweep was the
+    # canonical casualty).  The terminal's own scrollback handles volume.
     res = result.get("result")
     if res is not None:
-        display = json.dumps(res, default=str, indent=2)[:2000]
-        if len(json.dumps(res, default=str)) > 2000:
-            display += "\n  ... (more data elided)"
+        display = json.dumps(res, default=str, indent=2)
         print(f"  result:\n{display}")
     else:
         stdout = result.get("stdout", "")
         if stdout:
-            display = stdout[:2000] if len(stdout) > 2000 else stdout
-            if len(stdout) > 2000:
-                display += f"\n  ... ({len(stdout) - 2000} more chars)"
-            print(f"  stdout:\n{display}")
+            print(f"  stdout:\n{stdout}")
 
     error = result.get("error")
     if error:
@@ -171,8 +170,7 @@ def print_result(result: dict[str, Any]):
 
     stderr = result.get("stderr", "")
     if stderr:
-        display = stderr[:1000] if len(stderr) > 1000 else stderr
-        print(f"  stderr:\n{display}")
+        print(f"  stderr:\n{stderr}")
 
 
 # ── Argument parsing: --flag value, using manifest schema for coercion ──────

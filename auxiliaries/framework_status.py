@@ -25,6 +25,7 @@ import time
 from typing import Any
 
 from constants import framework_tool, resolve_workspace_root, brain_socket_path
+from daharness.embedding import resolve_embed_url, embed_model
 from utils.snapshot_cache import get_snapshot_store
 
 
@@ -66,25 +67,25 @@ def _check_unix_socket(path: str) -> tuple:
         return False, f"error:{exc.errno or type(exc).__name__}"
 
 
-def _ollama_env_note() -> str:
-    """Pointer for an unset OLLAMA_BASE_URL, emitted where the knob is used.
+def _embed_env_note() -> str:
+    """Pointer for the embedding endpoint configuration.
 
-    The knob's only live consumer in the harness is this health probe
-    (the driving-LLM lanes are external), so the "unset → default" note
-    belongs in this output — not in an import-time log line that every
-    registry-importing lane heard (the deb ships without the knob).
+    The harness's only live consumer of an embedding endpoint is the
+    tool registry + memory lanes (daharness/embedding.py), which ride
+    ``EMBED_URL`` — NOT ``OLLAMA_BASE_URL`` (that knob is the driving-LLM/
+    health endpoint only and was decoupled from embeddings).  This note
+    surfaces the resolved endpoint + model so the operator can tell at a
+    glance whether the semantic lanes are pointing at the right place.
     """
-    if "OLLAMA_BASE_URL" in os.environ:
-        return ""
-    return (
-        " (OLLAMA_BASE_URL unset — default; driving-LLM/health knob only, "
-        "embeddings ride EMBED_URL; set in .env for a non-local LLM host)"
-    )
+    url = resolve_embed_url()
+    model = embed_model()
+    explicit = "EMBED_URL set" if os.getenv("EMBED_URL", "").strip() else "EMBED_URL unset — default"
+    return f" ({explicit}; model={model}; {url})"
 
 
 @framework_tool(
     "Report the operational health of the penetration testing framework: "
-    "Brain sidecar socket, Ollama LLM/embedding endpoints, ChromaDB vector "
+    "Brain sidecar socket, embedding endpoint (EMBED_URL), ChromaDB vector "
     "store, ZAP daemon, and SQLite findings database. Returns a structured "
     "JSON report with per-subsystem up/down verdicts and the tool count "
     "in the registry. Use this to verify the harness is alive before "
@@ -95,7 +96,7 @@ def framework_health() -> dict[str, Any]:
 
     Checks:
     - Brain sidecar UDS socket (checkout run/brain.sock, via brain_socket_path())
-    - Ollama API at the configured OLLAMA_BASE_URL
+    - Embedding endpoint at the configured EMBED_URL (daharness/embedding.py)
     - ChromaDB at the configured CHROMA_HOST:CHROMA_PORT
     - ZAP daemon at the configured ZAP_PORT
     - SQLite findings database at ids.db
@@ -107,19 +108,20 @@ def framework_health() -> dict[str, Any]:
     a service-user-owned state root) carry ``lane_blocked: true`` — a
     permission mismatch reported honestly, not an outage claim.
     """
-    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    ollama_env_note = _ollama_env_note()
-    # Strip /v1 for the raw API probe.
-    ollama_raw = ollama_base.rstrip("/")
-    if ollama_raw.endswith("/v1"):
-        ollama_raw = ollama_raw[:-3]
-    ollama_host = "localhost"
-    ollama_port = 11434
+    # Embedding endpoint — the harness's semantic lanes (tool registry +
+    # memory) ride EMBED_URL, NOT OLLAMA_BASE_URL (that knob was decoupled
+    # from embeddings and is the driving-LLM/health endpoint only).
+    embed_url = resolve_embed_url()
+    embed_env_note = _embed_env_note()
+    embed_host = "localhost"
+    embed_port = 11434
     try:
         from urllib.parse import urlparse
-        parsed = urlparse(ollama_raw)
-        ollama_host = parsed.hostname or "localhost"
-        ollama_port = parsed.port or 11434
+        _eparsed = urlparse(embed_url)
+        embed_host = _eparsed.hostname or "localhost"
+        # Ollama native /api/embed → 11434; OpenAI-compatible /v1/embeddings
+        # → 443 (https) or 80 (http) when the port is not explicit.
+        embed_port = _eparsed.port or (443 if _eparsed.scheme == "https" else 80)
     except Exception:
         pass
 
@@ -159,28 +161,18 @@ def framework_health() -> dict[str, Any]:
         brain_entry["lane_blocked"] = True
     subsystems["brain_sidecar"] = brain_entry
 
-    # Ollama (LLM). Embeddings live on their own EMBED_URL lane
-    # (daharness/embedding.py) — flagged separately when it points
-    # somewhere other than the Ollama host itself.
-    ollama_up = _check_tcp(ollama_host, ollama_port)
-    embed_url = os.getenv("EMBED_URL", "").strip()
-    embed_note = ""
-    if embed_url:
-        try:
-            from urllib.parse import urlparse
-            _eparsed = urlparse(embed_url)
-            _eport = _eparsed.port or (443 if _eparsed.scheme == "https" else 80)
-            embed_target = f"{_eparsed.hostname or '?'}:{_eport}"
-        except Exception:
-            embed_target = embed_url
-        if embed_target != f"{ollama_host}:{ollama_port}":
-            embed_note = f"; embeddings -> {embed_target} (EMBED_URL)"
-    subsystems["ollama"] = {
-        "up": ollama_up,
+    # Embedding endpoint — the harness's semantic lanes (tool registry +
+    # memory) post embeddings to EMBED_URL (daharness/embedding.py).  This
+    # is NOT the driving-LLM endpoint (OLLAMA_BASE_URL is external and
+    # decoupled); it is the endpoint the registry and memory lanes actually
+    # depend on for vector search.
+    embed_up = _check_tcp(embed_host, embed_port)
+    subsystems["embedding"] = {
+        "up": embed_up,
         "detail": (
-            f"{ollama_host}:{ollama_port} (LLM + embedding){embed_note}{ollama_env_note}"
-            if ollama_up
-            else f"unreachable at {ollama_host}:{ollama_port}{embed_note}{ollama_env_note}"
+            f"{embed_host}:{embed_port} (embeddings){embed_env_note}"
+            if embed_up
+            else f"unreachable at {embed_host}:{embed_port}{embed_env_note}"
         ),
     }
 

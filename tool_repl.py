@@ -101,6 +101,25 @@ try:
 except ImportError:
     pass
 
+# Load the engagement-cobweb Postgres lane env (/etc/daharness/pg.env on the
+# deb). The systemd units pick this up via EnvironmentFile=-, but operator-
+# launched lanes (daharness-repl, JupyterLab-spawned kernels) only source
+# /etc/profile.d/daharness.sh — which carries WORKSPACE_ROOT/BRAIN_SOCKET,
+# NOT the per-lane DB passwords. Without this, _password_for("repl_lane")
+# falls back to the default "harness_repl_change_me" (which doesn't match
+# the provisioned password) and every connect() attempt fails auth — so the
+# kernel lane reads postgres fine (systemd gave it the real password) while
+# the REPL lane can't connect at all. Loading pg.env here mirrors what the
+# systemd units do and keeps both lanes in sync. override=False so a user's
+# own .env / explicit env exports still win.
+try:
+    from dotenv import load_dotenv as _ld
+    _pg_env = Path("/etc/daharness/pg.env")
+    if _pg_env.is_file():
+        _ld(_pg_env, override=False)
+except Exception:
+    pass
+
 # ── Re-exports: public API + load-bearing privates ──────────────────────────
 #
 # scripts/gen_repl_stubs.py reaches deep into the privates

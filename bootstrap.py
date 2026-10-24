@@ -48,6 +48,18 @@ try:
 except Exception:
     pass
 
+# Load the engagement-cobweb Postgres lane env (/etc/daharness/pg.env on the
+# deb). The systemd units pick this up via EnvironmentFile=-, but a non-
+# systemd launch (sudo python bootstrap.py, dev lane) does not. override=False
+# so systemd-provided vars and explicit env exports still win.
+try:
+    from dotenv import load_dotenv as _ld
+    _pg_env = Path("/etc/daharness/pg.env")
+    if _pg_env.is_file():
+        _ld(_pg_env, override=False)
+except Exception:
+    pass
+
 # dacustoms finder: register explicitly so the dacustoms.* import prefix
 # resolves in the bootstrap lane (sitecustomize may not auto-load).
 try:

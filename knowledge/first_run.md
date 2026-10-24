@@ -13,8 +13,9 @@ All commands assume the repo root and your venv active.
 # python -m pytest tests/ -q; failures name the tool lane that regressed).
 python tool_repl.py selftest
 
-# Subsystem health: Brain socket, Ollama, ChromaDB, ZAP, findings DB,
-# plus the registry tool count. Also works after bootstrap:
+# Subsystem health: Brain socket, embedding endpoint (EMBED_URL),
+# ChromaDB, ZAP, findings DB, plus the registry tool count.
+# Also works after bootstrap:
 python tool_repl.py run framework_status
 ```
 
