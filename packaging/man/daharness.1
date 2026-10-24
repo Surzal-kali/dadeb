@@ -14,7 +14,7 @@ lives at \f[I]$BRAIN_SOCKET\f[R] (system profile:
 \f[B]/run/daharness/brain.sock\f[R]).
 .IP \(bu 2
 \f[B]OWASP ZAP daemon\f[R] \(em API access list kept to loopback; the
-browser proxy binds \f[I]$ZAP_PROXY_BIND\f[R] (default 0.0.0.0).
+browser proxy binds \f[I]$ZAP_PROXY_BIND\f[R] (default 127.0.0.1).
 .IP \(bu 2
 \f[B]Metasploit RPC/MCP\f[R] \(em msfrpcd on \f[I]$MSF_RPC_PORT\f[R]
 (default 55553).
@@ -55,18 +55,24 @@ A fresh install provisions operator access instead of leaving it to code
 archaeology: \f[B]/etc/profile.d/daharness.sh\f[R] exports the
 system\-profile WORKSPACE_ROOT and BRAIN_SOCKET into shells that lack
 them (wrappers source it for non\-login runs), and \f[I]postinst\f[R]
-grants the \f[I]daharness\f[R] group to \f[I]sudo\f[R]\-group members
-and shapes the state root to \f[I]daharness:daharness, mode 2770\f[R]
+shapes the state root to \f[I]daharness:daharness, mode 2770\f[R]
 (group\-write + setgid \(em the setgid bit is what makes files created
-from either lane inherit the shared group; member\-only grants left
-operator writes as \f[I]kali:kali\f[R] strays the service lanes could
-not see).
+from either lane inherit the shared group).
 The wrappers run \f[CR]umask 0007\f[R], so operator\-written files carry
 group\-write through hardened umasks too.
-A sudo operator\(cqs shell therefore shares cookie jar, scratch,
-findings, and the socket with the service lane after re\-login (or
-\f[CR]newgrp daharness\f[R]).
-Non\-sudo operators: \f[CR]sudo usermod \-aG daharness <user>\f[R].
+.PP
+The deb does \f[B]not\f[R] auto\-enroll anyone into the
+\f[I]daharness\f[R] group (Docker pattern \(em the group is created but
+membership is the operator\(cqs explicit decision).
+To see the shared state root and brain socket:
+.IP
+.nf
+\f[C]
+sudo usermod \-aG daharness $USER
+newgrp daharness   # or re\-login
+\f[R]
+.fi
+.PP
 An operator outside the group who probes the system\-profile state sees
 an honest \f[CR]lane_blocked: true\f[R] permission report from
 \f[I]framework_health\f[R] \(em with the shape check in its repair hint

@@ -55,7 +55,7 @@ background-job pattern (see
    `.zap_home/` in the workspace root. ZAP is never run as root — the
    launcher drops to the original user if the framework was started with
    `sudo`. The ZAP *browser-proxy* listener binds `ZAP_PROXY_BIND`
-   (default `0.0.0.0`) for upstream proxying; only the daemon's API is
+   (default `127.0.0.1`) for upstream proxying; only the daemon's API is
    restricted to loopback.
 4. Set `ZAP_API_KEY` in `.env`; it is sent as the `apikey` query parameter on
    every API call.

@@ -106,11 +106,14 @@ if [ "$1" = "purge" ]; then
             deluser --system daharness 2>/dev/null || true
         fi
     fi
-    # Group follows only when empty (postinst granted sudo members to it —
-    # with members left, delgroup refuses and the grant survives for reuse).
+    # Group follows only when empty — the postinst no longer auto-enrolls
+    # anyone (Docker pattern: explicit `sudo usermod -aG daharness $USER`),
+    # so on a clean install the group has no non-system members and delgroup
+    # takes it. Members that an operator added manually survive the purge
+    # and the group is kept for reuse.
     if getent group daharness >/dev/null 2>&1 && command -v delgroup >/dev/null 2>&1; then
         if ! delgroup --only-if-empty daharness 2>/dev/null; then
-            echo "daharness: group kept — non-system members remain (sudo users re-granted on reinstall)"
+            echo "daharness: group kept — non-system members remain (operator-added)"
         fi
     fi
     unset _PW _HOME _SHELL

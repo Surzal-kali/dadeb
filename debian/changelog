@@ -91,7 +91,7 @@ daharness (0.1.0+pkg13) kali; urgency=high
       two tests are green again (2 passed, 1 design-skipped on dev lane)
       and the suite must be run before every upload.
 
- -- daharness packaging <operator@localhost>  Wed, 21 Oct 2026 21:20:00 -0600
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Wed, 21 Oct 2026 21:20:00 -0600
 
 daharness (0.1.0+pkg12) kali; urgency=high
 
@@ -134,7 +134,7 @@ daharness (0.1.0+pkg12) kali; urgency=high
       `chmod g+w /var/lib/daharness/.memory/chroma/chroma.sqlite3*` does
       the same.
 
- -- daharness packaging <operator@localhost>  Wed, 21 Oct 2026 16:43:00 -0600
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Wed, 21 Oct 2026 16:43:00 -0600
 
 daharness (0.1.0+pkg11) kali; urgency=high
 
@@ -144,7 +144,7 @@ daharness (0.1.0+pkg11) kali; urgency=high
     400 "Missing session ID" (empty tool list); json_response=True drops
     the SSE framing such clients also fail to parse.
 
- -- daharness packaging <operator@localhost>  Wed, 21 Oct 2026 09:28:00 -0600
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Wed, 21 Oct 2026 09:28:00 -0600
 
 daharness (0.1.0+pkg10) kali; urgency=high
 
@@ -401,7 +401,7 @@ daharness (0.1.0+pkg5) kali; urgency=high
     — chroma is the daemon's first-class supervised sidecar now; the
     wrapper still ships as the unadvertised dev escape hatch.
 
- -- daharness maintainers <daharness@localhost>  Mon, 20 Oct 2026 18:55:00 -0600
+ -- daharness maintainers <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 18:55:00 -0600
 
 daharness (0.1.0+pkg4) kali; urgency=high
 
@@ -604,7 +604,7 @@ daharness (0.1.0+pkg2) kali; urgency=high
     (/var/lib/daharness/.zap_home); ZAP now comes up and is reaped with
     everything else.
 
- -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 07:56:00 -0600
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 07:56:00 -0600
 
 daharness (0.1.0+pkg1) kali; urgency=medium
 
@@ -613,4 +613,4 @@ daharness (0.1.0+pkg1) kali; urgency=medium
     systemd system units (no-start; operator enables), /etc conffile,
     six man pages, user-profile unit examples under /usr/share/doc.
 
- -- daharness packaging <operator@localhost>  Mon, 20 Oct 2026 04:30:00 -0600
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Mon, 20 Oct 2026 04:30:00 -0600

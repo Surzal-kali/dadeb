@@ -1,7 +1,7 @@
 Source: daharness
 Section: utils
 Priority: optional
-Maintainer: daharness packaging <operator@localhost>
+Maintainer: daharness packaging <vgreenwald@student.cnm.edu>
 Build-Depends: debhelper-compat (= 13), gcc, python3-pip, python3-pytest
 Rules-Requires-Root: no
 Standards-Version: 4.7.0

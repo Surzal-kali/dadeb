@@ -35,9 +35,11 @@ and BRAIN_SOCKET from **/etc/profile.d/daharness.sh**, which fills exactly
 those two knobs when the shell does not already carry them (the wrapper
 scripts source it for non-login invocations). A user-profile lane simply
 exports its own values — they win. Seeing the service lane's state further
-requires the *daharness* group: the deb grants it to *sudo*-group members
-at install (re-login or `newgrp daharness` applies; other users opt in
-with `sudo usermod -aG daharness <user>`).
+requires the *daharness* group: the deb does **not** auto-enroll
+anyone (Docker pattern — the group is created but membership is the
+operator's explicit decision). Add yourself with
+`sudo usermod -aG daharness $USER`, then re-login or run `newgrp
+daharness`.
 Previously documented `$DAHARNESS_ENV` / *Python-level conffile loading*
 was never implemented and is retired — the old unit line
 `Environment=DAHARNESS_ENV=...` was inert.

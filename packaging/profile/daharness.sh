@@ -13,9 +13,8 @@
 # deltas documented in the conffile) wins by exporting first.
 #
 # Seeing the service lane's state still requires group membership — the deb
-# grants the daharness group to sudo-group members at install (re-login or
-# `newgrp daharness` applies it). Non-sudo operators opt in manually:
-#   sudo usermod -aG daharness <user>
+# does NOT auto-enroll anyone (Docker pattern). The operator opts in manually:
+#   sudo usermod -aG daharness $USER   (then re-login or `newgrp daharness`)
 _dh_conf=/etc/daharness/daharness.env
 if [ -r "$_dh_conf" ]; then
     if [ -z "${WORKSPACE_ROOT:-}" ]; then

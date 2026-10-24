@@ -146,8 +146,9 @@ def framework_health() -> dict[str, Any]:
             "socket/directory owned by another user (system profile runs the state "
             "root as the service user). Probe via the gateway/MCP lane or as that "
             "user; this is a lane-permission mismatch, not an outage. System-profile "
-            "repair: `id -nG | grep daharness` (re-login after a postinst grant) and "
-            "`ls -ld /run/daharness` (expect daharness:daharness, mode 0770)."
+            "repair: `sudo usermod -aG daharness $USER` then re-login (or `newgrp "
+            "daharness`) and `ls -ld /run/daharness` (expect daharness:daharness, "
+            "mode 0770)."
         )
     elif brain_note == "not-found":
         brain_detail, brain_blocked = "socket not found — sidecar is down", False

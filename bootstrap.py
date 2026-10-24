@@ -95,7 +95,7 @@ ZAP_API_KEY = os.getenv("ZAP_API_KEY", "")
 # *listener* binds this address so off-box browsers can proxy through it.
 # The API ACL (api.addrs.addr.name) stays pinned to ZAP_HOST regardless,
 # so the JSON API keeps its loopback-only defence-in-depth.
-ZAP_PROXY_BIND = os.getenv("ZAP_PROXY_BIND", "0.0.0.0")
+ZAP_PROXY_BIND = os.getenv("ZAP_PROXY_BIND", "127.0.0.1")
 # Daemon JVM max heap. 512m is the historical default but OOM-kills on
 # oversized history entries (single 1.37MB response + regex scan). Raise
 # via shell export before restart, e.g.  export ZAP_XMX=2g

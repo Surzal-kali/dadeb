@@ -166,7 +166,7 @@ Entry point and daemon. `FrameworkLoader.launch_all()` starts:
   `/tmp/brain-<euid>.log`)
 
 - OWASP ZAP daemon (`start_zap_daemon()`; API ACL loopback, browser-proxy
-  binds `ZAP_PROXY_BIND`, default `0.0.0.0`)
+  binds `ZAP_PROXY_BIND`, default `127.0.0.1`)
 - API gateway (async task, `api_gateway.py`, port 5000 on the host lane)
 - Metasploit MCP (launches `msfconsole` with `msgrpc`, waits for RPC port)
 

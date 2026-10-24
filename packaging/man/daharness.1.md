@@ -17,7 +17,7 @@ Runs the daharness service stack for authorized security research:
 - **Brain sidecar** — Unix-socket tool dispatch core; the socket lives at
   *$BRAIN_SOCKET* (system profile: **/run/daharness/brain.sock**).
 - **OWASP ZAP daemon** — API access list kept to loopback; the browser proxy
-  binds *$ZAP_PROXY_BIND* (default 0.0.0.0).
+  binds *$ZAP_PROXY_BIND* (default 127.0.0.1).
 - **Metasploit RPC/MCP** — msfrpcd on *$MSF_RPC_PORT* (default 55553).
 - **API gateway** — FastAPI on port 5000 (host lane), exposing
   */tools/execute*, */tools/search*, */memory/\**, */scratch/\** and the
@@ -52,16 +52,21 @@ it with *override=True*). See **daharness.env(5)**.
 A fresh install provisions operator access instead of leaving it to code
 archaeology: **/etc/profile.d/daharness.sh** exports the system-profile
 WORKSPACE_ROOT and BRAIN_SOCKET into shells that lack them (wrappers
-source it for non-login runs), and *postinst* grants the *daharness*
-group to *sudo*-group members and shapes the state root to
+source it for non-login runs), and *postinst* shapes the state root to
 *daharness:daharness, mode 2770* (group-write + setgid — the setgid bit
-is what makes files created from either lane inherit the shared group;
-member-only grants left operator writes as *kali:kali* strays the
-service lanes could not see). The wrappers run `umask 0007`, so
-operator-written files carry group-write through hardened umasks too.
-A sudo operator's shell therefore shares cookie jar, scratch, findings,
-and the socket with the service lane after re-login (or `newgrp
-daharness`). Non-sudo operators: `sudo usermod -aG daharness <user>`.
+is what makes files created from either lane inherit the shared group).
+The wrappers run `umask 0007`, so operator-written files carry
+group-write through hardened umasks too.
+
+The deb does **not** auto-enroll anyone into the *daharness* group
+(Docker pattern — the group is created but membership is the operator's
+explicit decision). To see the shared state root and brain socket:
+
+```
+sudo usermod -aG daharness $USER
+newgrp daharness   # or re-login
+```
+
 An operator outside the group who probes the system-profile state sees
 an honest `lane_blocked: true` permission report from
 *framework_health* — with the shape check in its repair hint — never a

@@ -97,25 +97,24 @@ find "$STATE_ROOT" -maxdepth 1 -type f ! -perm -g+w \
     -exec chmod g+rw {} + 2>/dev/null || true
 
 # Shared-state access provisioning: the state root and brain socket are
-# group-shared by design (UMask 0007, RuntimeDirectoryMode=0770), and the
-# group has no members unless we grant them — a fresh install where the
-# operator's own account cannot see the shared state leaves half the
-# shared-state pitch dead on arrival. sudo-group members are already
-# root-equivalent, so granting them the daharness group adds no privilege;
-# other operators opt in with `sudo usermod -aG daharness <user>`.
+# group-shared by design (UMask 0007, RuntimeDirectoryMode=0770), but the
+# group has no members unless the operator opts in — a fresh install where
+# the operator's own account cannot see the shared state is expected, not
+# healed silently. Following the Docker pattern: we create the group and
+# tell the operator exactly what to do, but we do NOT auto-enroll anyone.
+# Granting group membership silently broadens who can read engagement
+# material (credentials, findings) from the state root — a privacy
+# decision the operator should make explicitly, not one the package
+# should make for them.
 if getent group daharness >/dev/null; then
-    GRANTED=""
-    for _U in $(getent group sudo | cut -d: -f4 | tr ',' ' '); do
-        [ -n "$_U" ] || continue
-        id -nG "$_U" 2>/dev/null | grep -qw daharness && continue
-        if usermod -aG daharness "$_U" >/dev/null 2>&1; then
-            GRANTED="$GRANTED $_U"
-        fi
-    done
-    if [ -n "$GRANTED" ]; then
-        echo "daharness: granted the daharness group (state + brain socket access) to sudo member(s):$GRANTED"
-        echo "  group membership applies on next login or \`newgrp daharness\`"
+    _ALREADY=$(getent group daharness | cut -d: -f4)
+    if [ -z "$_ALREADY" ]; then
+        echo "daharness: the 'daharness' group exists but has no members."
+        echo "  Add yourself to see the shared state root + brain socket:"
+        echo "    sudo usermod -aG daharness \$USER"
+        echo "  Then re-login or run: newgrp daharness"
     fi
+    unset _ALREADY
 fi
 
 # Scope-manifest provisioning: a temp local-lab scope should be editable-off-
