@@ -17,6 +17,7 @@ cleanly either way).
 from daharness.models import ToolManifest
 
 from replkit.operator_cli import (
+    SCOPE_DISABLE_FLAGS,
     SCOPE_ON_FLAGS,
     SCOPE_SEARCH_FLAGS,
     SCOPE_SUBCOMMANDS,
@@ -95,7 +96,8 @@ class ToolReplCompleter(Completer if _PROMPT_TOOLKIT else object):
             sub = parts[1].lower()
             current = "" if ends_space else parts[-1]
             flags = (SCOPE_SEARCH_FLAGS if sub == "search"
-                     else SCOPE_ON_FLAGS if sub == "on" else {})
+                     else SCOPE_ON_FLAGS if sub == "on"
+                     else SCOPE_DISABLE_FLAGS if sub == "disable" else {})
             if flags and current.startswith("--"):
                 # Auto-complete flag name as the user types --
                 flag_word = current[2:]

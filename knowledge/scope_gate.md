@@ -73,3 +73,48 @@ scope check. Default: NOT armed; nothing authorized until confirmed. The
 agent must verify each action against documented scope before execute and
 at every new target or changed objective, gate armed or not. Reachability
 is not permission.
+
+## tool-disable list (operator authority over non-traffic tools)
+
+The scope gate governs **wire traffic** — it resolves target hosts/IPs
+against the armed manifest. Offline compute (hash cracking, local
+transforms) has no target IP, so the traffic gate never sees it. The
+`disabled_tools` list is the operator's blunt brake for that gap: a
+tool_id (or family prefix) the model may NOT dispatch while the scope is
+armed.
+
+- **Applies only while armed** — disarmed = lab = unrestricted. The disable
+  list is an engagement-posture control, not a lab-mode control.
+- **Same armed-state file** — `scope/.armed_packet_scope.json` gains a
+  `disabled_tools: [<prefix>, ...]` key. Mtime-checked + atomic write +
+  operator-only authority, all inherited for free.
+- **Prefix matching** (identical to `TOOL_BUDGET_TERMINAL_ALLOWLIST`):
+  trailing-dot family prefix (`payloads.hash_crack.`) kills the whole
+  family; bare stem (`payloads.hash_crack.run_john`) is exact tool_id only.
+- **Terminal-lane guard** — `scope disable utils.findings.` /
+  `utils.memory_tools.` is refused without `--force` (a model that can't
+  write findings or memory can't comply with anything).
+- **`arm()` carries it forward** — re-arming after a manifest refresh
+  preserves the disable list (the 2026-09-20 `--ip-boundary` drift shape).
+
+CLI (operator-only, mirrors the existing scope verbs):
+
+    scope disable <prefix> [<prefix>...] [--force]
+    scope enable <prefix> [<prefix>...]
+    scope disabled
+
+`scope status` surfaces the disabled list so `scope_status()` (agent-callable)
+lets the model SEE the posture it's operating under without being able to
+change it.
+
+Enforcement: two points, both verified in tree. (1) `daharness/executor.py`
+preflight block — after manifest validation, before any dispatch; covers the
+bridge lane, REPL, and kernel for both transports. (2) `listeners/thebrain.py`
+CALL_TOOL handler — defense-in-depth for direct-socket callers that skip the
+registry path. Both use the same mtime-cached `_load_state()`, so a REPL-side
+`scope disable` is visible to a running Brain on the very next call.
+
+What it is NOT: not hash-provenance enforcement (the list can't tell whether
+a hash came from an in-scope dump), and not a cost limiter (one
+authorized-but-huge hashcat run passes this gate and the tool budget
+legitimately — authorization and budgeting stay separate knobs).

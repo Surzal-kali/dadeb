@@ -680,6 +680,16 @@ def arm(
             ),
         }
 
+    # Carry forward an existing disabled_tools list so a re-arm (manifest
+    # refresh) does NOT silently wipe every operator disable. The drift shape
+    # this prevents is the 2026-09-20 --ip-boundary finding: the operator
+    # re-armed after a refresh and assumed the disable survived. Read the
+    # PRE-arm state before _write_state clobbers it.
+    prior_disabled: list[str] = []
+    _prior = _load_state()
+    if isinstance(_prior, dict):
+        prior_disabled = list(_prior.get("disabled_tools") or [])
+
     state = {
         "handle": handle,
         "platform": platform,
@@ -687,6 +697,7 @@ def arm(
         "ip_boundary": bool(ip_boundary),
         "allowlist": {},
         "blessed_hosts": {},
+        "disabled_tools": prior_disabled,
         "armed_at": time.time(),
     }
     _write_state(state)
@@ -697,6 +708,7 @@ def arm(
         "strict": strict,
         "in_scope_assets": len(manifest.get("in_scope", [])),
         "out_of_scope_assets": len(manifest.get("out_of_scope_assets", [])),
+        "disabled_tools_count": len(prior_disabled),
         "message": (
             "scope gate ARMED. Traffic-sending tools (nmap/masscan/ffuf/hydra/"
             "ZAP/packetcraft) will refuse out-of-scope targets. Use "
@@ -877,6 +889,8 @@ def status() -> dict[str, Any]:
         "allowlist_size": len(state.get("allowlist") or {}),
         "blessed_hosts_size": len(state.get("blessed_hosts") or {}),
         "ip_boundary": bool(state.get("ip_boundary")),
+        "disabled_tools": list(state.get("disabled_tools") or []),
+        "disabled_tools_count": len(state.get("disabled_tools") or []),
         "armed_at": state.get("armed_at"),
     }
     manifest = _load_manifest(state.get("handle", ""), state.get("platform", "h1"))
@@ -894,6 +908,183 @@ def status() -> dict[str, Any]:
         except OSError:
             out["manifest_age_s"] = None
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Tool-disable list — operator authority over non-traffic tools
+# --------------------------------------------------------------------------- #
+#
+# The scope gate governs WIRE TRAFFIC (check_scan/check_send resolve target
+# hosts/IPs against the manifest). Cracking and other offline compute have
+# no target IP, so the traffic gate never sees them. The disabled_tools
+# list is the operator's blunt brake: a tool_id (or family prefix) the
+# model may not dispatch while the scope is armed. Applies only while
+# armed — disarmed = lab = unrestricted stays the standing posture. Same
+# armed-state file, same mtime-checked _load_state(), same atomic
+# _write_state(), same operator-only authority: no model lane can write it.
+#
+# Prefix matching mirrors TOOL_BUDGET_TERMINAL_ALLOWLIST:
+#   trailing-dot family prefix  ("payloads.hash_crack.")  → kills the family
+#   bare stem, no dot           ("...run_john")           → exact tool_id only
+
+# Terminal-lane prefixes that may NOT be disabled without --force — a model
+# that can't write findings or memory can't comply with anything (tool_budget
+# terminal-allowlist precedent).
+_TERMINAL_PREFIXES = ("utils.memory_tools.", "utils.findings.")
+
+
+def _matches_disabled(tool_id: str, prefixes: list[str]) -> str | None:
+    """Return the prefix that disables ``tool_id``, or None.
+
+    A trailing-dot prefix (``payloads.hash_crack.``) matches the whole family
+    via startswith; a bare stem (no trailing dot) is an exact tool_id match
+    only, so a typo can't silently become a family kill.
+    """
+    if not tool_id or not prefixes:
+        return None
+    for p in prefixes:
+        if not p:
+            continue
+        if p.endswith("."):
+            if tool_id.startswith(p):
+                return p
+        elif tool_id == p:
+            return p
+    return None
+
+
+def is_disabled(tool_id: str) -> tuple[bool, str | None]:
+    """Verdict: is ``tool_id`` disabled for the armed scope?
+
+    Returns ``(True, prefix)`` when disabled (``prefix`` is the list entry
+    that matched, for the remediation string), ``(False, None)`` when not
+    disabled or no scope is armed. Mtime-cached like every other read here
+    so a REPL-side ``scope disable`` is visible to a running Brain on the
+    very next call.
+    """
+    state = _load_state()
+    if state is None:
+        return False, None
+    prefixes = list(state.get("disabled_tools") or [])
+    match = _matches_disabled(tool_id, prefixes)
+    if match is not None:
+        return True, match
+    return False, None
+
+
+def disable_tools(prefixes: list[str], *, force: bool = False) -> dict[str, Any]:
+    """Add tool_id prefixes to the disabled list (REPL authority).
+
+    Requires the gate to be armed — the disable list is an engagement-posture
+    control, not a lab-mode control. Refuses to disable terminal-lane
+    families (findings/memory) without ``force`` — a model that can't report
+    findings or write memory is trapped with no way to comply.
+    """
+    state = _load_state()
+    if state is None:
+        return {"ok": False, "error": "no scope armed; run 'scope on <handle>' first"}
+    clean = [p.strip() for p in (prefixes or []) if p.strip()]
+    if not clean:
+        return {"ok": False, "error": "at least one prefix is required: scope disable <prefix> [...]"}
+    # Terminal-lane guard: refuse without --force.
+    blocked: list[str] = []
+    if not force:
+        for p in clean:
+            if any(p.startswith(tp) or tp.startswith(p) for tp in _TERMINAL_PREFIXES):
+                blocked.append(p)
+        if blocked:
+            return {
+                "ok": False,
+                "error": (
+                    f"refusing to disable terminal-lane family {blocked} — a "
+                    "model that can't write findings or memory can't comply "
+                    "with anything. Re-run with --force to override."
+                ),
+            }
+    current = list(state.get("disabled_tools") or [])
+    added: list[str] = []
+    for p in clean:
+        if p not in current:
+            current.append(p)
+            added.append(p)
+    state["disabled_tools"] = current
+    _write_state(state)
+    return {
+        "ok": True,
+        "disabled_tools": current,
+        "added": added,
+        "count": len(current),
+        "message": f"disabled {len(added)} prefix(es)" + (
+            "; list now: " + ", ".join(current) if current else ""
+        ),
+    }
+
+
+def enable_tools(prefixes: list[str]) -> dict[str, Any]:
+    """Remove tool_id prefixes from the disabled list (REPL authority)."""
+    state = _load_state()
+    if state is None:
+        return {"ok": False, "error": "no scope armed"}
+    clean = [p.strip() for p in (prefixes or []) if p.strip()]
+    if not clean:
+        return {"ok": False, "error": "at least one prefix is required: scope enable <prefix> [...]"}
+    current = list(state.get("disabled_tools") or [])
+    removed: list[str] = []
+    for p in clean:
+        if p in current:
+            current.remove(p)
+            removed.append(p)
+    state["disabled_tools"] = current
+    _write_state(state)
+    return {
+        "ok": True,
+        "disabled_tools": current,
+        "removed": removed,
+        "count": len(current),
+        "message": f"enabled {len(removed)} prefix(es)" + (
+            "; list now: " + ", ".join(current) if current else " (list empty)"
+        ),
+    }
+
+
+def list_disabled() -> dict[str, Any]:
+    """List the disabled prefixes + a per-tool verdict probe (REPL +
+    agent-callable ``scope_status`` surface — read-only)."""
+    state = _load_state()
+    if state is None:
+        return {"ok": True, "armed": False, "disabled_tools": [], "message": "disarmed (lab mode — no disable list)"}
+    prefixes = list(state.get("disabled_tools") or [])
+    return {
+        "ok": True,
+        "armed": True,
+        "disabled_tools": prefixes,
+        "count": len(prefixes),
+        "message": f"{len(prefixes)} disabled prefix(es)" if prefixes else "no tools disabled",
+    }
+
+
+def disabled_reject_envelope(tool_id: str, prefix: str) -> dict[str, Any]:
+    """Structured reject envelope for a disabled-tool dispatch refusal.
+
+    Used by both enforcement points (executor preflight + Brain CALL_TOOL
+    guard) so the model reads a consistent Failed status + remediation.
+    """
+    return {
+        "status": "Failed",
+        "error": (
+            f"tool {tool_id!r} is disabled for the armed scope "
+            f"(matched disable prefix {prefix!r}). The operator turned it "
+            "off for this engagement."
+        ),
+        "remediation": (
+            "Ask the operator to re-enable it ('scope enable <prefix>' in "
+            "the Tool REPL), or use an alternative tool. This is an "
+            "authorization brake, not hash-provenance enforcement — the "
+            "list can't tell whether a hash came from an in-scope dump."
+        ),
+        "disabled": True,
+        "matched_prefix": prefix,
+    }
 
 
 def is_armed() -> bool:
@@ -914,4 +1105,9 @@ __all__ = [
     "list_ips",
     "status",
     "is_armed",
+    "is_disabled",
+    "disable_tools",
+    "enable_tools",
+    "list_disabled",
+    "disabled_reject_envelope",
 ]

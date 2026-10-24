@@ -1,0 +1,89 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          daharness
+# Required-Start:    $network $remote_fs
+# Required-Stop:     $network $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: daharness security framework services
+# Description:       Brain sidecar, OWASP ZAP, MSF MCP, API gateway.
+#                    systemd-less fallback (NetHunter chroot, init.d hosts).
+### END INIT INFO
+#
+# This script is the init.d fallback for hosts WITHOUT systemd — Kali
+# NetHunter chroots (the Kali Services tab drives /etc/init.d/), WSL1,
+# and any systemd-less box. When systemd IS present, dh_installsystemd
+# owns the units and this script is inert (postinst only installs it on
+# the non-systemd lane). The wrapper it launches
+# (/usr/bin/daharness -> bootstrap.py --daemon) is the same entry point
+# the systemd unit's ExecStart hits, so the daemon behavior is identical
+# regardless of supervisor.
+
+set -e
+
+DAEMON=/usr/bin/daharness
+NAME=daharness
+PIDFILE=/var/run/daharness/${NAME}.pid
+ENVFILE=/etc/daharness/daharness.env
+RUNDIR=/var/run/daharness
+
+# Load profile knobs (WORKSPACE_ROOT, BRAIN_SOCKET, GATEWAY_*, etc.) —
+# mirrors the systemd unit's EnvironmentFile=. /etc/profile.d/daharness.sh
+# is for login shells; this is the service lane.
+if [ -r "$ENVFILE" ]; then
+    set -a
+    . "$ENVFILE"
+    set +a
+fi
+
+mkdir -p "$RUNDIR" 2>/dev/null || true
+# /run/daharness is the brain.sock home — systemd's RuntimeDirectory makes
+# this on the systemd lane; on init.d we mkdir it ourselves (no
+# RuntimeDirectory here). Group-shareable so operator CLIs reach the socket.
+if getent group daharness >/dev/null 2>&1; then
+    chgrp daharness "$RUNDIR" 2>/dev/null || true
+    chmod 0770 "$RUNDIR" 2>/dev/null || true
+fi
+
+. /lib/lsb/init-functions
+
+case "$1" in
+    start)
+        log_daemon_msg "Starting $NAME" "$DAEMON"
+        # --daemon: start services (Brain, ZAP, MSF, gateway) and wait for
+        # SIGTERM — same as the systemd unit's ExecStart.
+        if start-stop-daemon --start --background --make-pidfile \
+            --pidfile "$PIDFILE" --exec "$DAEMON" -- --daemon 2>/dev/null; then
+            log_end_msg 0
+        else
+            log_end_msg 1
+        fi
+        ;;
+    stop)
+        log_daemon_msg "Stopping $NAME"
+        if start-stop-daemon --stop --pidfile "$PIDFILE" --retry 30 2>/dev/null; then
+            log_end_msg 0
+        else
+            log_end_msg 1
+        fi
+        rm -f "$PIDFILE" 2>/dev/null || true
+        ;;
+    restart|force-reload)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+            log_success_msg "$NAME is running (pid $(cat "$PIDFILE"))"
+            exit 0
+        fi
+        log_failure_msg "$NAME is not running"
+        exit 3
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|force-reload|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

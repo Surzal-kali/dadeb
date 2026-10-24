@@ -192,4 +192,48 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
 fi
 
+# ────────────────────────────────────────────────────────────────────── #
+# init.d fallback (systemd-less hosts: NetHunter chroot, WSL1, etc.)
+# ────────────────────────────────────────────────────────────────────── #
+# Every systemd touch above is guarded — on a systemd-less box none of it
+# fires and the units dh_installsystemd installed are inert (no PID 1 to
+# read them). The Kali NetHunter app's Kali Services tab drives
+# /etc/init.d/, and any systemd-less box needs the same services. So when
+# systemd is absent we provision init.d scripts instead: copy the shipped
+# scripts into /etc/init.d/, chmod +x, and register them with update-rc.d.
+# The scripts launch the SAME /usr/bin/daharness + /usr/bin/daharness-kernel
+# entry points the systemd units hit, so daemon behavior is identical
+# regardless of supervisor. /run/daharness (the brain.sock home) is mkdir'd
+# by the init.d scripts themselves — no RuntimeDirectory on this lane.
+if ! ([ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1); then
+    _SRC=/usr/share/daharness/packaging/initd
+    if [ -d "$_SRC" ]; then
+        for _SVC in daharness daharness-kernel; do
+            if [ -f "$_SRC/$_SVC" ]; then
+                install -D -m 0755 "$_SRC/$_SVC" "/etc/init.d/$_SVC"
+                # update-rc.d registers the LSB runlevel symlinks; if it's
+                # absent (a truly bare box), the scripts are still usable
+                # via direct invocation (/etc/init.d/daharness start).
+                if command -v update-rc.d >/dev/null 2>&1; then
+                    update-rc.d "$_SVC" defaults 2>/dev/null || true
+                fi
+                echo "daharness: provisioned init.d script for $_SVC (systemd-less lane)"
+            fi
+        done
+        unset _SVC
+        # Ensure /run/daharness exists now too (the scripts mkdir it at
+        # start, but a pre-flight mkdir lets an operator's `daharness-repl`
+        # reach the socket before the daemon is started manually).
+        mkdir -p /run/daharness 2>/dev/null || true
+        if getent group daharness >/dev/null 2>&1; then
+            chgrp daharness /run/daharness 2>/dev/null || true
+            chmod 0770 /run/daharness 2>/dev/null || true
+        fi
+        echo "daharness: systemd not detected — using init.d scripts"
+        echo "  start services: sudo /etc/init.d/daharness start"
+        echo "  start kernel:   sudo /etc/init.d/daharness-kernel start"
+    fi
+    unset _SRC
+fi
+
 #DEBHELPER#

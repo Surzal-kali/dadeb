@@ -209,13 +209,14 @@ def project_result(
     provenance: dict[str, Any] | None = None
     if "result" in result and "status" in result:
         envelope_status = str(result.get("status", "")).lower()
-        # Capture the untrusted-target provenance stamp the executor placed
-        # on the envelope and/or the inner result before unwrapping — digest
-        # and page envelopes are fresh dicts and would otherwise drop it.
-        provenance = result.get("_provenance") or provenance
         result = result["result"]
         if not isinstance(result, dict):
             return result
+        # The executor stamps _provenance on the inner result dict (dict
+        # results) or the envelope (bare-string results).  For dict results
+        # — the only path that reaches here — the stamp is on the inner dict
+        # we just unwrapped, so that's the one to carry.  Digest/page
+        # envelopes are fresh dicts and would otherwise drop it.
         if result.get("_provenance"):
             provenance = result["_provenance"]
 

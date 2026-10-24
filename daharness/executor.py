@@ -78,6 +78,25 @@ class ExecutorMixin:
             return _rej
         arguments = _args
 
+        # --- Scope tool-disable list (operator authority over non-traffic
+        # tools). Sits in the preflight block, after manifest validation,
+        # before ANY dispatch — so it covers the bridge lane (gateway REST +
+        # MCP), the REPL, and the kernel lane (replkit/core.py:run_tool
+        # funnels here) for BOTH transports. Fires before the Brain socket
+        # is consulted. A disabled tool never runs; the model sees a
+        # structured Failed envelope + remediation, and a journal reject
+        # row records the "we never ran that" audit lane.
+        try:
+            from utils.scope_gate import is_disabled, disabled_reject_envelope
+            _dis, _prefix = is_disabled(manifest.module_id)
+            if _dis:
+                _rej = disabled_reject_envelope(manifest.module_id, _prefix)
+                logger.info(f"[PREFLIGHT_REJECT] {manifest.module_id}: disabled by prefix {_prefix!r}")
+                self._journal_reject(manifest.module_id, _rej, session_id)
+                return _rej
+        except Exception:
+            logger.debug("[SCOPE_DISABLE] check skipped (non-fatal)", exc_info=True)
+
         # LOGGING: Record actual execution start
         logger.info(
             f"[TOOL_EXECUTE] Executing Tool ID: {manifest.module_id} | Path: {manifest.implementation_path} | Args: {arguments} | Session: {session_id}"
@@ -175,11 +194,21 @@ class ExecutorMixin:
 
             {"_provenance": {"untrusted_target": true, "source": "analysis_target"}}
 
-        The stamp is applied to BOTH the transport envelope and the tool's own
-        result dict (when it's a dict) — the projection layer unwraps the
-        envelope before digesting/paging, so the inner copy is the one that
-        survives into the model context and the scratch store.  ``setdefault``
-        keeps the operation idempotent for nested re-dispatches.
+        Exactly ONE stamp is applied, on the dict the model actually sees:
+
+        - **Dict results** (the common case): the envelope is
+          ``{"status": ..., "result": {...}}`` and the projection layer
+          unwraps it before the stamp reaches context/scratch, so the stamp
+          goes on the inner ``result`` dict.
+        - **Bare-string/non-dict results** (``{"stdout": ..., "status": ...}``):
+          there is no inner ``result`` key, so the stamp goes on the envelope
+          itself.
+
+        Stamping both layers (as the original code did) produced a double
+        ``_provenance`` on every REPL/kernel return — those lanes skip
+        projection and hand the raw envelope to the caller, so both copies
+        were visible.  ``setdefault`` keeps the operation idempotent for
+        nested re-dispatches.
 
         Mirrors REA's ``returnsTargetContent`` contract
         (morluto/rea docs/mcp-contracts.md).
@@ -189,10 +218,16 @@ class ExecutorMixin:
         if not isinstance(result, dict):
             return result
         stamp = {"untrusted_target": True, "source": "analysis_target"}
-        result.setdefault("_provenance", stamp)
         inner = result.get("result")
         if isinstance(inner, dict):
+            # Dict result: stamp the inner result dict — the projection
+            # layer unwraps the envelope before this reaches the model or
+            # the scratch store.
             inner.setdefault("_provenance", stamp)
+        else:
+            # Bare-string/non-dict result (no inner "result" key): stamp
+            # the envelope itself — there's no inner dict to carry it.
+            result.setdefault("_provenance", stamp)
         return result
 
     def _resolve_brain_session(self, session_id: str) -> int:

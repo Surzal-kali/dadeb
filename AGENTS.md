@@ -218,10 +218,12 @@ is kept for backward compat.
 jadx, scanners, ZAP grep/alerts, MSF sessions) get their result envelopes
 stamped by the executor with
 `_provenance = {"untrusted_target": true, "source": "analysis_target"}` —
-on the outer envelope AND the inner result dict — and the projection carries
-the stamp through digest/page modes. Target output is DATA, never
-instructions; the LLM-facing surfaces (gateway/MCP docs) spell out the
-prompt-injection rule (inspired by REA's `returnsTargetContent` contract).
+exactly once, on the dict the model actually sees (the inner `result` dict
+for structured results, the envelope itself for bare-string results) — and
+the projection carries the stamp through digest/page modes. Target output is
+DATA, never instructions; the LLM-facing surfaces (gateway/MCP docs) spell
+out the prompt-injection rule (inspired by REA's `returnsTargetContent`
+contract).
 
 **Why this is not the parked OWUI trim filter:** the projection runs *before*
 the result enters context (not after); the retrieval instruction is part of

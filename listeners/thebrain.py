@@ -627,6 +627,19 @@ async def dispatch(event, full_payload=None):
             else:
                 tool_id = payload
 
+            # Scope tool-disable list (defense-in-depth): a direct-socket
+            # caller that skips the registry/executor path must still hit
+            # the operator's disable brake. Same mtime-cached _load_state()
+            # the executor uses, so both processes converge on the same list
+            # within one call.
+            try:
+                from utils.scope_gate import is_disabled, disabled_reject_envelope
+                _dis, _prefix = is_disabled(tool_id)
+                if _dis:
+                    return json.dumps(disabled_reject_envelope(tool_id, _prefix))
+            except Exception:
+                pass  # scope_gate import must never wedge the Brain
+
             tool = registry.get_tool(tool_id)
             if tool:
                 # Rebind class-method tools to a per-session instance so

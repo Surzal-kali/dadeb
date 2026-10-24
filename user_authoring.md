@@ -1,19 +1,23 @@
-# User Authoring Lanes — `.dacustoms` + notebook macro dropbox (design note)
+# User Authoring Lanes — `.dacustoms` (shipped) + notebook macros (deferred)
 
-**Status: DESIGN ONLY — nothing here is wired.** Both lanes are parked behind
-the open code review (discovery-roots / engagement cobweb / postinst).
-Implementation begins when review unfreezes, verdict be damned; this doc is
-the spec it follows. Written 2026-10-21.
+**Status:** `.dacustoms` (Lane A) is **shipped and wired** — the meta-path
+finder, `DACUSTOMS_DIR` knob, `framework_doctor(provider='customs')` syntax
+check, and the deb-profile `DACUSTOMS_DIR` pin are all live. The notebook
+macro lane (Lane B) is **deferred** — a future enhancement for budget
+compression of known workflows, not a prerequisite for operator authoring.
+Written 2026-10-21; updated 2026-10-23 to reflect `.dacustoms` as the
+shipped surface.
 
-**Supersession (2026-10-23):** the notebook macro lane (Lane B) supersedes
-`.dacustoms` (Lane A) as the **primary operator tool-authoring surface**.
-`.dacustoms` is demoted to a **helper library** imported by macros, not a
-Brain-discovered tool surface. The identity/traversal problem that broke
-Lane A on the deb profile (the service-user Brain can't traverse the
-operator's `drwx------` `$HOME`) is sidestepped entirely: papermill spawns
-its own kernel per run, so no Brain process ever imports operator code.
-See the Composition story and Sequencing sections below for the revised
-plan. The blue-team adoption angle is noted in the Next steps section.
+**Why notebooks are deferred (2026-10-23):** `.dacustoms` as-patched solves
+the operator-authoring problem completely. A `.py` file is as expressive as
+a notebook — both are just Python the operator writes. The notebook lane's
+only differentiator is **budget compression**: a pre-composed multi-step
+macro runs as one `notebook_run` dispatch instead of N tool calls, keeping
+intermediate results out of the model's context. That's a genuine win for
+*known, rigid workflows* the operator already knows the shape of, but it's
+not a blocker — `.dacustoms` functions chain fine through normal tool
+dispatch. The notebook lane lands when that compression is worth the
+wire-up; until then `.dacustoms` is the lane.
 
 ---
 
@@ -75,18 +79,20 @@ ergonomics + collision-proofing).
   keep the existing `__module__ == module_name` guard effective.
 - **D2 — knob, not constant:** `DACUSTOMS_DIR` (default `~/.dacustoms`),
   read per call per the constants convention. Empty value disables the lane.
-- **D3 — lane-agnostic, one dir every lane (rescinded 2026-10-23).** The
-  original design gated the customs lane behind a service-identity guard
-  so the deb Brain (service user) would not import operator code from
-  `$HOME`. That guard created a split-brain: `framework_doctor` itself
-  runs on the Brain, so the doctor reported customs clean from the
-  in-process fallback (Brain down) and broken from the Brain (Brain up) —
-  the verdict tracked the socket, not the customs dir. The guard is gone;
-  `DACUSTOMS_DIR` is pinned in `daharness.env` on the deb profile so the
-  service-user Brain and the operator shell resolve the SAME path (default
-  `/var/lib/daharness/dacustoms`, group-readable via the 2770 setgid state
-  root). An operator who keeps customs in `$HOME` sets `DACUSTOMS_DIR` in
-  both their shell and `daharness.env` — both lanes must agree on the path.
+- **D3 — lane-agnostic, one dir every lane (shipped 2026-10-23, commit
+  `74f7a98`).** The original design gated the customs lane behind a
+  service-identity guard so the deb Brain (service user) would not import
+  operator code from `$HOME`. That guard created a split-brain:
+  `framework_doctor` itself runs on the Brain, so the doctor reported
+  customs clean from the in-process fallback (Brain down) and broken from
+  the Brain (Brain up) — the verdict tracked the socket, not the customs
+  dir. The guard is gone; `DACUSTOMS_DIR` is pinned in `daharness.env` on
+  the deb profile so the service-user Brain and the operator shell resolve
+  the SAME path (default `/var/lib/daharness/dacustoms`, group-readable
+  via the 2770 setgid state root). An operator who keeps customs in
+  `$HOME` sets `DACUSTOMS_DIR` in both their shell and `daharness.env` —
+  both lanes must agree on the path. This is the live fix, not a
+  placeholder.
 - **D4 — quarantine is visible:** a `dacustoms` provider folded into
   `framework_doctor` (REA-shaped `{available, reason, remediation}`,
   same as r2/jadx/masscan/msf) listing failed/skipped user modules with the
@@ -100,7 +106,7 @@ ergonomics + collision-proofing).
 
 ---
 
-## Lane B — `notebooks/`: a papermillable macro dropbox
+## Lane B — `notebooks/`: a papermillable macro dropbox (DEFERRED)
 
 ### Concept
 
@@ -109,6 +115,13 @@ but for **operator-authored `.ipynb` macros**. The model gets a papermill
 tool; the operator gets an expansive macro surface: a multi-step tool chain
 as a parameterized notebook with narrative cells, re-runnable with fresh
 parameters instead of re-typed execute_code blocks.
+
+**Deferred rationale:** `.dacustoms` covers the operator-authoring surface.
+The notebook lane's value is **budget compression for known workflows** — a
+12-step recon chain as `.dacustoms` functions costs the model 12 tool calls
+and 12 result envelopes in context; the same chain as a macro costs 1 call
+and 1 digest. That's worth shipping when the wire-up is justified; it's not
+worth blocking on. The design below is kept as the spec for when it lands.
 
 ### Facts already on the ground
 
@@ -183,113 +196,88 @@ parameters instead of re-typed execute_code blocks.
 
 ---
 
-## Composition story (revised 2026-10-23)
+## Current state (2026-10-23)
 
-**Notebook macros are the primary operator tool-authoring lane.** `.dacustoms`
-is a **helper library** that macros import from, not a Brain-discovered tool
-surface. The reason is the identity problem that broke Lane A on the deb
-profile: the Brain runs as the `daharness` service user
-(`HOME=/var/lib/daharness`), the operator's `$HOME` is `drwx------`, and no
-amount of permissions on `.dacustoms` itself fixes the parent-dir traversal
-block. The service user can't even *reach* `~/.dacustoms`.
+`.dacustoms` is the **primary and shipped operator tool-authoring surface.**
+The Brain semantically discovers `@framework_tool` functions under
+`DACUSTOMS_DIR` and dispatches them like any shipped tool. The identity
+problem that threatened Lane A on the deb profile — the service-user Brain
+can't traverse the operator's `drwx------` `$HOME` — is **fixed by the
+unified `DACUSTOMS_DIR` resolution** (commit `74f7a98`): every lane resolves
+the same path, pinned in `daharness.env` on the deb profile to a
+group-readable state-root path (`/var/lib/daharness/dacustoms`). An operator
+who keeps customs in `$HOME` sets `DACUSTOMS_DIR` in both their shell and
+`daharness.env` — both lanes agree on the path.
 
-Papermill sidesteps this entirely: it spawns its own kernel per run, the
-kernel resolves `import dacustoms.<x>` via the sitecustomize/kernelspec hook,
-and the kernel runs as whoever launched `notebook_run` — not as the Brain.
-No Brain process ever imports operator code. The framework's tool-discovery
-surface moves from "the Brain semantically searches operator modules" to
-"`notebook_list` parses the `parameters` cell of each macro" — which is
-honest, deterministic, and doesn't ask the Brain a dang thing.
+`framework_doctor(provider='customs')` is the readiness check: it traces the
+full finder registration chain (`finder_status()`), then `ast.parse`s every
+`.py` in the customs dir for syntax errors — zero execution, per the
+health-probe rule. It reports per-file status so the operator sees exactly
+which file broke and on which line.
 
-A macro notebook is the parameterized, narrated, re-runnable form of an
-operator workflow. `.dacustoms` functions are the reusable helpers it calls.
-Same author, two lifecycles — but the *dispatch surface* is papermill, not
-the Brain.
+### What the notebook lane would add (when it lands)
 
-### What this means for the doctor
-
-`framework_doctor(provider='customs')` stays as a **syntax check**
-(`ast.parse`, zero execution) — it already does this. It's honest about "I
-can check syntax but the Brain doesn't import these; use notebook macros for
-that." The `macros` provider (D12) is the one that answers "can I actually
-run operator workflows."
-
-### What this means for `.dacustoms` provisioning
-
-`.dacustoms` no longer needs to be Brain-readable. It needs to be
-**kernel-readable** — the papermill-spawned kernel and the interactive
-kernel both run as the operator (or whoever invokes `notebook_run`), so
-`~/.dacustoms` in the operator's `$HOME` just works. No ACL, no symlink,
-no state-root pin, no `DACUSTOMS_DIR` in `daharness.env` for the Brain's
-sake. The kernel lane's `.env` may still pin it for dev-checkout
-consistency, but the Brain unit doesn't need it.
-
-The `DACUSTOMS_DIR` pin in `daharness.env` and the `postinst` provisioning
-of `/var/lib/daharness/dacustoms` (added 2026-10-23 for the now-rescinded
-Brain-import path) should be **walked back** when the notebook macro lane
-ships. They're not harmful in the interim, but they're solving a problem
-that the supersession makes moot.
+If the notebook macro lane ships later, the roles split: macros become the
+**dispatch surface** for pre-composed multi-step workflows (one
+`notebook_run` call runs a whole chain, keeping intermediate results out of
+the model's context); `.dacustoms` stays as the **helper library** macros
+import from. Same author, two lifecycles — the macro is the unit of work,
+`.dacustoms` functions are the reusable primitives. The Brain continues to
+discover `.dacustoms` functions in the interim; the notebook lane is purely
+additive.
 
 ### Blue-team adoption angle
 
-The notebook macro lane gives defensive operators a **floor to adopt the
-framework** without the full offensive tool-chain commitment. A blue-team
-analyst authors a macro notebook that parses logs, enriches IOCs, queries
-the evidence store, and renders a finding — all through the same kernelspec,
-envelope helpers, and `@framework_tool` namespace the red team uses, but
-never touching Brain-discovered attack modules. The macro is the unit of
-work; papermill is the executor; the framework is the library. No scope gate
-on defensive macros that don't contact targets (the gate fires per
-traffic-sending call, same as always). The barrier to entry drops from
-"understand the Brain, the registry, the dispatch envelope" to "write a
-notebook with a parameters cell and call `notebook_run`."
+`.dacustoms` already gives defensive operators a **floor to adopt the
+framework** without the full offensive tool-chain commitment: a blue-team
+analyst authors a module that parses logs, enriches IOCs, queries the
+evidence store, and renders a finding — all through the same
+`@framework_tool` namespace and dispatch envelope, but never touching
+Brain-discovered attack modules. No scope gate on defensive tools that
+don't contact targets (the gate fires per traffic-sending call, same as
+always). The notebook lane would lower the barrier further ("write a
+notebook with a parameters cell" vs. "write a Python module with a
+decorator"), but `.dacustoms` is a functional on-ramp today.
 
 ---
 
-## Next steps (revised 2026-10-23)
+## Next steps
 
-### Safe to write now (touches nothing under review)
-- This doc (done).
-- `notebooks/README.md` + an example macro notebook (defensive and
-  offensive examples — the defensive one is the blue-team on-ramp).
-- `framework_doctor` provider-spec sections (`macros` provider per D12;
-  `customs` provider stays as syntax check, wording updated to reflect
-  the demotion).
-- Registry tests for out-of-tree roots (still needed — `.dacustoms` is
-  still in `ALLOWED_TOOL_ROOTS` for the kernel lane's import resolution,
-  even though the Brain doesn't import from it).
-- The scaffold template for `dacustoms init` (helper library, not tool
-  surface — the README and example should reflect this).
+### Shipped (done)
+- `.dacustoms` meta-path finder + `DACUSTOMS_DIR` knob (commit `c1b718e`).
+- `finder_status()` trace in `dacustoms_finder.py` (commit `f9cba38`).
+- Scaffold template + postinst readiness hint (commit `996ae82`).
+- Unified `DACUSTOMS_DIR` resolution across all lanes + rescinded
+  service-identity guard (commit `74f7a98`).
+- `framework_doctor(provider='customs')` syntax check + finder trace.
+- `packaging/dacustoms/README.md` + `example_port_knock.py` scaffold.
 
-### Day-of (the review files)
+### Still needed (`.dacustoms` hardening)
+- Registry tests for out-of-tree roots — the `relative_to(FRAMEWORK_ROOT)`
+  call in `daharness/registry.py:~447` is unguarded; one out-of-tree file
+  raises `ValueError` and takes the entire discovery pass with it. Guard
+  it so one bad path skips one file instead of euthanizing discovery.
+- Guard the implementation-path resolver for absolute paths
+  (`manifests['implementation_path']` resolution assumes
+  `FRAMEWORK_ROOT / candidate`).
+- The `dacustoms init` scaffold stub (currently the example + README are
+  the scaffold; a CLI stub would smooth the on-ramp).
+
+### Deferred (notebook macro lane — lands when budget compression justifies it)
+- `notebooks/README.md` + example macro notebooks (defensive + offensive).
 - `pyproject.toml` — add `papermill==2.7.0` to `[jupyter]`.
 - `debian/daharness.postinst` — `notebooks` in the drop-lane loop (2770,
   mkdir-if-missing). `debian/control` — papermill Suggests at most.
-- `daharness/registry.py` — guard the implementation-path resolver for
-  absolute paths; guard `relative_to(FRAMEWORK_ROOT)` so one bad path
-  skips one file instead of euthanizing discovery. `DACUSTOMS_DIR`
-  stays in `ALLOWED_TOOL_ROOTS` for kernel-lane import resolution, but
-  the Brain's `BRAIN_SCAN_DIRS` does **not** include it (the Brain never
-  imports operator code in the superseded design).
-- **Walk back the Brain-import provisioning:** remove `DACUSTOMS_DIR`
-  from `/etc/daharness/daharness.env` (the Brain doesn't need it);
-  remove the `postinst` provisioning of
-  `/var/lib/daharness/dacustoms` (operator content lives in `$HOME`);
-  the `PYTHONDONTWRITEBYTECODE=1` in the systemd unit stays (good
-  hygiene regardless).
 - `payloads/notebook_macros.py` — `notebook_list` + `notebook_run`
-  per D9, in `BRAIN_SCAN_DIRS` (payloads/ is already scanned). Sync
-  tool, blocking, worker thread per the blocking-call rule.
+  per D9. Sync tool, blocking, worker thread per the blocking-call rule.
+- `framework_doctor(provider='macros')` — D12 probe (papermill importable?,
+  kernel present?, dropbox exists?, macro count + parameters-cell summary).
+- Registry path guards (also needed for `.dacustoms` — see above).
 
 ### Tracked issues (separate from this feature)
 - Ghost manifest eviction — reindex without `--clear` leaves stale
-  tool_ids after upstream renames.
+  tool_ids after upstream renames. Already bites today's users.
 - proot raw-socket probe — euid==0 short-circuit (noted in repo memory).
-- Blue-team macro examples — the defensive on-ramp notebook(s) that
-  demonstrate log parsing, IOC enrichment, and finding rendering without
-  any target-contacting tool calls. Ship alongside the offensive example
-  so the framework's dual-use nature is visible from day one.
-  Already bites today's users.
 
 ---
 
@@ -353,14 +341,21 @@ hardcoded fragments (`AppNavHomeActivity`). The three real surfaces:
 - **NetHunter Store** = Android APKs; unrelated to chroot packaging.
 
 Future daharness-on-NetHunter shape (an install-env check helper forks the
-unpacked unit lane):
+unpacked unit lane) — **SHIPPED 2026-10-23**:
 
 - Check: ``[ -d /run/systemd/system ] && command -v systemctl`` → existing
   deb lane untouched; else → same tree + state root, **init.d scripts
   instead of units** for `daharness` / `daharness-kernel`, and
   `mkdir /run/daharness` at boot (no RuntimeDirectory on this lane),
   `PYTHONDONTWRITEBYTECODE` irrelevant here (tree is root-owned; .pyc stay
-  tracked).
+  tracked). The init.d scripts ship under `packaging/initd/` and are
+  copied to `/etc/init.d/` by postinst ONLY when systemd is absent; the
+  systemd lane never installs them. They launch the SAME
+  `/usr/bin/daharness` + `/usr/bin/daharness-kernel` entry points the
+  units hit, so daemon behavior is identical across supervisors.
+  `update-rc.d` registers the LSB runlevel symlinks (best-effort — a
+  bare box can still invoke `/etc/init.d/daharness start` directly).
+  postrm purges them on purge.
 - Expect: the two services surface in **Kali Services**; the REPL/gateway
   entry points get a documented "add these custom commands by hand" (the
   Custom-Commands DB is user-owned); no Store APK lane.
@@ -449,10 +444,9 @@ where they supersede the first-draft wording above.
 
 ## Scope tool-disable list (2026-10-23) — operator authority over non-traffic tools
 
-**Status: DESIGN ONLY — nothing wired.** Captured same-day because the gap is
-live: the scenario is a pentester's model ripping `run_john` / `run_hashcat`
-(`payloads/hash_crack.py`) on a hash whose provenance has nothing to do with
-the armed program.
+**Status: SHIPPED 2026-10-23.** The gap this closes: a pentester's model
+ripping `run_john` / `run_hashcat` (`payloads/hash_crack.py`) on a hash whose
+provenance has nothing to do with the armed program.
 
 ### The gap (why this exists)
 

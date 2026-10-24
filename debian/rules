@@ -137,6 +137,15 @@ override_dh_auto_install:
 	# mechanics: KALI PRESET POLICY).
 	install -D -m 0644 packaging/systemd/98-daharness.preset \
 	  debian/daharness/usr/lib/systemd/system-preset/98-daharness.preset
+	# init.d fallback scripts (systemd-less hosts: NetHunter chroot, WSL1).
+	# Shipped under packaging/initd/ so postinst copies them to /etc/init.d/
+	# ONLY when systemd is absent — the systemd lane never touches them.
+	# Same /usr/bin/daharness + /usr/bin/daharness-kernel entry points the
+	# units hit, so daemon behavior is identical across supervisors.
+	install -d -m 0755 debian/daharness/usr/share/daharness/packaging/initd
+	install -m 0755 packaging/initd/daharness \
+	  packaging/initd/daharness-kernel \
+	  debian/daharness/usr/share/daharness/packaging/initd/
 	# user-profile units ship as documented examples (system units are the
 	# enabled ones via dh_installsystemd); verified on the VM smoke
 	mkdir -p debian/daharness/usr/share/doc/daharness/systemd-user

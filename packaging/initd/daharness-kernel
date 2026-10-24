@@ -1,0 +1,82 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          daharness-kernel
+# Required-Start:    $network daharness
+# Required-Stop:     $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: daharness Jupyter tool kernel
+# Description:       tool_repl.py --kernel — shares /run/daharness/brain.sock
+#                    with the daemon. systemd-less fallback (NetHunter,
+#                    init.d hosts).
+### END INIT INFO
+#
+# init.d fallback for the Jupyter tool kernel on systemd-less hosts.
+# Inert when systemd is present (dh_installsystemd owns the unit). Same
+# ExecStart target as the systemd unit (/usr/bin/daharness-kernel), so
+# the kernel behavior is identical across supervisors.
+
+set -e
+
+DAEMON=/usr/bin/daharness-kernel
+NAME=daharness-kernel
+PIDFILE=/var/run/daharness/${NAME}.pid
+ENVFILE=/etc/daharness/daharness.env
+RUNDIR=/var/run/daharness
+
+if [ -r "$ENVFILE" ]; then
+    set -a
+    . "$ENVFILE"
+    set +a
+fi
+
+mkdir -p "$RUNDIR" 2>/dev/null || true
+if getent group daharness >/dev/null 2>&1; then
+    chgrp daharness "$RUNDIR" 2>/dev/null || true
+    chmod 0770 "$RUNDIR" 2>/dev/null || true
+fi
+
+. /lib/lsb/init-functions
+
+case "$1" in
+    start)
+        log_daemon_msg "Starting $NAME" "$DAEMON"
+        # The kernel runs as a foreground ZMQ server; --background is
+        # required for init.d (it blocks otherwise). Same entry point the
+        # systemd unit hits (no --daemon flag — the kernel is its own
+        # long-running process).
+        if start-stop-daemon --start --background --make-pidfile \
+            --pidfile "$PIDFILE" --exec "$DAEMON" 2>/dev/null; then
+            log_end_msg 0
+        else
+            log_end_msg 1
+        fi
+        ;;
+    stop)
+        log_daemon_msg "Stopping $NAME"
+        if start-stop-daemon --stop --pidfile "$PIDFILE" --retry 30 2>/dev/null; then
+            log_end_msg 0
+        else
+            log_end_msg 1
+        fi
+        rm -f "$PIDFILE" 2>/dev/null || true
+        ;;
+    restart|force-reload)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+            log_success_msg "$NAME is running (pid $(cat "$PIDFILE"))"
+            exit 0
+        fi
+        log_failure_msg "$NAME is not running"
+        exit 3
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|force-reload|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

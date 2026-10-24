@@ -202,7 +202,7 @@ class Unknown(BaseModel):
 # One shape for everything crossing dispatch — written by exactly two
 # constructors (executor + Brain) and validated by every reader (gateway,
 # MCP, OWUI bridge, kernel helpers). Today the shape is only prose (AGENTS.md)
-# plus per-lane guesswork: `_elapsed_s`, `_provenance` stamped twice, budget
+# plus per-lane guesswork: `_elapsed_s`, `_provenance` stamped once, budget
 # directives re-wrapped after projection, the kernel needing `keys()/pluck()`
 # survival gear. The model pins it; drift fails loudly instead of surfacing
 # as "why is `routes` nested here but not there".

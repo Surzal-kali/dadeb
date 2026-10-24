@@ -77,6 +77,21 @@ if [ "$1" = "purge" ]; then
     # Wants symlinks those stray units pulled in via `systemctl enable`.
     find /etc/systemd/system -type l -lname "/etc/systemd/system/daharness*" -delete 2>/dev/null || true
 
+    # init.d fallback scripts (systemd-less hosts: NetHunter, WSL1). Only
+    # present when postinst provisioned them on a non-systemd lane — a
+    # systemd box never installed them. Remove the scripts + their
+    # update-rc.d symlinks on purge.
+    for _SVC in daharness daharness-kernel; do
+        if [ -f "/etc/init.d/$_SVC" ]; then
+            if command -v update-rc.d >/dev/null 2>&1; then
+                update-rc.d -f "$_SVC" remove 2>/dev/null || true
+            fi
+            rm -f "/etc/init.d/$_SVC"
+            echo "daharness: removed init.d script $_SVC"
+        fi
+    done
+    unset _SVC
+
     # 4. The dedicated system identity postinst minted (adduser --system).
     #    Revoked only if the account still looks exactly like ours — a system
     #    uid, our nologin shell, our home — so a homonymous user an operator

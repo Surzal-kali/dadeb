@@ -27,6 +27,9 @@ SCOPE_SUBCOMMANDS = {
     "rm-host": "rm-host <hostname> — remove a blessed hostname",
     "rm-ip": "rm-ip <ip> — remove a blessed IP",
     "list-ips": "show the operator allowlist",
+    "disable": "disable <prefix> [<prefix>...] [--force] — block tool_ids for the armed scope",
+    "enable": "enable <prefix> [<prefix>...] — re-enable a disabled tool_id prefix",
+    "disabled": "show the disabled-tools list for the armed scope",
     "search": "query boards: <kw> [--platform P] [--assets] [--handle H] [--refresh] [--limit N] [--json]",
 }
 # Flags per subcommand (empty dict = no flag completion for it).
@@ -43,6 +46,9 @@ SCOPE_ON_FLAGS = {
     "--no-strict": "unconfirmed targets warn instead of refuse",
     "--ip-boundary": "hostname/manifest assets must resolve into the blessed IP set (lab drift guard)",
     "--refresh": "force a fresh board fetch (board lanes only; lab manifests are files)",
+}
+SCOPE_DISABLE_FLAGS = {
+    "--force": "allow disabling terminal-lane families (findings/memory)",
 }
 
 
@@ -79,6 +85,9 @@ def _scope_command(rest: str):
         print("    scope rm-host <hostname>")
         print("    scope rm-ip <ip>")
         print("    scope list-ips")
+        print("    scope disable <prefix> [<prefix>...] [--force]  (block tool_ids for the armed scope)")
+        print("    scope enable <prefix> [<prefix>...]            (re-enable a disabled tool_id prefix)")
+        print("    scope disabled                                  (show the disabled-tools list)")
         st = scope_gate.status()
         if st.get("armed"):
             print(f"  Current: ARMED — {st.get('handle')}/{st.get('platform')} "
@@ -250,6 +259,36 @@ def _scope_command(rest: str):
 
     elif sub in ("list-ips", "list_ips", "list", "ips"):
         res = scope_gate.list_ips()
+
+    elif sub == "disable":
+        # Operator-only: block tool_id prefixes for the armed scope.
+        # Requires the gate to be armed (engagement-posture control).
+        if len(parts) < 2:
+            print("  Usage: scope disable <prefix> [<prefix>...] [--force]")
+            print("  Trailing-dot prefix (payloads.hash_crack.) kills a family;")
+            print("  bare stem (payloads.hash_crack.run_john) is exact tool_id only.")
+            print("  Terminal-lane families (findings/memory) need --force.")
+            return
+        force = False
+        prefixes = []
+        for tok in parts[1:]:
+            if tok == "--force":
+                force = True
+            else:
+                prefixes.append(tok)
+        if not prefixes:
+            print("  Usage: scope disable <prefix> [<prefix>...] [--force]")
+            return
+        res = scope_gate.disable_tools(prefixes, force=force)
+
+    elif sub == "enable":
+        if len(parts) < 2:
+            print("  Usage: scope enable <prefix> [<prefix>...]")
+            return
+        res = scope_gate.enable_tools(parts[1:])
+
+    elif sub in ("disabled", "disabled-tools", "disabled_tools"):
+        res = scope_gate.list_disabled()
 
     else:
         print(f"  Unknown scope subcommand: {sub!r}. Try 'scope' for help.")
