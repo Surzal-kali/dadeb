@@ -3,6 +3,7 @@ import asyncio
 import ipaddress
 import os
 import json
+import secrets
 import time as _time
 from typing import Any, Literal
 from constants import TransportType
@@ -123,7 +124,6 @@ class MetasploitClient:
         creating the MsfRpcClient.
         """
         user = "msfadmin"
-        pwd = MSGRPC_PASSWORD
         host = MSF_RPC_HOST
         port = MSF_RPC_PORT
         try:
@@ -143,6 +143,17 @@ class MetasploitClient:
             launched_process = None
             if not stdout:
                 print("[i] msfrpcd is not running; launching it...")
+                # Rotate the RPC password on every fresh spawn so a
+                # daemon restarted by this harness never reuses the
+                # credential a previous (or killed) instance was
+                # launched with.  The token is random per-init and
+                # stored on the instance so the MsfRpcClient below
+                # connects with the SAME password we just passed to
+                # -P.  The env var (MSGRPC_PASSWORD) is only used on
+                # the reuse path below (a daemon we didn't spawn —
+                # we can't rotate its credential).
+                pwd = secrets.token_hex(16)
+                self._rpc_password = pwd
                 # Stream msfrpcd's output to a log file so models can read back
                 # the console stdout/stderr via the read_logs('msf') tool. The
                 # old code piped to PIPE, which was never drained, so the tool
@@ -189,6 +200,11 @@ class MetasploitClient:
                 self._msf_log_fd = msf_log if hasattr(msf_log, "close") else None
             else:
                 print("[i] msfrpcd already running; connecting to it...")
+                # Reuse path: we did not spawn this daemon, so we
+                # cannot rotate its credential.  Use the configured
+                # password (env var or default) — the same one a
+                # previous launch or a manually-started msfrpcd used.
+                pwd = getattr(self, "_rpc_password", None) or MSGRPC_PASSWORD
 
             # Poll for the RPC port to come up before attempting to connect.
             ready = await self._wait_for_port(host=host, port=port)
