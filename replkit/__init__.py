@@ -9,7 +9,7 @@ load-bearing private name from the modules here.
 
 Module map
 ----------
-:mod:`replkit.safe_args`      — SAFE_ARGS table (bare-`run` defaults) + sweep skip-set.
+:mod:`replkit.safe_args`      — SAFE_ARGS table (bare-`run` defaults).
 :mod:`replkit.aliases`        — curated alias table + derivation + collision merge.
 :mod:`replkit.envelope`       — find/pluck/grep/keys/scratch result-tree helpers.
 :mod:`replkit.completer`      — prompt_toolkit completer for the ``repl>`` prompt.

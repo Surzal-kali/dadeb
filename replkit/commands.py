@@ -91,11 +91,12 @@ Tool REPL commands:
   run <tool_id> [--flag value ...]   Run a tool with flag args (schema-aware)
   run <tool_id> --json '{...}'       Run a tool with JSON args
   run <tool_id>          Run with safe-default args (if defined)
-  selftest [pytest args] Run the pytest suite (replaces the legacy sweep);
+  selftest [pytest args] Run the hermetic pytest unit suite (no live wires);
                          fires from any directory (anchored to the repo root):
                          selftest                      → python -m pytest tests/ -q
                          selftest test_scope_gate      → one file (tests/-anchored)
                          selftest -k budget            → passthrough of pytest args
+                         (for live tool capability: run framework_doctor)
   reindex                Re-discover tools
   ipython                Drop into IPython with tools as named async callables
                          (Tab-completion on tool names + params, tool? introspection,
@@ -259,8 +260,9 @@ async def repl_loop(manifests: list[ToolManifest]):
         elif cmd == "selftest":
             from replkit.core import run_selftest
             extra = shlex.split(rest) if rest else []
-            rc = await asyncio.to_thread(run_selftest, extra)
-            print(f"  [selftest] exit code: {rc}")
+            # run_selftest owns the full output (preamble + pytest +
+            # postamble with exit-code meaning) — no double-print here.
+            await asyncio.to_thread(run_selftest, extra)
 
         elif cmd == "search":
             if not rest:

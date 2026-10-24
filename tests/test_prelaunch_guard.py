@@ -106,8 +106,8 @@ def test_guard_branches(up_member, unit, expected_rc, monkeypatch, capsys):
     monkeypatch.setattr(bootstrap, "_stack_live_probes", lambda: up)
     monkeypatch.setattr(bootstrap, "_systemctl_is_active", lambda: unit)
     monkeypatch.delenv("INVOCATION_ID", raising=False)
-    with capsys.disabled():
-        rc = bootstrap._prelaunch_guard()
+    rc = bootstrap._prelaunch_guard()
+    capsys.readouterr()  # drain the guard's refuse message (not asserted here)
     assert rc == expected_rc
 
 

@@ -1,13 +1,14 @@
-"""SAFE defaults + sweep skip-set.
+"""SAFE defaults for the REPL's bare-``run <tool_id>`` fallback.
 
 These are TEST VALUES, not schema — the schema lives in the manifests.
-``SAFE_ARGS`` is the bare-``run <tool_id>`` fallback (no args given): it
-carries only runtime values that are harmless on their own (localhost,
-dry-run, benign test strings). ``REQUIRES_SERVICE`` lists tools that need a
-live backend (msfrpcd, searchsploit DB, sqlmap) and were skipped in the
-REPL's legacy smoke-``sweep``; the table also feeds
-``replkit.core.run_selftest`` so the pytest macro skips the same lanes
-implicitly.
+``SAFE_ARGS`` carries only runtime values that are harmless on their own
+(localhost, dry-run, benign test strings) so an operator can ``run nmap``
+with no args and get a bounded probe instead of a missing-arg error.
+
+The legacy ``sweep`` command (which fired every tool with these defaults)
+was replaced by the ``selftest`` macro — a pytest shell-out that runs the
+hermetic unit suite, NOT live tool calls. ``SAFE_ARGS`` is unrelated to
+selftest; it lives on only for the REPL's bare-``run`` convenience.
 """
 
 from typing import Any
@@ -37,17 +38,4 @@ SAFE_ARGS: dict[str, dict[str, Any]] = {
     "utils.paramiko_client.paramiko_client": {"host": "127.0.0.1", "username": "test", "password": "test", "command": "echo test"},
     "auxiliaries.ldap_search.ldap_rootdse": {"host": "127.0.0.1"},
     "auxiliaries.ldap_search.ldap_search": {"host": "127.0.0.1", "base_dn": "dc=example,dc=com"},
-}
-
-# Tools that require a live service and were skipped in legacy sweep mode;
-# still consulted safe-mode skips in the selftest macro.
-REQUIRES_SERVICE: set[str] = {
-    "payloads.metasploiting.MetasploitClient.index_modules",
-    "payloads.metasploiting.MetasploitClient.dispatch_metasploit",
-    "payloads.metasploiting.MetasploitClient.get_options",
-    "payloads.metasploiting.MetasploitClient.interact_session",
-    "payloads.metasploiting.MetasploitClient.set_payload",
-    "payloads.metasploiting.MetasploitClient.close_msf_session",
-    "payloads.searchsploiting.search_exploit",
-    "payloads.sqlmap.run_sqlmap",
 }

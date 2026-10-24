@@ -26,8 +26,9 @@ Modes (unchanged — see ``replkit.cli:main``):
   interactive       (default) — REPL prompt: list, run, info, selftest, quit
   run <id> [--flag val ...]   — one-shot: run a tool with --flag value args
   run <id> --json '{...}'     — one-shot: run a tool with JSON args (fallback)
-  selftest [args]             — run the pytest suite (replaces legacy sweep;
-                                works from any working directory)
+  selftest [args]             — run the hermetic pytest unit suite (no live
+                                wires; for live tool capability: framework_doctor);
+                                works from any working directory
   info <id>                   — show a tool's manifest without running it
   search <query>              — semantic search (needs embed endpoint);
                                 best match prints LAST, nearest the prompt

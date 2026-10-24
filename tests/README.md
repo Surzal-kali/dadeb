@@ -1,9 +1,20 @@
 # Selftest suite (the `selftest` REPL macro's engine)
 
 The REPL's `selftest` command runs `python -m pytest tests/ -q` from the
-tree root (see `replkit/commands.py` → `replkit.core.run_selftest`), so
-whatever lands here is what operators and tool authors can macro — on a dev
-checkout AND on a deb install, since `tests/` ships with the tree.
+tree root (see `replkit/commands.py` → `replkit.core.run_selftest`). The
+macro carries an honest preamble (what selftest IS) and a postamble (what
+the exit code means) so a green run doesn't misread as a live-capability
+verdict.
+
+**What selftest validates:** the framework's code paths work against
+hermetic stubs — network calls, subprocess launches, and socket probes are
+all monkeypatched in the test fixtures. A green run means the registry,
+executor, scope gate, doctor, brain socket logic, etc. are correct in
+isolation. It does NOT mean nmap/ssh/msf would work on a live target.
+
+**For live tool capability:** run `framework_doctor` (or `daharness
+doctor` on the deb) — that's the capability probe that checks real binaries,
+sockets, and privileges on the current lane.
 
 ## Adding tests for your tool
 

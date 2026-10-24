@@ -3,7 +3,11 @@
 All of this ran inside the old monolithic tool_repl.py; nothing here changed
 semantically except ``run_selftest`` — the pytest-lane macro that replaces
 the legacy ``sweep`` command (see the selftest docstring for why the sweep
-lane was shelved).
+lane was shelved). The selftest macro now carries an honest preamble and
+postamble framing what it IS (a hermetic unit suite with monkeypatched
+fixtures, not a live-capability probe) so a green exit code doesn't misread
+as "every tool works on a live target." For live tool capability the
+operator uses ``framework_doctor``.
 
 No vector store, no secretary, no model: these helpers build a bare
 ``ToolRegistry`` instance via ``__new__`` and execute tools directly through
@@ -345,6 +349,20 @@ def _selftest_argv(extra_args: list[str] | None = None) -> list[str]:
     return argv
 
 
+# Honest exit-code interpretation for the selftest postamble. Pytest's
+# exit codes are stable (pytest docs: "5 means no tests were collected").
+# We surface the meaning so a green exit code doesn't read as "everything
+# works on a live target" when half the suite skipped.
+_PYTEST_EXIT_MEANING: dict[int, str] = {
+    0: "all tests passed",
+    1: "tests failed",
+    2: "test execution was interrupted",
+    3: "internal error (out of memory, unhandled exception)",
+    4: "pytest command-line usage error",
+    5: "no tests were collected",
+}
+
+
 def run_selftest(extra_args: list[str] | None = None) -> int:
     """Run the pytest suite as a REPL macro. Returns pytest's exit code.
 
@@ -354,6 +372,12 @@ def run_selftest(extra_args: list[str] | None = None) -> int:
     ``-k``-style flags untouched). ``--force``/``-f`` are accepted-and-ignored
     so old ``sweep --force`` muscle memory doesn't error — they carry no
     meaning in the pytest lane.
+
+    The preamble and postamble frame what selftest actually IS — a hermetic
+    unit suite (monkeypatched, no live wires) — so a green exit code doesn't
+    read as a live-capability verdict. For "can I actually run X on this
+    lane," the operator should use ``framework_doctor`` (the capability
+    probe, which checks real binaries, sockets, and privileges).
     """
     argv = _selftest_argv(extra_args)
     if not (_REPO_ROOT / "tests").is_dir():
@@ -363,15 +387,39 @@ def run_selftest(extra_args: list[str] | None = None) -> int:
         print(f"  [selftest] no tests/ under {_REPO_ROOT} — this install "
               "carries no selftest suite; pull the repo tree to macro tests")
         return 66  # EX_NOINPUT
+
+    # Preamble: frame what selftest is so the exit code isn't misread.
+    # The suite is hermetic — network calls, subprocess launches, and socket
+    # probes are monkeypatched in the test fixtures. A green selftest means
+    # "the framework's code paths work against stubs," NOT "nmap/ssh/msf
+    # would work on a live target." That question is framework_doctor's job.
+    print("  [selftest] hermetic unit suite — no live targets, no network,")
+    print("    no real subprocess launches (all monkeypatched in fixtures).")
+    print("    A green run validates code paths, not live tool capability.")
+    print("    For 'can I actually run X on this lane': framework_doctor")
     print(f"  [selftest] {' '.join(argv)}")
     try:
-        return subprocess.run(argv, cwd=str(_REPO_ROOT)).returncode
+        rc = subprocess.run(argv, cwd=str(_REPO_ROOT)).returncode
     except KeyboardInterrupt:
         print("  [selftest] interrupted")
         return 130
     except Exception as exc:
         print(f"  [selftest] failed to launch pytest: {exc}")
         return 1
+
+    # Postamble: surface the exit code's meaning honestly. Pytest exit 0
+    # with skips still reads as "passed" — we don't parse the text output
+    # (fragile across pytest versions), but we do name what the code means
+    # so the operator isn't left guessing whether 0 means "all ran" or
+    # "all that ran passed (some skipped)."
+    meaning = _PYTEST_EXIT_MEANING.get(rc, f"unknown pytest exit code {rc}")
+    print(f"  [selftest] exit {rc} — {meaning}")
+    if rc == 0:
+        print("    (skipped tests don't affect this verdict; check the")
+        print("     pytest output above for 'S' markers / skip reasons)")
+    elif rc == 5:
+        print("    no tests matched — check your -k filter / file path")
+    return rc
 
 
 # ── Manifest lookup shared by loop + one-shots ──────────────────────────────
