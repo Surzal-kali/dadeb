@@ -92,6 +92,18 @@ case "$1" in
             log_success_msg "$NAME is already running — use '$0 restart' for a fresh launch"
             exit 0
         fi
+        # start needs real root: --chuid drops privileges (setuid from a
+        # non-root caller is EPERM) and the crash-log redirect below runs
+        # with the CALLER's privileges — a non-root `service daharness start`
+        # used to die with a raw shell "Permission denied" on the root-owned
+        # log before s-s-d even ran (observed 2026-10-25). One honest line
+        # beats the EACCES noise; LSB exit 4 = insufficient privilege.
+        # (The already-serving no-op above stays non-root callable — it
+        # only probes.)
+        if [ "$(id -u)" != "0" ]; then
+            log_failure_msg "$NAME start must run as root: sudo service daharness start"
+            exit 4
+        fi
         log_daemon_msg "Starting $NAME" "$DAEMON"
         # --daemon: start services (Brain, ZAP, MSF, gateway) and wait for
         # SIGTERM — same as the systemd unit's ExecStart.
@@ -137,6 +149,14 @@ case "$1" in
         fi
         ;;
     stop)
+        # Killing the daemon (root-owned since the --chuid drop) is a root
+        # operation: a non-root stop silently no-ops (every kill EPERMs and
+        # the || true guards swallow it) while still reporting success —
+        # worse than refusing. Same LSB-4 refusal as start.
+        if [ "$(id -u)" != "0" ]; then
+            log_failure_msg "$NAME stop must run as root: sudo service daharness stop"
+            exit 4
+        fi
         log_daemon_msg "Stopping $NAME"
         # Pidfile stop first (the happy path — python wrote its own PID).
         start-stop-daemon --stop --pidfile "$PIDFILE" --retry 30 2>/dev/null || true

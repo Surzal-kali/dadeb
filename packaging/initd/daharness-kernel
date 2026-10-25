@@ -40,6 +40,14 @@ fi
 
 case "$1" in
     start)
+        # Root refusal (LSB exit 4): --chuid needs root and the crash-log
+        # redirect runs with the caller's privileges — a non-root start
+        # died with a raw "Permission denied" on the root-owned log before
+        # s-s-d even ran (observed 2026-10-25, same as the daemon script).
+        if [ "$(id -u)" != "0" ]; then
+            log_failure_msg "$NAME start must run as root: sudo service daharness-kernel start"
+            exit 4
+        fi
         log_daemon_msg "Starting $NAME" "$DAEMON"
         # The kernel runs as a foreground ZMQ server; --background is
         # required for init.d (it blocks otherwise). Same entry point the
@@ -70,6 +78,12 @@ case "$1" in
         fi
         ;;
     stop)
+        # Root refusal (LSB exit 4): a non-root stop silently no-ops (kill
+        # EPERMs, || true swallows) while reporting success.
+        if [ "$(id -u)" != "0" ]; then
+            log_failure_msg "$NAME stop must run as root: sudo service daharness-kernel stop"
+            exit 4
+        fi
         log_daemon_msg "Stopping $NAME"
         if start-stop-daemon --stop --pidfile "$PIDFILE" --retry 30 2>/dev/null; then
             log_end_msg 0

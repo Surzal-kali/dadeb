@@ -26,6 +26,12 @@ daharness (0.1.0+pkg17) kali; urgency=medium
       --help` crashes, `cd /var/lib/daharness && ruby msfrpcd --help`
       boots clean. Lane-shaped bug, not WSL-shaped — any systemd-less
       host with an unreadable dir under /usr/lib hits it.
+    - init.d start/stop refuse non-root callers with one honest line
+      (LSB exit 4) instead of a raw shell "Permission denied" on the
+      root-owned crash log — the >>"$_CRASHLOG" redirect runs with the
+      CALLER's privileges, so a non-root `service daharness restart`
+      died on the redirect before s-s-d even ran (observed 2026-10-25;
+      the sudo path was already clean). status stays non-root callable.
 
  -- systempackage <root@kali>  Sat, 25 Oct 2026 01:30:00 +0000
 
