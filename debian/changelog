@@ -16,6 +16,16 @@ daharness (0.1.0+pkg17) kali; urgency=medium
       running the same stack reads as "foreign leftovers" (brain down,
       TCP members up) with no owning process in this PID namespace.
       Detected via /proc/sys/fs/binfmt_misc/WSLInterop.
+    - init.d start gains --chdir /var/lib/daharness (both scripts), parity
+      with the systemd units' WorkingDirectory=. Without it s-s-d chdirs
+      to / and msfrpcd's Rails boot resolves its app root to "/"
+      (find_root_with_flag("config.ru", ..., Dir.pwd) fallback), unshifting
+      /lib into $LOAD_PATH — bootsnap's load-path scan then walks all of
+      /usr/lib and dies EACCES on the first unreadable dir (WSL kernel
+      modules' root-only lost+found). Reproduced: `cd / && ruby msfrpcd
+      --help` crashes, `cd /var/lib/daharness && ruby msfrpcd --help`
+      boots clean. Lane-shaped bug, not WSL-shaped — any systemd-less
+      host with an unreadable dir under /usr/lib hits it.
 
  -- systempackage <root@kali>  Sat, 25 Oct 2026 01:30:00 +0000
 

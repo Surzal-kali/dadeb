@@ -56,9 +56,12 @@ case "$1" in
         # the file as root pre-chuid and dup2s the child's stdout+stderr
         # onto it — same mechanism the daemon script uses.
         _CRASHLOG=/var/log/daharness-kernel-start.log
+        # --chdir: parity with the kernel unit's WorkingDirectory=/var/lib/
+        # daharness (s-s-d's default is / — see the daemon script's comment
+        # for the Rails find_root_with_flag CWD trap this dodges).
         if start-stop-daemon --start --background --make-pidfile \
             --pidfile "$PIDFILE" --exec "$DAEMON" \
-            --output "$_CRASHLOG" \
+            --output "$_CRASHLOG" --chdir /var/lib/daharness \
             --chuid daharness:daharness >>"$_CRASHLOG" 2>&1; then
             log_end_msg 0
         else

@@ -114,9 +114,21 @@ case "$1" in
         # root-owned /var/log file and the daharness drop. start-stop-daemon's
         # own errors still land there via the shell redirect.
         _CRASHLOG=/var/log/daharness-start.log
+        # --chdir: parity with the systemd unit's WorkingDirectory=/var/lib/
+        # daharness. Without it s-s-d chdirs to / (its documented default),
+        # and msfrpcd's Rails boot then resolves its app root via
+        # find_root_with_flag("config.ru", ..., Dir.pwd) -> "/" — no config.ru
+        # exists up the tree — so add_lib_to_load_path! unshifts /lib into
+        # $LOAD_PATH and bootsnap's load-path scan walks ALL of /usr/lib,
+        # dying on the first unreadable dir (WSL: the kernel-modules
+        # lost+found, root:root 0700 -> EACCES, msfrpcd dead before bind).
+        # Observed live on Parrot-WSL 2026-10-25; reproduced with
+        # `cd / && ruby msfrpcd --help` (crash) vs `cd /var/lib/daharness &&
+        # ruby msfrpcd --help` (clean boot). s-s-d chdirs pre-chuid, and
+        # root passes the 2770 state dir's gate fine.
         if start-stop-daemon --start --background --make-pidfile \
             --pidfile "$PIDFILE" --exec "$DAEMON" \
-            --output "$_CRASHLOG" \
+            --output "$_CRASHLOG" --chdir /var/lib/daharness \
             --chuid daharness:daharness -- --daemon >>"$_CRASHLOG" 2>&1; then
             log_end_msg 0
         else
