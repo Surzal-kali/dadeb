@@ -103,12 +103,21 @@ case "$1" in
         # init.d lane ran the entire stack as root, writing root-owned files
         # into the setgid state tree and breaking the service-user-owns-
         # its-state invariant the postinst's ghost-uid reconcile maintains.
+        # stderr capture: --background swallows the child's stdout/stderr,
+        # and the old `2>/dev/null` ate start-stop-daemon's own diagnostics
+        # too — so a python crash as daharness (permission denied on a state
+        # file, /tmp/brain.log owned by a previous root run, etc.) showed
+        # up as a silent "failed" with zero clue why. Redirect to a crash
+        # log the operator can cat; start-stop-daemon's own errors land
+        # there too. Removed the 2>/dev/null so we can actually see.
+        _CRASHLOG=/var/log/daharness-start.log
         if start-stop-daemon --start --background --make-pidfile \
             --pidfile "$PIDFILE" --exec "$DAEMON" \
-            --chuid daharness:daharness -- --daemon 2>/dev/null; then
+            --chuid daharness:daharness -- --daemon >>"$_CRASHLOG" 2>&1; then
             log_end_msg 0
         else
             log_end_msg 1
+            log_failure_msg "  crash log: $_CRASHLOG (cat it for the python traceback)"
         fi
         ;;
     stop)
