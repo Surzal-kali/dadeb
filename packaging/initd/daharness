@@ -47,13 +47,52 @@ fi
 
 . /lib/lsb/init-functions
 
+# Real health probe — connect to the Brain UDS. The pidfile can lag the
+# actual process state on init.d lanes: start-stop-daemon --background +
+# an exec'ing wrapper leaves the pidfile pointing at a PID that may have
+# been reaped while the python parent serving the socket is still very
+# much alive (observed on Parrot-WSL 2026-10-25: `service status` reported
+# dead while framework_doctor said alive). Mirror framework_status.
+# _check_unix_socket: a real connect(), not Path.exists() (a stale socket
+# file passes the file test but bounces every connect). Returns 0 = serving,
+# non-zero = down / no probe tool (falls through to the dead report).
+_status_health() {
+    _SOCK="${BRAIN_SOCKET:-/run/daharness/brain.sock}"
+    [ -S "$_SOCK" ] || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$_SOCK" <<'PY' 2>/dev/null
+import socket, sys
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(2)
+        s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+PY
+        return $?
+    elif command -v nc >/dev/null 2>&1; then
+        nc -U -w 2 "$_SOCK" </dev/null >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
 case "$1" in
     start)
         log_daemon_msg "Starting $NAME" "$DAEMON"
         # --daemon: start services (Brain, ZAP, MSF, gateway) and wait for
         # SIGTERM — same as the systemd unit's ExecStart.
+        # --chuid daharness:daharness: drop to the service identity to match
+        # the systemd unit's User=/Group=. The env file is sourced above (as
+        # root, so a 0600 conffile still works), the umask is set, and
+        # /run/daharness is mkdir'd + chgrp'd before the drop — so the
+        # daharness user inherits a ready runtime dir. Without this the
+        # init.d lane ran the entire stack as root, writing root-owned files
+        # into the setgid state tree and breaking the service-user-owns-
+        # its-state invariant the postinst's ghost-uid reconcile maintains.
         if start-stop-daemon --start --background --make-pidfile \
-            --pidfile "$PIDFILE" --exec "$DAEMON" -- --daemon 2>/dev/null; then
+            --pidfile "$PIDFILE" --exec "$DAEMON" \
+            --chuid daharness:daharness -- --daemon 2>/dev/null; then
             log_end_msg 0
         else
             log_end_msg 1
@@ -73,8 +112,17 @@ case "$1" in
         "$0" start
         ;;
     status)
-        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-            log_success_msg "$NAME is running (pid $(cat "$PIDFILE"))"
+        _PID=""
+        [ -f "$PIDFILE" ] && _PID=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$_PID" ] && kill -0 "$_PID" 2>/dev/null; then
+            log_success_msg "$NAME is running (pid $_PID)"
+            exit 0
+        fi
+        # Pidfile stale or missing — probe the Brain UDS directly. A real
+        # connect catches the "dead per pidfile, alive per socket" gap that
+        # pure pidfile status reports as dead on init.d lanes.
+        if _status_health >/dev/null 2>&1; then
+            log_success_msg "$NAME is serving (Brain socket up; pidfile stale)"
             exit 0
         fi
         log_failure_msg "$NAME is not running"

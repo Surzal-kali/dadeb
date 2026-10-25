@@ -44,9 +44,15 @@ case "$1" in
         # The kernel runs as a foreground ZMQ server; --background is
         # required for init.d (it blocks otherwise). Same entry point the
         # systemd unit hits (no --daemon flag — the kernel is its own
-        # long-running process).
+        # long-running process). --chuid daharness:daharness drops to the
+        # service identity to match the systemd unit's User=/Group= — the
+        # env file is sourced above as root and /run/daharness is already
+        # mkdir'd + chgrp'd, so the daharness user inherits a ready lane.
+        # Without this the kernel ran as root on init.d hosts, diverging
+        # from the systemd profile (Parrot-WSL, 2026-10-25).
         if start-stop-daemon --start --background --make-pidfile \
-            --pidfile "$PIDFILE" --exec "$DAEMON" 2>/dev/null; then
+            --pidfile "$PIDFILE" --exec "$DAEMON" \
+            --chuid daharness:daharness 2>/dev/null; then
             log_end_msg 0
         else
             log_end_msg 1
@@ -66,8 +72,19 @@ case "$1" in
         "$0" start
         ;;
     status)
-        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-            log_success_msg "$NAME is running (pid $(cat "$PIDFILE"))"
+        _PID=""
+        [ -f "$PIDFILE" ] && _PID=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$_PID" ] && kill -0 "$_PID" 2>/dev/null; then
+            log_success_msg "$NAME is running (pid $_PID)"
+            exit 0
+        fi
+        # Pidfile stale — pgrep fallback. The kernel is a ZMQ server, not
+        # a UDS listener, so there's no Brain-socket probe like the daemon
+        # script has; match the entry-point script instead. Catches the
+        # same pidfile-lags-live-process gap as the daemon's health probe.
+        if pgrep -f "/usr/share/daharness/tool_repl.py .*--kernel" >/dev/null 2>&1 \
+           || pgrep -x daharness-kernel >/dev/null 2>&1; then
+            log_success_msg "$NAME is running (pidfile stale; process alive)"
             exit 0
         fi
         log_failure_msg "$NAME is not running"
