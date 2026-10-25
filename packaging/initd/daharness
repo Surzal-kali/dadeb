@@ -79,6 +79,19 @@ PY
 
 case "$1" in
     start)
+        # Mirror systemd's "start on an active unit is a no-op" semantics:
+        # if the Brain UDS is already serving, don't double-launch (which
+        # would trip bootstrap's _prelaunch_guard with a confusing "failed"
+        # — observed on Parrot-WSL 2026-10-25 when a stale root-run daemon
+        # from before an upgrade kept the socket up while the pidfile was
+        # dead). Tell the operator to use `restart` for a fresh launch.
+        if _status_health >/dev/null 2>&1; then
+            log_daemon_msg "Starting $NAME" "$DAEMON"
+            log_progress_msg "already serving (Brain socket up)"
+            log_end_msg 0
+            log_success_msg "$NAME is already running — use '$0 restart' for a fresh launch"
+            exit 0
+        fi
         log_daemon_msg "Starting $NAME" "$DAEMON"
         # --daemon: start services (Brain, ZAP, MSF, gateway) and wait for
         # SIGTERM — same as the systemd unit's ExecStart.
@@ -100,12 +113,31 @@ case "$1" in
         ;;
     stop)
         log_daemon_msg "Stopping $NAME"
-        if start-stop-daemon --stop --pidfile "$PIDFILE" --retry 30 2>/dev/null; then
-            log_end_msg 0
-        else
-            log_end_msg 1
+        # Pidfile stop first (the happy path — python wrote its own PID).
+        start-stop-daemon --stop --pidfile "$PIDFILE" --retry 30 2>/dev/null || true
+        # Pidfile-stale sweep: on init.d the pidfile can lag the real
+        # process state (start-stop-daemon --background + an exec'ing
+        # wrapper is racy, and a previous root-run daemon from before an
+        # upgrade leaves the socket up with a dead pidfile PID). pgrep the
+        # actual bootstrap.py --daemon process and reap stragglers so a
+        # subsequent `start` doesn't trip _prelaunch_guard. Match across
+        # all users (a legacy root-run daemon is exactly the case we're
+        # healing); the script itself runs as root so the kill is allowed.
+        _STRAGGLERS=$(pgrep -f "/usr/share/daharness/bootstrap.py .*--daemon" 2>/dev/null || true)
+        if [ -n "$_STRAGGLERS" ]; then
+            kill $_STRAGGLERS 2>/dev/null || true
+            sleep 2 2>/dev/null || true
+            kill -9 $_STRAGGLERS 2>/dev/null || true
         fi
+        unset _STRAGGLERS
+        # Clean the socket too: a stale brain.sock file passes is_socket but
+        # bounces every connect, which would make the next start's
+        # _status_health probe (and framework_doctor) report down even after
+        # the daemon is gone. The Brain unlinks on clean shutdown; this is
+        # the crash-path backstop.
+        rm -f "${BRAIN_SOCKET:-/run/daharness/brain.sock}" 2>/dev/null || true
         rm -f "$PIDFILE" 2>/dev/null || true
+        log_end_msg 0
         ;;
     restart|force-reload)
         "$0" stop
