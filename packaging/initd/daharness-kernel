@@ -50,12 +50,20 @@ case "$1" in
         # mkdir'd + chgrp'd, so the daharness user inherits a ready lane.
         # Without this the kernel ran as root on init.d hosts, diverging
         # from the systemd profile (Parrot-WSL, 2026-10-25).
+        # Crash log: --background hardcodes the child's stdio to /dev/null
+        # (the shell's >> only captures s-s-d's own output), so a kernel
+        # crash was a silent "failed". -O/--output (s-s-d >= 1.20.6) opens
+        # the file as root pre-chuid and dup2s the child's stdout+stderr
+        # onto it — same mechanism the daemon script uses.
+        _CRASHLOG=/var/log/daharness-kernel-start.log
         if start-stop-daemon --start --background --make-pidfile \
             --pidfile "$PIDFILE" --exec "$DAEMON" \
-            --chuid daharness:daharness 2>/dev/null; then
+            --output "$_CRASHLOG" \
+            --chuid daharness:daharness >>"$_CRASHLOG" 2>&1; then
             log_end_msg 0
         else
             log_end_msg 1
+            log_failure_msg "  crash log: $_CRASHLOG (cat it for the traceback)"
         fi
         ;;
     stop)

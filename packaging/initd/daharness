@@ -103,16 +103,20 @@ case "$1" in
         # init.d lane ran the entire stack as root, writing root-owned files
         # into the setgid state tree and breaking the service-user-owns-
         # its-state invariant the postinst's ghost-uid reconcile maintains.
-        # stderr capture: --background swallows the child's stdout/stderr,
-        # and the old `2>/dev/null` ate start-stop-daemon's own diagnostics
-        # too — so a python crash as daharness (permission denied on a state
-        # file, /tmp/brain.log owned by a previous root run, etc.) showed
-        # up as a silent "failed" with zero clue why. Redirect to a crash
-        # log the operator can cat; start-stop-daemon's own errors land
-        # there too. Removed the 2>/dev/null so we can actually see.
+        # stderr capture: --background swallows the child's stdout/stderr
+        # (s-s-d hardcodes the detached child's stdio to /dev/null — the
+        # shell's >> below only captures s-s-d's OWN output, which is why a
+        # python crash showed up as a silent "failed" with an empty log).
+        # s-s-d >= 1.20.6 has -O/--output: it opens the file ITSELF (as
+        # root, pre-chuid — verified in dpkg 1.22.22 do_start(): open()
+        # happens before setgid/setuid, then dup2(1)/dup2(2)) and points
+        # the child's stdout+stderr at it, so the log works even with a
+        # root-owned /var/log file and the daharness drop. start-stop-daemon's
+        # own errors still land there via the shell redirect.
         _CRASHLOG=/var/log/daharness-start.log
         if start-stop-daemon --start --background --make-pidfile \
             --pidfile "$PIDFILE" --exec "$DAEMON" \
+            --output "$_CRASHLOG" \
             --chuid daharness:daharness -- --daemon >>"$_CRASHLOG" 2>&1; then
             log_end_msg 0
         else

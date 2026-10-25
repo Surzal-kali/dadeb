@@ -1213,6 +1213,17 @@ def _prelaunch_guard(force: bool = False) -> int:
               "earlier foreground run.")
         print("    Drive them (daharness-repl) or stop them before launching.")
         print("    Bypass: daharness --force")
+        # WSL2 mirrored networking shares loopback TCP across ALL distros
+        # and the Windows host (but not PID namespaces or AF_UNIX) — a
+        # sibling distro running this same stack reads here as "foreign
+        # leftovers" with brain down + the TCP members up (observed live:
+        # kali-linux + parrot both running, 2026-10-25). Name the case so
+        # the operator doesn't hunt a ghost process that isn't in this box.
+        if os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+            print("    WSL note: with networkingMode=Mirrored these TCP probes "
+                  "reach OTHER distros' stacks too —")
+            print("    check: wsl.exe -l --running (the owning process may not "
+                  "exist in this distro at all).")
     # Partial stacks are the wedged state: say so loudly.
     return 78 if (unit and len(alive) < len(SERVICES_STACK)) else 1
 
