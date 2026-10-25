@@ -407,7 +407,35 @@ class FrameworkLoader:
         # /usr/bin/owasp-zap -- both sh wrappers that `cd /usr/share/zaproxy`
         # and `exec ./zap.sh "$@"`, so -daemon/-config args pass through
         # unchanged. ZAP_BIN (env) wins over everything for non-standard
-        # installs. First existing candidate is used.
+        # installs.
+        #
+        # Parrot-OS trap (2026-10-25): Parrot ships /usr/bin/zaproxy as
+        #   #!/bin/sh
+        #   cd /usr/share/zaproxy/
+        #   exec ./zap.sh
+        # -- NO `"$@"` forwarding. Kali's wrapper (and owasp-zap) is
+        # `exec ./zap.sh "$@"`. Parrot's strips every flag, so
+        # `zaproxy -daemon -port 8090 ...` becomes `./zap.sh` (no -daemon)
+        # -> GUI/foreground launch on a headless box -> :8090 HTTP API
+        # never comes up -> wait_for_zap burns 60s -> "did not respond".
+        # That IS the "ZAP won't background on Parrot" symptom. Not AppArmor
+        # (no zaproxy profile on Parrot either -- aa-status confirmed).
+        #
+        # Resolver policy:
+        #   - $ZAP_BIN is honoured as-is (operator-pinned; never second-guess
+        #     a pin the operator set deliberately).
+        #   - Direct zap.sh paths (basename zap.sh, absolute) are always
+        #     accepted and get cwd= their parent dir in the subprocess so
+        #     they find sibling libs (xml/, plugin/, ...) without the
+        #     wrapper's `cd`. The direct path is what the wrapper would have
+        #     exec'd anyway -- going straight there skips the arg-stripping
+        #     layer entirely.
+        #   - PATH wrappers (zap/zaproxy/owasp-zap) are inspected: a
+        #     shebang script that does NOT forward `"$@"` is skipped with an
+        #     info log, falling through to the direct zap.sh. Kali's wrapper
+        #     (passes "$@") still wins there -- no regression on the Kali
+        #     lane. A non-script binary wrapper (no shebang) is taken as-is.
+        # First existing AND accepted candidate is used.
         zap_candidates = [
             os.getenv("ZAP_BIN", ""),
             shutil.which("zap") or "",
@@ -416,14 +444,68 @@ class FrameworkLoader:
             "/usr/share/zaproxy/zap.sh",
             "/usr/share/zap/zap.sh",
         ]
-        zap_bin = next(
-            (c for c in zap_candidates if c and Path(c).exists()), None
-        )
+
+        def _wrapper_forwards_args(path: str) -> bool:
+            """True if a PATH wrapper passes "$@" through to zap.sh.
+
+            Non-script binaries (no #! shebang) are taken on trust -- a
+            real binary launcher forwards argv by construction. A script
+            wrapper is inspected for the literal `"$@"` (or the `$@` bare
+            form); absence means the wrapper drops our -daemon/-config
+            args and must be skipped.
+            """
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(256)
+            except OSError:
+                return True  # let the exists() check below handle it
+            if not head.startswith(b"#!"):
+                return True  # binary wrapper, not a script
+            # decode the shebang + first lines as latin-1 so odd bytes
+            # in comments don't blow the read up
+            text = head.decode("latin-1", errors="replace")
+            return '"$@"' in text or "$@" in text
+
+        zap_bin = None
+        zap_direct = False  # direct zap.sh exec -> set cwd=parent in subprocess
+        tried = []
+        for c in zap_candidates:
+            if not c or not Path(c).exists():
+                continue
+            tried.append(c)
+            base = Path(c).name
+            is_zap_sh = base == "zap.sh"
+            # $ZAP_BIN: never second-guess an operator pin.
+            if c == os.getenv("ZAP_BIN", ""):
+                zap_bin = c
+                zap_direct = is_zap_sh
+                break
+            # Direct zap.sh: always accepted (the wrapper would have exec'd
+            # it anyway; going straight there skips the arg-stripping layer).
+            if is_zap_sh:
+                zap_bin = c
+                zap_direct = True
+                break
+            # PATH wrapper: inspect for "$@" forwarding.
+            if not _wrapper_forwards_args(c):
+                logger.info(
+                    "[i] Skipping ZAP wrapper %s -- it does not forward "
+                    "\"$@\" (Parrot's /usr/bin/zaproxy is the known case: "
+                    "`exec ./zap.sh` with no args strips -daemon and "
+                    "launches ZAP in GUI/foreground mode). Falling through "
+                    "to a direct zap.sh path.", c,
+                )
+                continue
+            zap_bin = c
+            zap_direct = False
+            break
         if not zap_bin:
             logger.error(
-                "[!] ZAP launcher not found (tried: %s). Install zaproxy "
-                "(apt install zaproxy) or set ZAP_BIN to the zap.sh path.",
-                ", ".join(c or "<unset>" for c in zap_candidates),
+                "[!] ZAP launcher not found or no usable wrapper (tried: "
+                "%s). Install zaproxy (apt install zaproxy) or set ZAP_BIN "
+                "to the zap.sh path (Parrot: ZAP_BIN=/usr/share/zaproxy/"
+                "zap.sh bypasses the arg-stripping /usr/bin/zaproxy wrapper).",
+                ", ".join(tried) or ", ".join(c or "<unset>" for c in zap_candidates),
             )
             # Tell wait_for_zap so the launch doesn't sit through its full
             # default timeout on a box with no ZAP installed: launcher absent
@@ -601,11 +683,18 @@ class FrameworkLoader:
             # log_fd was opened non-fatally by _open_child_log above; never
             # re-open here (the open is the thing that used to kill the
             # launch with PermissionError on a poisoned /tmp/zap.log).
+            # cwd= when we exec zap.sh directly (Parrot-bypass path): the
+            # arg-stripping wrapper's `cd /usr/share/zaproxy/` is gone, so
+            # we chdir to the script's parent ourselves -- zap.sh resolves
+            # its sibling libs (xml/, plugin/, db/) relative to its CWD.
+            # The PATH-wrapper lane (Kali) sets cwd=None: the wrapper does
+            # the cd itself, and a foreign cwd here would only confuse it.
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=log_fd,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                cwd=(str(Path(zap_bin).resolve().parent) if zap_direct else None),
             )
             # wait_for_zap's dead-spawn short-circuit reads this (the ZAP
             # JVM can die mid-wait; a returned-but-dead spawn must not rate
