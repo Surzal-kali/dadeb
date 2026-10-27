@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability in daharness
+    url: https://github.com/Surzal-kali/dadeb/security/advisories/new
+    about: Report privately — do not open a public issue. See the Security Policy.
+  - name: Question about the framework
+    url: https://github.com/Surzal-kali/dadeb/discussions
+    about: Usage and design questions (scope gate semantics, approval flow, lanes).

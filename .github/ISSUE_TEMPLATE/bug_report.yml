@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in the harness is broken (crash, wrong result, docs wrong)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before filing:** reports that the framework can attack things are
+        [by design](.github/SECURITY.md#by-design--reported-then-closed-as-non-issues)
+        and will be closed. Suspected *vulnerabilities* in the harness go
+        through [private reporting](.github/SECURITY.md#reporting-a-vulnerability-in-daharness),
+        not public issues. **Redact target data** — hosts, tokens, credentials,
+        response bodies — from everything you paste.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected lane
+      options:
+        - Daemon / services stack (bootstrap.py: Brain, ZAP, MSF RPC, gateway)
+        - Tool execution (Brain / in-process dispatch)
+        - API gateway / MCP endpoint
+        - Tool REPL (tool_repl.py)
+        - Jupyter kernel lane
+        - A specific tool (which one?)
+        - Discovery / registry / embeddings
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Observed vs. expected. Include the exact tool_id, arguments, and error output (redacted).
+      placeholder: |
+        Ran `python tool_repl.py run nmap_status --target example.com` …
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Commands run, starting from a fresh checkout. Note which sidecars were running.
+      placeholder: |
+        git checkout <commit>
+        pip install -e .
+        python -m daharness.core
+        python tool_repl.py run <tool_id> --flag value
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit you pulled
+      placeholder: main @ abc1234
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS/distro, Python version, which optional lanes installed (web/jupyter/dev), relevant .env keys set (names only — never values).
+      placeholder: Kali rolling, Python 3.13, extras none, OLLAMA_BASE_URL + EMBED_URL set (names only)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant framework log tail (Brain/MSF logs are readable via `utils/log_reader.py` tools). Redact.
+      render: shell

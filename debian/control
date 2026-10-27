@@ -34,9 +34,20 @@ Depends: python3,
          python3-uvicorn,
          python3-psutil,
          python3-numpy
-Recommends: metasploit-framework, owasp-zap, wordlists,
+# Recommends tier = daemon + drop-folder lanes apt pulls by default. zaproxy
+# is the live Kali/Debian package name — owasp-zap vanished from the archive
+# (verified against kali-rolling 2026-10-27), so the old name silently never
+# installed anything via Recommends.
+Recommends: metasploit-framework, zaproxy, wordlists,
  jadx, radare2
-Suggests: python3-pg8000, python3-psycopg, python3-pip, masscan, postgresql
+# Suggests mirrors the framework_doctor probe list (auxiliaries/framework_status.py):
+# amass -> auxiliaries/amass.py, ldap-utils (ldapsearch) -> auxiliaries/ldap_search.py,
+# exploitdb (searchsploit) -> payloads/searchsploiting.py, ffuf/hydra/sqlmap ->
+# payloads/. Every one resolves via shutil.which + $BIN env overrides and degrades
+# honestly when absent — optional, so Suggests and never Depends (masscan + the
+# engagement-Postgres lane already sit here).
+Suggests: amass, ldap-utils, exploitdb, ffuf, hydra, sqlmap,
+ python3-pg8000, python3-psycopg, python3-pip, masscan, postgresql
 Description: headless orchestration harness for authorized security research
  An external LLM (Open WebUI model, gateway or MCP client) semantically
  searches the vector-indexed tool registry (SQLite + numpy) and executes modules

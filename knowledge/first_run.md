@@ -54,7 +54,7 @@ semantics: [`knowledge/scope_gate.md`](scope_gate.md).
   edges are documented there
 - Run `pytest tests/` — if failures appear, check whether they reproduce on
   a clean checkout before assuming your environment
-- File a [bug report](https://github.com/Surzal-kali/daharness/issues/new?template=bug_report.yml)
+- File a [bug report](https://github.com/Surzal-kali/dadeb/issues/new?template=bug_report.yml)
   with the commit, the repro, and redacted output
 
 ## 5. A minimal end-to-end sanity run

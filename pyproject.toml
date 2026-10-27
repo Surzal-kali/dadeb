@@ -63,9 +63,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Surzal-kali/daharness"
-Documentation = "https://github.com/Surzal-kali/daharness#readme"
-Issues = "https://github.com/Surzal-kali/daharness/issues"
+Homepage = "https://github.com/Surzal-kali/dadeb"
+Documentation = "https://github.com/Surzal-kali/dadeb#readme"
+Issues = "https://github.com/Surzal-kali/dadeb/issues"
 
 [tool.setuptools]
 # The framework runs from its checkout (bootstrap.py / tool_repl.py / systemd)

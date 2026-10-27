@@ -1,0 +1,52 @@
+name: Tool request
+description: Propose a new tool wrapper for the registry (external CLI or library)
+labels: ["tool-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Requests for help attacking specific systems are declined — see the
+        [responsible-use policy](.github/SECURITY.md).
+        Check the registry first — start `python tool_repl.py` and run
+        `list [substring]`, or a semantic `search <query>`; 150+ tools may
+        already cover it.
+  - type: textarea
+    id: capability
+    attributes:
+      label: Capability gap
+      description: What recon/web/exploit/post-exploit task can't the registry do today? Which tools did you search for, and what did you try as a workaround?
+    validations:
+      required: true
+  - type: textarea
+    id: backing
+    attributes:
+      label: Backing implementation
+      description: Is there an existing CLI (in Kali's repos?) or Python library that does this? A wrapper is the preferred contribution over new reimplementations.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Proposed shape
+      options:
+        - One-shot (quick, returns a verdict)
+        - Background job (launch/poll/cancel triplet — long-running CLI)
+        - Stateful client (persistent connection, needs get_instance())
+        - Listener/service (binds a port, returns immediately)
+        - Offline/compute (no network — crypto, cracking, decoding)
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Sends traffic to targets?
+      description: Drives whether the tool must pass through the operator-armed scope gate.
+      options:
+        - "Yes — needs scope-gating"
+        - "No — offline/local only"
+        - "Unsure"
+    validations:
+      required: true
+  - type: textarea
+    id: offer
+    attributes:
+      label: Will you build it?
+      description: The registry is designed for cheap contributions — a wrapped function with a good semantic description. See CONTRIBUTING.md "Adding a tool". Even a rough sketch (module docstring + argparse flags) is useful.
