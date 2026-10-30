@@ -1,0 +1,16 @@
+[package]
+name = "brain"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the dadeb Brain protocol (milestone 1: transport + framing + typed dispatch)"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+# Async runtime + Unix socket server. Multi-thread runtime because real
+# parallelism (not GIL-serialized) is the whole point of leaving Python here.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+# LengthDelimitedCodec: our entire read_message/pack_message framing, as config.
+tokio-util = { version = "0.7", features = ["codec"] }
+# SinkExt/StreamExt for Framed (.send() / .next()).
+futures = "0.3"
+bytes = "1"
