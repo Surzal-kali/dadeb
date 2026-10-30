@@ -219,3 +219,38 @@ def test_hydra_verbatim_on_duplicate(fleet_env, monkeypatch):
     res = hydra_mod.run_hydra("ssh://192.168.56.106", options="-l admin -p secret")
     # default-cred-injection metadata must NOT land on a no-launch envelope
     assert res == dup_env
+
+
+def test_masscan_passes_target_kwarg(fleet_env, monkeypatch):
+    from auxiliaries import masscan as masscan_mod
+
+    seen = {}
+
+    def fake_launch(*args, **kwargs):
+        seen.update(kwargs)
+        return {
+            "job_id": "m1",
+            "status": "running",
+            "log_file": "/tmp/x",
+        }
+
+    monkeypatch.setattr(masscan_mod, "launch_job", fake_launch)
+    res = masscan_mod.run_masscan("192.168.56.0/24", ports="80", flags="--open-only")
+    assert seen["tool_name"] == "masscan"
+    assert seen["target"] == "192.168.56.0/24"
+    assert res["status"] == "running"
+
+
+def test_masscan_verbatim_on_duplicate(fleet_env, monkeypatch):
+    from auxiliaries import masscan as masscan_mod
+
+    dup_env = {
+        "status": "duplicate",
+        "job_id": "m-live",
+        "unit_key": "masscan:192.168.56.0:/24:<hash>",
+        "message": "unit already running",
+    }
+    monkeypatch.setattr(masscan_mod, "launch_job", lambda *a, **k: dict(dup_env))
+    res = masscan_mod.run_masscan("192.168.56.0/24", ports="80")
+    # resolved-config decoration (ports/rate/adapter keys) must NOT land on it
+    assert res == dup_env

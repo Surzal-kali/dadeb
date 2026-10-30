@@ -542,8 +542,15 @@ def run_masscan(
         command,
         tool_name="masscan",
         timeout=float(os.getenv("MASSCAN_TIMEOUT", "1800")),
+        target=target,
         verdict_parser=_parse_masscan_verdict(out_path),
     )
+    # launch_job(target=...) routes through the fleet scheduler; a
+    # duplicate/refused decision envelope carries NO launched job — return
+    # it verbatim instead of stamping THIS call's resolved config over it
+    # (that config describes a launch that did not happen).
+    if job.get("status") in ("duplicate", "refused"):
+        return job
 
     # Surface the resolved config so the secretary model can audit it.
     job["ports"] = ports
