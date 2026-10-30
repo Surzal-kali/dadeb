@@ -90,7 +90,7 @@ def _resolve_targets(targets_spec: str) -> list[dict[str, Any]]:
     "up and launch as slots free. Use for MANY targets; single-target "
     "decompile stays run_jadx(verb='decompile'). Offline lane (no scope "
     "gate) — parses local apk/ drop-folder files only.",
-    tags=["recon.binary", "infra"],
+    tags=["infra"],
     next_hints=["jadx_fleet_status"],
 )
 def jadx_fleet(
@@ -269,7 +269,7 @@ def jadx_fleet(
     "across the worker queue. Queued units launch automatically as slots "
     "free (job-store reaper pass) — no caller action needed. Finished units' "
     "decompiled workspaces are immediately usable by run_jadx(grep/read/tree).",
-    tags=["recon.binary", "infra"],
+    tags=["infra"],
     next_hints=["jadx_fleet_stop", "run_jadx"],
 )
 def jadx_fleet_status(fleet_id: str) -> dict[str, Any]:
@@ -368,7 +368,7 @@ def jadx_fleet_status(fleet_id: str) -> dict[str, Any]:
     "Running units are terminated via the job store; queued units are "
     "cancelled. Slots free immediately and the next QUEUED unit promotes on "
     "the next queue advance.",
-    tags=["recon.binary", "infra"],
+    tags=["infra"],
 )
 def jadx_fleet_stop(fleet_id: str, force: bool = False) -> dict[str, Any]:
     """Stop a fleet batch's running/queued units.

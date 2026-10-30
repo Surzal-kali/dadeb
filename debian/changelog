@@ -1,4 +1,30 @@
-daharness (0.1.0+pkg17) kali; urgency=medium
+daharness (0.1.0+pkg18) kali; urgency=medium
+
+  * Traceability pass: silent except-pass logging + jadx_fleet tag fix
+    (2026-10-30):
+    - 99 broad `except Exception: pass` sites across 34 files now log
+      `logging.getLogger(__name__).debug("swallowed exception in <fn>",
+      exc_info=True)` instead of passing silently — invisible at default
+      levels, traceable with a full traceback the moment the level is
+      raised. `import logging` inserted where absent (after __future__
+      imports). Narrow documented typed swallows (OSError/ImportError/
+      NXDOMAIN close-and-cleanup races, control flow rather than error
+      concealment) deliberately stay silent.
+    - Stale "TODO: log instead of passing" comments retired
+      (burp_mcp x3, listening, thebrain, responder_analog — all now log);
+      intent comments ("bookkeeping must never break the poller" etc.)
+      preserved alongside the new debug record. One author-declined site
+      (collaborator _handle_http peer-socket wait_closed teardown,
+      --- IGNORE ---) stays a bare pass.
+    - AGENTS.md gains a "Swallowed exceptions" convention under
+      Development Guidelines so new code doesn't regress to bare pass.
+    - payloads/jadx_fleet.py: jadx_fleet / jadx_fleet_status /
+      jadx_fleet_stop drop the non-canonical `recon.binary` tag
+      (not in the frozen 13-bucket CANONICAL_TAGS vocabulary) and carry
+      `["infra"]`, same as auxiliaries.jadx.* and the operator's
+      judgment-call note in tool_tags.py. Embeddings refresh on the next
+      `python -m daharness.core` re-index.
+
 
   * init.d crash-log fix + WSL mirrored-networking guard hint (2026-10-25):
     - start-stop-daemon --background hardcodes the detached child's stdio
