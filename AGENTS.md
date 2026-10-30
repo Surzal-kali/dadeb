@@ -637,6 +637,49 @@ and terminal-row re-requests are honest (`worker_units.unit_key` PK): a
 completed run's `job_id` (same bytes need not run again), a `cancelled`
 row is deleted so `release_unit`'s fresh-row promise finally holds.
 
+### Burp fleet twins (`payloads/burp_fleet.py` + `payloads/burp_worker.py`, scale-doctrine §13 annex)
+
+Adapters the queue over the MCP BApp lane — the workload shape that hurts
+next is replaying MANY captured requests without burning the turn budget
+on N sequential MCP calls. Measured constraints (2026-10-30, live lane)
+that shaped the adapter:
+
+- The MCP BApp exposes 24 request-crafting tools and NO scan surface —
+  no `start_active_scan`; active scanning stays ZAP's job. The twins are
+  replay/craft tools, not scanners, and say so in their descriptions.
+- ONE Burp JVM is shared infra (measured VmHWM ~961 MiB at idle). A unit's
+  queue claim is the CHILD worker's RAM (default 128 MiB, ceiling 1024) —
+  never the JVM's (claiming it per unit would double-count a long-lived
+  consumer on every admission). The JVM's live RSS/VmHWM (`_burp_jvm_pressure`,
+  `BURP_JVM_PID` override) is reported by `burp_replay_status` instead.
+
+Adapter mechanics (the queue lane composing the sqlmap adapter's
+per-unit scope checks + verdict parsing):
+per unit, the request's Host header is scope-checked BEFORE admission
+(sqlmap pattern — a blocked target is a row decision, not a launch);
+`check_scan` may block before launch while the CHILD's decorated wrapper
+applies the armed gate again at send time (`ScopeGateError` → the unit
+aborts with an honest `aborted` verdict, exit 2). Unit definition is a
+MANIFEST: the raw request text EMBEDDED (never referenced by path —
+identical bytes at different filenames produce byte-identical manifests),
+plus host/port/https/retries — `content_key("burp", manifest)` therefore
+keys on the unit's whole meaning, and a `retries` change re-keys honestly.
+A child (`burp_worker.py`, `_NO_LOCAL_TOOL` — internal plumbing, not an
+operator CLI) replays the request `retries` times through
+`burp_send_http1_request`, writing `BURP-RETRY` lines + one structured
+`BURP-VERDICT` line that `register_verdict_parser("burp", ...)` reads.
+Batch handle is the queue `note`; twins are `burp_replay_fleet` /
+`burp_replay_status` (per-unit verdicts parsed from the log tail + JVM
+pressure + advance piggyback) / `burp_replay_stop` (queued rows cancel;
+launched rows release BEFORE the job-store stop — releasing after races
+the reaper's done-observation, which would stamp a killed unit
+`finished`; the stop failure stays reportable in `refused`). Test stubs
+ride `BURP_WORKER_PY`; the drop folder `burp/` relocates with
+`BURP_DROP_DIR`, unit manifests with `BURP_FLEET_UNIT_DIR`. Honest v1
+limits: verbatim replay only (no mutation per attempt — change the file
+for a new unit); BApp session concurrency is unmeasured, slots default
+low is the guidance; no scan surface.
+
 ### Memory Service (`memories.py`)
 
 SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections
