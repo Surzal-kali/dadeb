@@ -1,3 +1,68 @@
+daharness (0.2.0) kali; urgency=medium
+
+  [ 0.2.0 — the release of record ]
+
+  * Version 0.2.0: the +pkgNN build counter retires. The submission of
+    record remains v0.1.0-submitted (0.1.0, 2026-10-22); every delta from
+    there is the pkg1..pkg18 diary below, plus the two arcs that postdate
+    pkg18 — the Rust ports and this packaging alignment — itemized here:
+
+  * Rust lanes (rust/: three crates shipped as sources, not built at
+    package time — no cargo Build-Depends, the build lane stays python+C):
+    - rust/pcap: nano-pcap — standalone pcap codec/dissection/projection
+      core (libpcap capture behind an optional feature). Fixed the
+      dissector panics and header offsets, nano-pcap magic, >=1e9 ns
+      carry into seconds, empty-load, sniff deadline, load limit,
+      path-trust, and lock/fsync handling.
+    - rust/scratch: complete port of utils/scratch_store.py (SQLite
+      metadata + gzip payload files, agent-scoped opaque refs). Root-guard
+      chown walk made symlink-proof; ScratchStore::open never chmods
+      through a symlink. The python store mirrors the same hardening
+      (sidecars 0600, symlinked files skipped) and gained
+      tests/test_scratch_store_perms.py.
+    - rust/brain: the in-progress Rust sidecar — transport/framing/typed
+      dispatch (milestone 1), the Python tool-worker IPC seam (M2), the
+      real registry + shared execution core in the worker (M3, riding the
+      root module tool_exec.py), and the OS singleton dance (M4: flock,
+      stale-socket unlink, per-lane umask). Tool execution, the registry,
+      scope gate and tracker stay in Python by design; the python Brain
+      (listeners/thebrain.py) is still the canonical sidecar — the rust
+      lane is a documented alternative, not yet the service default.
+    - CI: cargo fmt --check, clippy -D warnings and the crate test suites.
+
+  * Packaging alignment (this release):
+    - debian/rules ships rust/ crate sources under
+      /usr/share/daharness/rust/ (target/ + crate-internal run/ excluded).
+    - daharness-index(1): the removed --chat/secretary lane (removed
+      2026-10-20) is retired from the docs — python -m daharness.core
+      accepts --clear only; the driving LLM is external.
+    - daharness-tools(7): same correction, plus the engagement cobweb
+      (journal/evidence/unknown ledger), job-log collection, and the
+      fleet-scheduler/worker-queue courtesy layers.
+    - daharness.service: Description and comments no longer reference the
+      removed Chroma backend (SQLite + numpy vector store since 2026-10-20).
+    - .env.example inventories the scale-lane knobs (FLEET_*,
+      WORKER_QUEUE_*, BG_LOG_GC_*, BURP_FLEET_*, SNAPSHOT_*).
+    - man pages re-synced to their markdown sources (daharness-pg(1) had
+      drifted: HARNESS_DB_HOST bind-mirror, status lane).
+
+  * Headline recap since v0.1.0-submitted (full detail in the entries
+    below): ChromaDB replaced by the local SQLite + numpy vector store
+    (no vendored wheels, network-isolated build); the pydantic-ai
+    secretary chat lane removed (headless build, external driving LLM);
+    the scale-doctrine Phases 0-3 substrate (agent identity, durable job
+    store + log GC + launch roll-down, brain session ints, fleet
+    scheduler, sqlmap/jadx/burp fleet adapters, worker queue with the RSS
+    ledger); the engagement cobweb (journal + typed evidence store +
+    unknown ledger, SQLite with the daharness-pg Postgres lane); the
+    capability doctor; the execution-envelope contract; large-file
+    module carves; per-thread vector-store connections; MSF RPC password
+    rotation + orphan recovery; init.d hardening (root-only start/stop,
+    crash logs, WSL mirrored-network guard); the swallowed-exception
+    traceability pass.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 30 Oct 2026 16:37:00 -0600
+
 daharness (0.1.0+pkg18) kali; urgency=medium
 
   * Traceability pass: silent except-pass logging + jadx_fleet tag fix

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daharness"
-version = "0.1.0"
+version = "0.2.0"
 description = "Headless, MCP-capable orchestration harness for authorized security research: an external LLM (gateway or MCP client) semantically searches a vector-indexed tool registry and executes tools inside operator-armed scope gates."
 readme = "README.md"
 requires-python = ">=3.12"
