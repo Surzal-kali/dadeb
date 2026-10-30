@@ -1,4 +1,4 @@
-% DAHARNESS-PG(1) daharness 0.1.0 | daharness manual
+% DAHARNESS-PG(1) daharness 0.2.0 | daharness manual
 
 # NAME
 

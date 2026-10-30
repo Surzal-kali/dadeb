@@ -20,10 +20,10 @@ In the packaged, headless build the **driving LLM is external** — an Open
 WebUI model or any gateway/MCP client: discovery is */tools/search*,
 execution */tools/execute* or MCP *tools/call*, and an unknown *tool_id*
 is a loud 404 with a schema-checked 422 on undeclared arguments (no
-hallucinated tool calls). The approval-gated secretary lane remains an
-in-tree interactive lane only (`daharness.core --chat`); gateway/MCP calls
-bypass it — the per-turn tool budget is the headless brake (see
-**daharness-safety**(7)).
+hallucinated tool calls). There is no in-process approval loop: the
+secretary chat lane was removed 2026-10-20 and the packaged build has no
+conversation model — gateway/MCP calls run under their own gates, and the
+per-turn tool budget is the headless brake (see **daharness-safety**(7)).
 
 ## Transports
 
@@ -55,11 +55,44 @@ created on the Brain are invisible to in-process fallback, and tools report
 this honestly instead of silently failing. Web cookies and tokens live on
 disk in a shared cookie jar, so every lane sees the same jar.
 
-## Background jobs
+## Engagement cobweb (journal + evidence + unknown ledger)
+
+Every dispatch is journaled into the engagement store keyed by the
+operator-armed engagement slug (the REPL's `engagement on <slug>` — the
+model cannot arm or purge it). Findings record conclusions; the evidence
+store records typed *don't-know-yet* rows (credential/service/ambiguity/
+scope_question/observation) with per-kind TTLs, and the credential-reuse
+sweep is a DB constraint: one validation attempt per (entry, service,
+target) — a second one is refused with re-mint guidance. A purge erases one
+engagement in one transaction while the journal stays append-only; on the
+Postgres lane (see **daharness-pg**(1)) the retention sweep runs as an
+owner SECURITY DEFINER function.
+
+## Background jobs, fleet courtesy, and the worker queue
 
 Long-running CLI tools (nmap, ffuf, hydra, sqlmap, masscan) follow the job
 pattern: the launcher returns a *job_id* immediately; status and cancel
-companions manage the running job.
+companions manage the running job. Jobs are durable SQLite rows scoped to
+the agent identity, with a TTL sweep, per-agent caps, and log-file
+collection so a busy fleet cannot leak disk.
+
+Two courtesy layers sit in front of launches:
+
+- **Fleet scheduler** — per-TARGET-HOST regulator, numeric-span aware
+  (`10.0.0.0/24` and its member `10.0.0.7` contend). A duplicate ask for a
+  running unit returns that unit's *job_id* instead of launching a second
+  process; per-host slots default 2 under an absolute ceiling of 4;
+  auth-adjacent units (login/token requests) hold the host exclusively in
+  both directions.
+- **Worker queue** — the same shape for LOCAL RAM instead of the target
+  (jadx per-APK decompiles first): admission is content-keyed dedupe →
+  hard caps (budget vs free RAM above a pool floor) → slots → queue.
+  Everything that is merely scarce QUEUES instead of refusing; recorded
+  peak-RSS evidence from finished runs raises the next run's claim
+  (`claim = budget + (peak − pin)`).
+
+The Burp replay twins ride the queue the same way — replay/craft tools
+with **no scan surface** (active scanning stays ZAP's job).
 
 # SEE ALSO
 

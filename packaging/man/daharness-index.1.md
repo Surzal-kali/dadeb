@@ -1,4 +1,4 @@
-% DAHARNESS-INDEX(1) daharness 0.1.0 | daharness manual
+% DAHARNESS-INDEX(1) daharness 0.2.0 | daharness manual
 
 # NAME
 
@@ -6,7 +6,7 @@ daharness-index — build or refresh the semantic tool-registry index
 
 # SYNOPSIS
 
-**daharness-index** [*--clear* | *--chat*]
+**daharness-index** [*--clear*]
 
 **daharness-index** *--stubs* [*--check*]
 
@@ -73,9 +73,10 @@ actually injects.
 : Delete the collection contents before re-indexing.
 
 **--chat**
-: Drop into the in-tree interactive secretary chat lane instead of
-  indexing (dev-tree convenience; the packaged headless build has no
-  chat model consumer).
+: REMOVED — the pydantic-ai secretary chat lane (and its *--chat* flag on
+  *python -m daharness.core*) was removed 2026-10-20; the packaged headless
+  build has no conversation model at all, and *daharness.core* today accepts
+  only *--clear*. The driving LLM is external, wired in by your client.
 
 **--stubs**
 : Route to the stub generator (offline lane; see THE STUB VIEW above).

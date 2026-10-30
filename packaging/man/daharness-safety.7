@@ -49,7 +49,7 @@ never a cloud LLM API.
 Tool outputs from live targets (credentials, tokens, internal IPs) must
 not egress to third parties.
 .SS Engagement cobweb
-An engagement\(aqs rows (journal, evidence, findings, unknowns) unify
+An engagement\(cqs rows (journal, evidence, findings, unknowns) unify
 under one slug, so a purge erases one engagement in a single transaction
 while the journal audit trail stays append\-only until the operator
 closes it.
@@ -59,7 +59,7 @@ Off by default: no Postgres server ships; the journal runs on the SQLite
 stores.
 \f[CR]sudo daharness\-pg init\f[R] provisions a \f[B]dedicated\f[R]
 Postgres cluster (\f[CR]daharness\f[R], port 5433) whose fate msfdb can
-never touch (msf\(aqs own \f[CR]main\f[R] cluster keeps 5432), creates
+never touch (msf\(cqs own \f[CR]main\f[R] cluster keeps 5432), creates
 one no\-superuser LOGIN role per lane
 (harness_operator/brain_lane/gateway_lane/repl_lane), and mints random
 per\-role passwords into \f[CR]/etc/daharness/pg.env\f[R] (0640
@@ -68,7 +68,7 @@ Lanes hold INSERT/SELECT (+ evidence UPDATE); \f[B]no lane ever holds
 DELETE\f[R] \(em purge runs as a SECURITY DEFINER owner function the
 operator alone calls.
 The server listens on loopback only with password auth (scram\-sha\-256
-on current Kali\(aqs PG 18); the operator REPL reaches it via group
+on current Kali\(cqs PG 18); the operator REPL reaches it via group
 membership.
 Postgres absent or the cluster down = honest degrade back to SQLite
 stores, logged once, never a crash.
@@ -92,28 +92,28 @@ per\-engagement rows while you still want the rest.
 \f[CR]rm \-rf /var/lib/daharness\f[R] discards everything (the system
 user is gone at this point, so no service recreates it).
 .IP \(bu 2
-\f[CR]/etc/daharness/pg.env\f[R] \(em collected by purge (generated
-credentials, not operator work product:
+\f[CR]/etc/daharness/pg.env\f[R] \(em collected by purge (it is
+generated credentials, not operator work product:
 \f[CR]daharness\-pg init\f[R] re\-mints it losslessly).
-The \f[B]Postgres cluster\f[R] (\f[CR]pg_lsclusters\f[R] shows it, port
-5433) stays \(em it holds the engagement journal, deleted data the ledger
+The \f[B]Postgres cluster\f[R] (\f[CR]pg_lsclusters\f[R], port 5433)
+stays \(em it holds the engagement journal, deleted data the ledger
 cannot undo.
 Discard with \f[CR]sudo pg_dropcluster \-\-stop 18 daharness\f[R]
 (cluster version from \f[CR]pg_lsclusters\f[R]); the next
-\f[CR]daharness\-pg init\f[R] re\-provisions cluster + credential file as
-a pair.
+\f[CR]daharness\-pg init\f[R] re\-provisions cluster + credential file
+as a pair.
 .IP \(bu 2
-Per\-user lanes in each operator\(aqs \f[CR]$HOME\f[R] (maintainer
+Per\-user lanes in each operator\(cqs \f[CR]$HOME\f[R] (maintainer
 scripts never scrub user homes):
 \f[CR]\(ti/.local/share/jupyter/kernels/daharness\f[R] (kernelspec \(em
 after a purge its \f[CR]argv\f[R] points at the removed tree, so it is a
 zombie entry in every \f[CR]jupyter kernelspec list\f[R] until deleted)
 and \f[CR]\(ti/.local/share/framework\-stubs/\f[R] (IDE stubs).
 \f[CR]rm \-rf\f[R] either.
-.IP \(bu 2
+.PP
 Stray units from pre\-package dev\-checkout installs (the old
 \f[CR]sudo cp scripts/daharness.service /etc/systemd/system/\f[R] flow)
-are collected: postrm detects units whose
+are also collected: postrm detects units whose
 ExecStart/WorkingDirectory reference a \f[CR]github/\f[R] checkout,
 stops+disables+removes them along with their
 \f[CR]multi\-user.target.wants\f[R] symlinks.

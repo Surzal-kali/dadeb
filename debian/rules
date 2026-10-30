@@ -114,6 +114,20 @@ override_dh_auto_install:
 	# mechanics: KALI PRESET POLICY).
 	install -D -m 0644 packaging/systemd/98-daharness.preset \
 	  debian/daharness/usr/lib/systemd/system-preset/98-daharness.preset
+	# Rust lane sources (three crates under rust/: scratch, pcap, brain).
+	# Shipped as SOURCE — the deb build stays python+C only (no cargo
+	# Build-Depends: the build lane is network-isolated and these crates
+	# pull the crates.io tree). The scratch/pcap crates are library ports of
+	# the python stores (same schema/WAL semantics); the brain crate is the
+	# WIP rust sidecar — its worker lane (brain/worker.py + the root
+	# tool_exec.py module, already staged) imports the real registry. Build
+	# output and crate-internal state never stage (target/, run/).
+	install -d -m 0755 debian/daharness/usr/share/daharness/rust
+	for d in scratch pcap brain; do \
+	  cp -a rust/$d debian/daharness/usr/share/daharness/rust/; \
+	  rm -rf debian/daharness/usr/share/daharness/rust/$d/target \
+	         debian/daharness/usr/share/daharness/rust/$d/run; \
+	done
 	# init.d fallback scripts (systemd-less hosts: NetHunter chroot, WSL1).
 	# Shipped under packaging/initd/ so postinst copies them to /etc/init.d/
 	# ONLY when systemd is absent — the systemd lane never touches them.

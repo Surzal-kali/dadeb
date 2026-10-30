@@ -5,9 +5,9 @@
 daharness\-repl \(em operator REPL and one\-shot lane for the daharness
 framework
 .SH SYNOPSIS
-\f[B]daharness\-repl\f[R] [\f[I]run|search|scope|engagement\f[R] ...]
+\f[B]daharness\-repl\f[R] [\f[I]run|search|scope|engagement\f[R] \&...]
 \f[B]daharness\-repl\f[R] \f[B]run\f[R] \f[I]tool_id\f[R]
-[\f[I]\-\-flag\f[R] \f[I]value\f[R] ...]
+[\f[I]\(enflag\f[R] \f[I]value\f[R] \&...]
 \(em one\-shot exit
 .SH DESCRIPTION
 The operator seat (also \f[I]tool_repl.py\f[R], which keeps its filename
@@ -18,7 +18,7 @@ approval.
 .PP
 Interactive commands and modes:
 .TP
-\f[B]run\f[R] \f[I]tool_id\f[R] [\f[I]\-\-flag\f[R] \f[I]value\f[R] ...]
+\f[B]run\f[R] \f[I]tool_id\f[R] [\f[I]\(enflag\f[R] \f[I]value\f[R] \&...]
 Execute a tool; flags follow its manifest parameter schema.
 .TP
 \f[B]search\f[R] \f[I]query\f[R]
@@ -39,6 +39,12 @@ See \f[B]daharness\-safety(7)\f[R].
 Arm the engagement cobweb key that ties journal, evidence and findings
 rows together; arming is deliberately REPL\-only.
 See \f[B]daharness\-safety(7)\f[R].
+.SH DEPENDENCIES
+The interactive embed (\f[CR]ipython\f[R] command) hard\-imports
+IPython; the deb ships \f[B]python3\-ipython\f[R] as Depends (shared
+with \f[B]daharness\-kernel(1)\f[R]\(cqs python3\-ipykernel
+requirement).
+In a checkout: \f[CR]pip install \-e \(dq.[jupyter]\(dq\f[R].
 .SH SEE ALSO
 \f[B]daharness(1)\f[R], \f[B]daharness\-kernel(1)\f[R],
 \f[B]daharness\-index(1)\f[R], \f[B]daharness\-tools(7)\f[R],

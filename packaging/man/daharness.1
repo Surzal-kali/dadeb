@@ -66,12 +66,10 @@ The deb does \f[B]not\f[R] auto\-enroll anyone into the
 membership is the operator\(cqs explicit decision).
 To see the shared state root and brain socket:
 .IP
-.nf
-\f[C]
+.EX
 sudo usermod \-aG daharness $USER
 newgrp daharness   # or re\-login
-\f[R]
-.fi
+.EE
 .PP
 An operator outside the group who probes the system\-profile state sees
 an honest \f[CR]lane_blocked: true\f[R] permission report from

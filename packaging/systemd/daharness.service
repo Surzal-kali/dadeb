@@ -1,4 +1,4 @@
-# Sketch — system profile, daharness daemon (Chroma registry backend +
+# Sketch — system profile, daharness daemon (SQLite + numpy registry backend +
 # Brain + ZAP + MSF MCP + API gateway)
 # Carries over scripts/daharness.service semantics; retargeted for the package
 # layout. Hand to dh_installsystemd; final paths verified on the VM smoke.
@@ -30,7 +30,7 @@ RuntimeDirectoryPreserve=restart
 StateDirectory=daharness
 StateDirectoryMode=2770
 # Conffile wires the profile knobs (WORKSPACE_ROOT, BRAIN_SOCKET,
-# GATEWAY_*, CHROMA_PORT) into the unit environment — the earlier
+# GATEWAY_*) into the unit environment — the earlier
 # Environment=DAHARNESS_ENV form was inert (no code reads that var; only
 # <tree>/.env is loaded by bootstrap, and the deb ships no .env).
 # Wired 2026-10-20 after the fresh-deb smoke showed the daemon resolving
@@ -49,15 +49,12 @@ EnvironmentFile=-/etc/daharness/pg.env
 # service-identity guard, 2026-10-23).
 Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/var/lib/daharness
-# Chroma: the registry backend is the daemon's own supervised sidecar now
-# (bootstrap launch_all -> start_chroma_daemon; 2026-10-20 merge of the
-# retired daharness-chroma.service). It reuses an already-answering lane
-# (compose container, manual dev run) and never double-spawns; postinst
-# retires a legacy chroma unit on upgrade so it cannot zombie-hold :9000.
-# The old ExecStartPre port-wait hack is gone with it.
+# The registry backend is the LOCAL SQLite + numpy vector store
+# (constants.resolve_workspace_root(); no server process — chromadb was
+# removed 2026-10-20) — no embedding sidecar to supervise here.
 # Crash-orphan sweep (ExecStartPre): KillMode=process kills only the main
-# python on a crash; the detached-session JVMs (ZAP java, chroma's rust
-# child, msfrpcd) escape reaping when the parent dies mid-crash — a
+# python on a crash; the detached-session JVMs (ZAP java, msfrpcd) escape
+# reaping when the parent dies mid-crash — a
 # port-silent ZAP zombie then blocks every restart from binding :8090
 # while the launcher logs "healthy spawn" lines (observed 2026-10-21,
 # pkg9 crash era). bootstrap.start_zap_daemon also sweeps these at launch
