@@ -214,7 +214,30 @@ def _host_of(target: str) -> str:
 
 
 class FleetScheduler:
-    """SQLite-backed per-host slot ledger + unit dedupe table."""
+    """SQLite-backed per-host slot ledger + unit dedupe table.
+
+    Concurrency model (processes AND threads — 2026-10-29 hardening; the
+    original single shared connection only coordinated threads inside one
+    process, so the slot ceiling was not atomic across processes):
+
+    - **Per-thread connections** (threadlocal): one SQLite connection per
+      thread, built on first use. ``self.conn`` stays a valid attribute —
+      a property returning the CALLING thread's connection — so external
+      readers (e.g. sqlmap's ``_release_unit_for_job`` SELECT) keep
+      working, and the reaper thread gets its own.
+    - **Autocommit mode** (``isolation_level=None``): no implicit
+      transactions hiding multi-statement sequences; every multi-row
+      critical section takes ``BEGIN IMMEDIATE`` explicitly, which grabs
+      SQLite's file-level write lock — THE cross-process mutex. Two racing
+      processes serialize on it; the loser sees the winner's committed
+      rows in its re-read.
+    - **RLock for in-process ordering** (advisory): threads within one
+      process serialize their whole read-decide-write so internal callers
+      with two schedulers don't fight busy_timeout; cross-process safety
+      NEVER leans on it (a different process has no copy of this lock).
+    - A busy_timeout rides every conn as the starvation backstop for the
+      rare moment two processes contend on BEGIN IMMEDIATE directly.
+    """
 
     def __init__(self, store_dir: str | Path | None = None):
         base = Path(store_dir) if store_dir else _store_dir()
@@ -222,69 +245,113 @@ class FleetScheduler:
         self.db_path = str(base / "fleet.db")
         import sqlite3
 
-        self.conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA busy_timeout=10000")
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self._lock = threading.RLock()
+        self._sqlite3 = sqlite3
+        self.db_lock = threading.RLock()  # in-process ordering, advisory
+        self._local = threading.local()
+        self._bootstrap = sqlite3.connect(
+            self.db_path, timeout=30.0, check_same_thread=False,
+            isolation_level=None,
+        )
+        self._bootstrap.row_factory = sqlite3.Row
+        self._bootstrap.execute("PRAGMA busy_timeout=30000")
+        self._bootstrap.execute("PRAGMA journal_mode=WAL")
         self._init_table()
 
+    @property
+    def conn(self):
+        """The CALLING thread's connection (created on first use).
+
+        Kept as an attribute-compatible property: pre-hardening callers
+        read ``sched.conn`` directly (sqlmap's release-on-done SELECT);
+        those keep working — but they now get a connection they OWN, so a
+        concurrent writer never trips their cursor mid-read.
+        """
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._sqlite3.connect(
+                self.db_path, timeout=30.0, check_same_thread=True,
+                isolation_level=None,
+            )
+            c.row_factory = self._sqlite3.Row
+            c.execute("PRAGMA busy_timeout=30000")
+            c.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = c
+        return c
+
+    def _immediate(self):
+        """Open a cross-process-atomic write section on THIS thread's conn.
+
+        ``BEGIN IMMEDIATE`` acquires the RESERVED lock eagerly (not lazily
+        at first write), so two racing processes serialize on the file
+        lock rather than discovering a conflict at COMMIT (SQLITE_BUSY on
+        commit is the upgrade-deadlock shape; immediate avoids it).
+        busy_timeout (30s) starves the loser politely instead of failing.
+        """
+        self.conn.execute("BEGIN IMMEDIATE")
+
+    def _commit(self):
+        self.conn.execute("COMMIT")
+
+    def _rollback(self):
+        self.conn.execute("ROLLBACK")
+
     def _init_table(self) -> None:
-        with self._lock:
-            self.conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fleet_units (
-                    unit_key     TEXT NOT NULL,
-                    tool         TEXT NOT NULL,
-                    target       TEXT NOT NULL,
-                    host         TEXT NOT NULL,
-                    agent_id     TEXT NOT NULL,
-                    job_id       TEXT,
-                    status       TEXT NOT NULL DEFAULT 'running',
-                    auth_adjacent INTEGER NOT NULL DEFAULT 0,
-                    started      REAL NOT NULL,
-                    finished     REAL,
-                    note         TEXT,
-                    PRIMARY KEY (unit_key)
-                )
-                """
+        # Schema setup runs on the bootstrap conn at construction (single-
+        # threaded moment); autocommit mode — no explicit commit needed.
+        c = self._bootstrap
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fleet_units (
+                unit_key     TEXT NOT NULL,
+                tool         TEXT NOT NULL,
+                target       TEXT NOT NULL,
+                host         TEXT NOT NULL,
+                agent_id     TEXT NOT NULL,
+                job_id       TEXT,
+                status       TEXT NOT NULL DEFAULT 'running',
+                auth_adjacent INTEGER NOT NULL DEFAULT 0,
+                started      REAL NOT NULL,
+                finished     REAL,
+                note         TEXT,
+                PRIMARY KEY (unit_key)
             )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_fleet_host_status "
-                "ON fleet_units(host, status)"
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fleet_host_status "
+            "ON fleet_units(host, status)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fleet_status_started "
+            "ON fleet_units(status, started)"
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fleet_batches (
+                batch_id   TEXT PRIMARY KEY,
+                tool       TEXT NOT NULL,
+                agent_id   TEXT NOT NULL,
+                requested  INTEGER NOT NULL,
+                status     TEXT NOT NULL DEFAULT 'running',
+                started    REAL NOT NULL,
+                finished   REAL
             )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_fleet_status_started "
-                "ON fleet_units(status, started)"
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fleet_batch_units (
+                batch_id  TEXT NOT NULL,
+                unit_key  TEXT NOT NULL,
+                seq       INTEGER NOT NULL,
+                target    TEXT NOT NULL,
+                decision  TEXT NOT NULL,
+                job_id    TEXT,
+                detail    TEXT,
+                PRIMARY KEY (batch_id, seq)
             )
-            self.conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fleet_batches (
-                    batch_id   TEXT PRIMARY KEY,
-                    tool       TEXT NOT NULL,
-                    agent_id   TEXT NOT NULL,
-                    requested  INTEGER NOT NULL,
-                    status     TEXT NOT NULL DEFAULT 'running',
-                    started    REAL NOT NULL,
-                    finished   REAL
-                )
-                """
-            )
-            self.conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fleet_batch_units (
-                    batch_id  TEXT NOT NULL,
-                    unit_key  TEXT NOT NULL,
-                    seq       INTEGER NOT NULL,
-                    target    TEXT NOT NULL,
-                    decision  TEXT NOT NULL,
-                    job_id    TEXT,
-                    detail    TEXT,
-                    PRIMARY KEY (batch_id, seq)
-                )
-                """
-            )
-            self.conn.commit()
+            """
+        )
 
     # -- acquire ----------------------------------------------------------------
 
@@ -308,6 +375,13 @@ class FleetScheduler:
         - ``{"decision": "refused", "reason": "slots_exhausted"|"host_
           serialized_auth", ...}`` — do NOT launch; the envelope says what
           to do instead (wait and re-request, or poll the running units).
+
+        ATOMICITY (2026-10-29): the whole count→decide→insert sequence is
+        ONE ``BEGIN IMMEDIATE`` transaction — admission is a conditional
+        write under the file lock, so the slot ceiling holds across
+        PROCESSES (two lanes can't both count 1 running and both admit a
+        third). In-process ordering additionally serializes on RLock so
+        two scheduler instances in one process don't fight busy_timeout.
         """
         if not agent_id:
             raise ValueError("fleet scheduler requires a resolved agent_id")
@@ -316,127 +390,148 @@ class FleetScheduler:
         auth_adj = 1 if is_auth_adjacent(target) else 1 if is_auth_adjacent(body or "") else 0
 
         # Stale reclaim FIRST — a crashed actor's ghost must not own slots.
+        # (Its own IMMEDIATE tx; see sweep_stale.)
         self.sweep_stale()
 
-        with self._lock:
-            # --- Dedupe (rule 4): the key is authoritative.
-            existing = self.conn.execute(
-                "SELECT * FROM fleet_units WHERE unit_key = ?", (unit_key,)
-            ).fetchone()
-            if existing is not None and existing["status"] == "running":
-                return {
-                    "decision": "duplicate",
-                    "unit_key": unit_key,
-                    "job_id": existing["job_id"],
-                    "agent_id": existing["agent_id"],
-                    "started": existing["started"],
-                    "message": (
-                        f"unit already running (key {unit_key}, started by "
-                        f"{existing['agent_id']}); poll its job_id instead of "
-                        "launching a second process"
-                    ),
-                }
+        out: dict[str, Any]
+        with self.db_lock:  # in-process ordering (advisory)
+            self._immediate()  # cross-process mutex (file lock)
+            try:
+                # --- Dedupe (rule 4): the key is authoritative.
+                existing = self.conn.execute(
+                    "SELECT * FROM fleet_units WHERE unit_key = ?", (unit_key,)
+                ).fetchone()
+                if existing is not None and existing["status"] == "running":
+                    out = {
+                        "decision": "duplicate",
+                        "unit_key": unit_key,
+                        "job_id": existing["job_id"],
+                        "agent_id": existing["agent_id"],
+                        "started": existing["started"],
+                        "message": (
+                            f"unit already running (key {unit_key}, started by "
+                            f"{existing['agent_id']}); poll its job_id instead of "
+                            "launching a second process"
+                        ),
+                    }
+                    self._commit()  # tx read-only; close it either way
+                    return out
 
-            # --- Slot accounting on the HOST axis.
-            active = self.conn.execute(
-                "SELECT * FROM fleet_units WHERE host = ? AND status = 'running'",
-                (host,),
-            ).fetchall()
-            running_any = [r for r in active if r["status"] == "running"]
-            n_running = len(running_any)
+                # --- Slot accounting on the HOST axis (re-read INSIDE the
+                # tx — values from before BEGIN are void).
+                running_any = self.conn.execute(
+                    "SELECT unit_key, agent_id, auth_adjacent FROM fleet_units "
+                    "WHERE host = ? AND status = 'running'",
+                    (host,),
+                ).fetchall()
+                n_running = len(running_any)
 
-            # Rule 7: auth-adjacent units hold the host exclusively.
-            if auth_adj and n_running > 0:
-                return {
-                    "decision": "refused",
-                    "reason": "host_serialized_auth",
-                    "unit_key": unit_key,
-                    "host": host,
-                    "running_units": [r["unit_key"] for r in running_any],
-                    "message": (
-                        "session-bearing (auth-adjacent) unit requires the "
-                        f"host exclusively; {n_running} unit(s) running — "
-                        "wait and re-request, or work a different host"
-                    ),
-                }
-            if any(r["auth_adjacent"] for r in running_any):
-                return {
-                    "decision": "refused",
-                    "reason": "host_serialized_auth",
-                    "unit_key": unit_key,
-                    "host": host,
-                    "running_units": [r["unit_key"] for r in running_any],
-                    "message": (
-                        "an auth-adjacent unit holds this host exclusively "
-                        "(same shared session); wait for it to finish"
-                    ),
-                }
+                # Rule 7: auth-adjacent units hold the host exclusively.
+                if auth_adj and n_running > 0:
+                    out = {
+                        "decision": "refused",
+                        "reason": "host_serialized_auth",
+                        "unit_key": unit_key,
+                        "host": host,
+                        "running_units": [r["unit_key"] for r in running_any],
+                        "message": (
+                            "session-bearing (auth-adjacent) unit requires the "
+                            f"host exclusively; {n_running} unit(s) running — "
+                            "wait and re-request, or work a different host"
+                        ),
+                    }
+                    self._commit()
+                    return out
+                if any(r["auth_adjacent"] for r in running_any):
+                    out = {
+                        "decision": "refused",
+                        "reason": "host_serialized_auth",
+                        "unit_key": unit_key,
+                        "host": host,
+                        "running_units": [r["unit_key"] for r in running_any],
+                        "message": (
+                            "an auth-adjacent unit holds this host exclusively "
+                            "(same shared session); wait for it to finish"
+                        ),
+                    }
+                    self._commit()
+                    return out
 
-            # Rule 6: slot ceilings. Ceiling is absolute; raising above the
-            # default needs the explicit override flag and warns.
-            ceiling = _slots_ceiling()
-            default = _slots_default()
-            limit = default
-            warning = ""
-            if override_slots is not None and n_running >= default:
-                try:
-                    want = int(override_slots)
-                except (TypeError, ValueError):
-                    want = default
-                if want > ceiling:
-                    return {
+                # Rule 6: slot ceilings. Ceiling is absolute; raising above
+                # the default needs the explicit override flag and warns.
+                ceiling = _slots_ceiling()
+                default = _slots_default()
+                limit = default
+                warning = ""
+                if override_slots is not None and n_running >= default:
+                    try:
+                        want = int(override_slots)
+                    except (TypeError, ValueError):
+                        want = default
+                    if want > ceiling:
+                        out = {
+                            "decision": "refused",
+                            "reason": "slots_exhausted",
+                            "unit_key": unit_key,
+                            "host": host,
+                            "running": n_running,
+                            "ceiling": ceiling,
+                            "message": (
+                                f"override {want} exceeds the absolute ceiling "
+                                f"{ceiling}; total target pressure = slots x "
+                                "tool-internal threads"
+                            ),
+                        }
+                        self._commit()
+                        return out
+                    limit = max(default, min(want, ceiling))
+                    warning = (
+                        f"slot override: {n_running + 1}/{limit} concurrent on "
+                        f"{host} (default {default}) — explicit, operator-visible"
+                    )
+                if n_running >= limit:
+                    out = {
                         "decision": "refused",
                         "reason": "slots_exhausted",
                         "unit_key": unit_key,
                         "host": host,
                         "running": n_running,
-                        "ceiling": ceiling,
+                        "limit": limit,
+                        "running_units": [r["unit_key"] for r in running_any],
                         "message": (
-                            f"override {want} exceeds the absolute ceiling "
-                            f"{ceiling}; total target pressure = slots x "
-                            "tool-internal threads"
+                            f"{n_running}/{limit} slot(s) in use on {host}; wait "
+                            "for a unit to finish or re-request later"
+                            + (f" (or pass override_slots<= {ceiling})" if limit < ceiling else "")
                         ),
                     }
-                limit = max(default, min(want, ceiling))
-                warning = (
-                    f"slot override: {n_running + 1}/{limit} concurrent on "
-                    f"{host} (default {default}) — explicit, operator-visible"
+                    self._commit()
+                    return out
+
+                self.conn.execute(
+                    """
+                    INSERT INTO fleet_units
+                        (unit_key, tool, target, host, agent_id, status,
+                         auth_adjacent, started, note)
+                    VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)
+                    ON CONFLICT(unit_key) DO UPDATE SET
+                        status = 'running',
+                        agent_id = excluded.agent_id,
+                        job_id = NULL,
+                        started = excluded.started,
+                        finished = NULL,
+                        note = excluded.note
+                    """,
+                    (unit_key, tool, target, host, agent_id, auth_adj, time.time(), note),
                 )
-            if n_running >= limit:
-                return {
-                    "decision": "refused",
-                    "reason": "slots_exhausted",
-                    "unit_key": unit_key,
-                    "host": host,
-                    "running": n_running,
-                    "limit": limit,
-                    "running_units": [r["unit_key"] for r in running_any],
-                    "message": (
-                        f"{n_running}/{limit} slot(s) in use on {host}; wait "
-                        "for a unit to finish or re-request later"
-                        + (f" (or pass override_slots<= {ceiling})" if limit < ceiling else "")
-                    ),
-                }
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
 
-            self.conn.execute(
-                """
-                INSERT INTO fleet_units
-                    (unit_key, tool, target, host, agent_id, status,
-                     auth_adjacent, started, note)
-                VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)
-                ON CONFLICT(unit_key) DO UPDATE SET
-                    status = 'running',
-                    agent_id = excluded.agent_id,
-                    job_id = NULL,
-                    started = excluded.started,
-                    finished = NULL,
-                    note = excluded.note
-                """,
-                (unit_key, tool, target, host, agent_id, auth_adj, time.time(), note),
-            )
-            self.conn.commit()
-
-        out: dict[str, Any] = {
+        out = {
             "decision": "acquired",
             "unit_key": unit_key,
             "tool": tool,
@@ -452,41 +547,99 @@ class FleetScheduler:
 
     def bind_job(self, unit_key: str, job_id: str) -> dict[str, Any]:
         """Attach the launched job_id to an acquired unit (the lock-table
-        row gains its {pgid, log} handle via the job store's row)."""
-        with self._lock:
-            cur = self.conn.execute(
-                "UPDATE fleet_units SET job_id = ? WHERE unit_key = ?",
-                (job_id, unit_key),
-            )
-            self.conn.commit()
-            if cur.rowcount == 0:
-                return {"status": "no such unit", "unit_key": unit_key}
+        row gains its {pgid, log} handle via the job store's row).
+
+        Conditional: only a 'running' UNBOUND row binds (a racing sweep
+        may have marked it stale between acquire and bind — that's the
+        bind-grace boundary working; the caller sees the no-such-unit
+        outcome rather than resurrecting a stale row).
+        """
+        with self.db_lock:
+            self._immediate()
+            try:
+                cur = self.conn.execute(
+                    "UPDATE fleet_units SET job_id = ? WHERE unit_key = ? "
+                    "AND status = 'running' AND job_id IS NULL",
+                    (job_id, unit_key),
+                )
+                committed = cur.rowcount
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
+        if committed == 0:
+            return {"status": "no such unit", "unit_key": unit_key}
         return {"status": "ok", "unit_key": unit_key, "job_id": job_id}
 
     def release_unit(
         self, unit_key: str, *, status: str = "done", agent_id: str | None = None, force: bool = False
     ) -> dict[str, Any]:
-        """Mark a unit finished (frees its slot). Owner or force=True."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT * FROM fleet_units WHERE unit_key = ?", (unit_key,)
-            ).fetchone()
-            if row is None:
-                return {"status": "no such unit", "unit_key": unit_key}
-            if not force and agent_id is not None and row["agent_id"] != agent_id:
-                return {
-                    "status": "refused",
-                    "error": (
-                        f"unit held by '{row['agent_id']}' (you are "
-                        f"'{agent_id}'); cross-agent release needs force=True"
-                    ),
-                }
-            self.conn.execute(
-                "UPDATE fleet_units SET status = ?, finished = ? WHERE unit_key = ?",
-                (status if status in _UNIT_STATUSES else "done", time.time(), unit_key),
-            )
-            self.conn.commit()
-        return {"status": "released", "unit_key": unit_key, "final": status}
+        """Mark a unit finished (frees its slot). Owner or force=True.
+
+        Conditional UPDATE (``AND status='running'``): a racing double-
+        release (two lanes poll the same job's done at once) no-ops on
+        the second — first-releaser wins, the slot frees exactly once.
+        """
+        final = status if status in _UNIT_STATUSES else "done"
+        with self.db_lock:
+            self._immediate()
+            try:
+                row = self.conn.execute(
+                    "SELECT agent_id, status FROM fleet_units WHERE unit_key = ?",
+                    (unit_key,),
+                ).fetchone()
+                if row is None:
+                    self._commit()
+                    return {"status": "no such unit", "unit_key": unit_key}
+                if not force and agent_id is not None and row["agent_id"] != agent_id:
+                    self._commit()
+                    return {
+                        "status": "refused",
+                        "error": (
+                            f"unit held by '{row['agent_id']}' (you are "
+                            f"'{agent_id}'); cross-agent release needs force=True"
+                        ),
+                    }
+                cur = self.conn.execute(
+                    "UPDATE fleet_units SET status = ?, finished = ? "
+                    "WHERE unit_key = ? AND status = 'running'",
+                    (final, time.time(), unit_key),
+                )
+                changed = cur.rowcount
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
+        if changed == 0:
+            # Already released/stale/done — idempotent, not an error.
+            return {"status": "already_released", "unit_key": unit_key}
+        return {"status": "released", "unit_key": unit_key, "final": final}
+
+    def release_for_job(self, job_id: str) -> int:
+        """Release every running unit bound to ``job_id`` (poll-side
+        bookkeeping: the job finished, its slot frees). Best-effort —
+        a unit already released/stale no-ops via the conditional update.
+        Returns the number of units released."""
+        released = 0
+        try:
+            rows = self.conn.execute(
+                "SELECT unit_key FROM fleet_units WHERE job_id = ? "
+                "AND status = 'running'",
+                (job_id,),
+            ).fetchall()
+            for r in rows:
+                out = self.release_unit(r["unit_key"], force=True)
+                if out.get("status") == "released":
+                    released += 1
+        except Exception:
+            pass  # bookkeeping must never break the poller
+        return released
 
     # -- batch bookkeeping (any adapter; Phase 2 sqlmap mounts first) ---------
 
@@ -500,32 +653,40 @@ class FleetScheduler:
         ``*_fleet_status`` polls."""
         batch_id = f"fleet:{secrets.token_hex(6)}"
         acquired = sum(1 for _s, _k, _t, d in seq_targets if d.startswith("acquired"))
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO fleet_batches (batch_id, tool, agent_id, requested, "
-                "status, started) VALUES (?, ?, ?, ?, 'running', ?)",
-                (batch_id, tool, agent_id, len(seq_targets), time.time()),
-            )
-            for seq, unit_key, target, decision in seq_targets:
-                detail = None
-                job_id = None
-                if "|" in decision:
-                    decision, detail = decision.split("|", 1)
-                    if detail.startswith("job:"):
-                        job_id = detail[len("job:"):]
+        with self.db_lock:
+            self._immediate()
+            try:
                 self.conn.execute(
-                    "INSERT INTO fleet_batch_units (batch_id, "
-                    "unit_key, seq, target, decision, job_id, detail) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (batch_id, unit_key, seq, target, decision, job_id, detail),
+                    "INSERT INTO fleet_batches (batch_id, tool, agent_id, requested, "
+                    "status, started) VALUES (?, ?, ?, ?, 'running', ?)",
+                    (batch_id, tool, agent_id, len(seq_targets), time.time()),
                 )
-            if acquired == 0:
-                self.conn.execute(
-                    "UPDATE fleet_batches SET status = 'dead', finished = ? "
-                    "WHERE batch_id = ?",
-                    (time.time(), batch_id),
-                )
-            self.conn.commit()
+                for seq, unit_key, target, decision in seq_targets:
+                    detail = None
+                    job_id = None
+                    if "|" in decision:
+                        decision, detail = decision.split("|", 1)
+                        if detail.startswith("job:"):
+                            job_id = detail[len("job:"):]
+                    self.conn.execute(
+                        "INSERT INTO fleet_batch_units (batch_id, "
+                        "unit_key, seq, target, decision, job_id, detail) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (batch_id, unit_key, seq, target, decision, job_id, detail),
+                    )
+                if acquired == 0:
+                    self.conn.execute(
+                        "UPDATE fleet_batches SET status = 'dead', finished = ? "
+                        "WHERE batch_id = ?",
+                        (time.time(), batch_id),
+                    )
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
         return batch_id
 
     def batch_status(self, batch_id: str) -> dict[str, Any]:
@@ -555,6 +716,26 @@ class FleetScheduler:
             "decision_counts": counts,
             "units": [dict(u) for u in units],
         }
+
+    def mark_batch_complete(self, batch_id: str) -> None:
+        """Flip a batch to 'complete' when no unit is running (called by
+        fleet-status pollers; conditional so a racing double-status no-
+        ops). One IMMEDIATE tx."""
+        with self.db_lock:
+            self._immediate()
+            try:
+                self.conn.execute(
+                    "UPDATE fleet_batches SET status = 'complete', finished = ? "
+                    "WHERE batch_id = ? AND status = 'running'",
+                    (time.time(), batch_id),
+                )
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
 
     # -- reclaim + observability -----------------------------------------------------
 
@@ -615,16 +796,31 @@ class FleetScheduler:
                         suspects.append(r)
             except Exception:
                 pass  # job store down: TTL/grace cases above still apply
+        if not suspects:
+            return {"stale_reclaimed": [], "count": 0}
+        # The reclaim batch itself is one IMMEDIATE tx (writes + commit
+        # under the file lock — NOT bare autocommit statements; the
+        # 2026-10-29 hardening moved every write path behind the same
+        # discipline as admission).
         reclaimed = []
-        for r in suspects:
-            self.conn.execute(
-                "UPDATE fleet_units SET status = 'stale', finished = ? "
-                "WHERE unit_key = ? AND status = 'running'",
-                (now, r["unit_key"]),
-            )
-            reclaimed.append(r["unit_key"])
-        if reclaimed:
-            self.conn.commit()
+        with self.db_lock:
+            self._immediate()
+            try:
+                for r in suspects:
+                    cur = self.conn.execute(
+                        "UPDATE fleet_units SET status = 'stale', finished = ? "
+                        "WHERE unit_key = ? AND status = 'running'",
+                        (now, r["unit_key"]),
+                    )
+                    if cur.rowcount:
+                        reclaimed.append(r["unit_key"])
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
         return {"stale_reclaimed": reclaimed, "count": len(reclaimed)}
 
     def host_pressure(self, host: str | None = None) -> dict[str, Any]:

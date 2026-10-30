@@ -181,10 +181,7 @@ def test_sweep_reclaims_unit_with_finished_job(sched, tmp_path, monkeypatch):
 def test_sweep_reclaims_jobless_units_after_grace(sched, monkeypatch):
     monkeypatch.setenv("FLEET_BIND_GRACE_S", "0.5")
     r = sched.request_unit("t", "http://h/1", agent_id="a")  # never bind_job'ed
-    # Inside the grace window: a fresh acquire must survive (launch in
-    # progress), so force age by inserting an old started timestamp.
-    with sched._lock:
-        assert r["decision"] == "acquired"  # fresh acquire is not swept
+    assert r["decision"] == "acquired"  # fresh acquire survives (grace window)
     time.sleep(0.6)
     out = sched.sweep_stale()
     assert r["unit_key"] in out["stale_reclaimed"]

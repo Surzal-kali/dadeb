@@ -161,8 +161,21 @@ _PARSERS_LOCK = threading.Lock()
 class JobStore:
     """SQLite-backed background-job registry.
 
-    One connection, ``check_same_thread=False``, busy_timeout, WAL — the
-    gateway / Brain / REPL lanes hit it concurrently.
+    Concurrency model (2026-10-29 hardening — matched to fleet_scheduler):
+    - **Per-thread connections** (threadlocal): the pre-hardening shared
+      connection (``check_same_thread=False``) raced the reaper thread
+      against poll threads on ONE cursor set — the InterfaceError seen in
+      the TTL test was this. ``self.conn`` stays valid: a property that
+      returns the CALLING thread's own connection.
+    - **Autocommit mode** (``isolation_level=None``): no implicit tx
+      hiding multi-statement writes; every multi-write critical section
+      takes ``BEGIN IMMEDIATE`` explicitly — sqlite's file lock is the
+      cross-process mutex (gateway vs Brain vs REPL are separate
+      processes).
+    - Single-statement writes (INSERT row, guarded finish-stamp) rely on
+      sqlite's statement atomicity under autocommit; the guarded
+      (``AND exit_code IS NULL``) shape keeps first-marker-wins semantics
+      working across processes.
     """
 
     def __init__(self, jobs_dir: str | Path = _DEFAULT_JOBS_DIR):
@@ -175,11 +188,16 @@ class JobStore:
         self.db_path = str(self.jobs_dir / "jobs.db")
         import sqlite3
 
-        self.conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA busy_timeout=10000")
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self._lock = threading.RLock()
+        self._sqlite3 = sqlite3
+        self.db_lock = threading.RLock()
+        self._local = threading.local()
+        self._bootstrap = sqlite3.connect(
+            self.db_path, timeout=30.0, check_same_thread=False,
+            isolation_level=None,
+        )
+        self._bootstrap.row_factory = sqlite3.Row
+        self._bootstrap.execute("PRAGMA busy_timeout=30000")
+        self._bootstrap.execute("PRAGMA journal_mode=WAL")
         # Live handles for THIS process's jobs: the Popen (for a watcher
         # that must wait() on the real child — hash_crack's hashfile
         # lifecycle) and the open log fh (closed when the job finishes).
@@ -192,38 +210,71 @@ class JobStore:
         self._init_tables()
         self._ensure_reaper()
 
+    @property
+    def conn(self):
+        """The CALLING thread's connection (created on first use).
+
+        External callers that read ``store.conn`` directly (sqlmap's
+        release-on-done SELECT) keep working — and get a connection they
+        own, so a concurrent writer can never trip their cursor mid-read
+        (the InterfaceError class).
+        """
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._sqlite3.connect(
+                self.db_path, timeout=30.0, check_same_thread=True,
+                isolation_level=None,
+            )
+            c.row_factory = self._sqlite3.Row
+            c.execute("PRAGMA busy_timeout=30000")
+            c.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = c
+        return c
+
+    def _immediate(self) -> None:
+        """Open a cross-process-atomic write section (BEGIN IMMEDIATE —
+        eager RESERVED lock; busy_timeout starves the contender politely
+        instead of failing)."""
+        self.conn.execute("BEGIN IMMEDIATE")
+
+    def _commit(self) -> None:
+        self.conn.execute("COMMIT")
+
+    def _rollback(self) -> None:
+        self.conn.execute("ROLLBACK")
+
     # -- schema ---------------------------------------------------------------
 
     def _init_tables(self) -> None:
-        with self._lock:
-            self.conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    job_id      TEXT PRIMARY KEY,
-                    agent_id    TEXT NOT NULL,
-                    tool        TEXT NOT NULL,
-                    command     TEXT NOT NULL,
-                    log_file    TEXT NOT NULL,
-                    jobs_dir    TEXT NOT NULL,
-                    pid         INTEGER,
-                    started     REAL NOT NULL,
-                    cap         REAL NOT NULL DEFAULT 0,
-                    timed_out   INTEGER NOT NULL DEFAULT 0,
-                    exit_code   INTEGER,
-                    finished_at REAL,
-                    verdict     TEXT
-                )
-                """
+        # Bootstrap conn, autocommit — single-threaded construction moment.
+        c = self._bootstrap
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id      TEXT PRIMARY KEY,
+                agent_id    TEXT NOT NULL,
+                tool        TEXT NOT NULL,
+                command     TEXT NOT NULL,
+                log_file    TEXT NOT NULL,
+                jobs_dir    TEXT NOT NULL,
+                pid         INTEGER,
+                started     REAL NOT NULL,
+                cap         REAL NOT NULL DEFAULT 0,
+                timed_out   INTEGER NOT NULL DEFAULT 0,
+                exit_code   INTEGER,
+                finished_at REAL,
+                verdict     TEXT
             )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_jobs_agent_started "
-                "ON jobs(agent_id, started DESC)"
-            )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_jobs_running "
-                "ON jobs(agent_id) WHERE exit_code IS NULL"
-            )
-            self.conn.commit()
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_agent_started "
+            "ON jobs(agent_id, started DESC)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_running "
+            "ON jobs(agent_id) WHERE exit_code IS NULL"
+        )
 
     # -- registration ----------------------------------------------------------
 
@@ -272,21 +323,29 @@ class JobStore:
             self._live_proc[job_id] = proc
             self._live_log_fh[job_id] = log_fh
 
-        with self._lock:
-            self.conn.execute(
-                """
-                INSERT INTO jobs
-                    (job_id, agent_id, tool, command, log_file, jobs_dir,
-                     pid, started, cap)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    job_id, agent_id, tool_name, json.dumps(command),
-                    str(log_path), str(base),
-                    proc.pid, started, cap,
-                ),
-            )
-            self.conn.commit()
+        with self.db_lock:
+            self._immediate()
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO jobs
+                        (job_id, agent_id, tool, command, log_file, jobs_dir,
+                         pid, started, cap)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, agent_id, tool_name, json.dumps(command),
+                        str(log_path), str(base),
+                        proc.pid, started, cap,
+                    ),
+                )
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
         self._enforce_caps(agent_id)
         _REAPER_WAKE.set()
 
@@ -354,13 +413,21 @@ class JobStore:
         cap kill must read as a timeout, not a clean exit) — and vice
         versa. Callers that observe an already-finished row keep its flag.
         """
-        with self._lock:
-            cur = self.conn.execute(
-                "UPDATE jobs SET exit_code = ?, finished_at = ?, "
-                "timed_out = ? WHERE job_id = ? AND exit_code IS NULL",
-                (exit_code, time.time(), 1 if timed_out else 0, job_id),
-            )
-            self.conn.commit()
+        with self.db_lock:
+            self._immediate()
+            try:
+                cur = self.conn.execute(
+                    "UPDATE jobs SET exit_code = ?, finished_at = ?, "
+                    "timed_out = ? WHERE job_id = ? AND exit_code IS NULL",
+                    (exit_code, time.time(), 1 if timed_out else 0, job_id),
+                )
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
         self._close_live_handles(job_id)
 
     def _close_live_handles(self, job_id: str) -> None:
@@ -413,6 +480,13 @@ class JobStore:
         log_text = self._read_log(row["log_file"])
         recent = self._tail(log_text, tail)
         status = "running" if (exit_code is None and not timed_out) else "done"
+
+        # Finished-cap enforcement on the done transition: launch-time-only
+        # enforcement missed jobs that finished while the agent kept
+        # launching (8 finished rows survived with cap=4 in the concurrency
+        # hammer). Observing done is the point where a slot actually frees.
+        if status == "done":
+            self._enforce_caps(row["agent_id"])
 
         result: dict[str, Any] = {
             "job_id": job_id,
@@ -531,31 +605,47 @@ class JobStore:
             max_finished = int(os.getenv("BG_JOB_MAX_FINISHED_PER_AGENT", "128"))
         except ValueError:
             max_finished = 128
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT job_id, pid FROM jobs WHERE agent_id = ? "
-                "AND exit_code IS NOT NULL ORDER BY started DESC",
-                (agent_id,),
-            ).fetchall()
-            for r in rows[max_finished:]:
-                self.conn.execute("DELETE FROM jobs WHERE job_id = ?", (r["job_id"],))
-            cutoff = time.time() - _ttl_hours() * 3600
-            self.conn.execute(
-                "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
-                (cutoff,),
-            )
-            self.conn.commit()
+        with self.db_lock:
+            self._immediate()
+            try:
+                rows = self.conn.execute(
+                    "SELECT job_id, pid FROM jobs WHERE agent_id = ? "
+                    "AND exit_code IS NOT NULL ORDER BY started DESC",
+                    (agent_id,),
+                ).fetchall()
+                for r in rows[max_finished:]:
+                    self.conn.execute("DELETE FROM jobs WHERE job_id = ?", (r["job_id"],))
+                cutoff = time.time() - _ttl_hours() * 3600
+                self.conn.execute(
+                    "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+                    (cutoff,),
+                )
+                self._commit()
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
 
     def sweep(self) -> dict[str, int]:  # pragma: no cover - thin wrapper
         """Manual TTL sweep (cleanup tooling); returns row counts."""
         cutoff = time.time() - _ttl_hours() * 3600
-        with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
-                (cutoff,),
-            )
-            self.conn.commit()
-            return {"expired": cur.rowcount}
+        with self.db_lock:
+            self._immediate()
+            try:
+                cur = self.conn.execute(
+                    "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+                    (cutoff,),
+                )
+                self._commit()
+                return {"expired": cur.rowcount}
+            except BaseException:
+                try:
+                    self._rollback()
+                except Exception:
+                    pass
+                raise
 
     # -- reaper -------------------------------------------------------------------
 

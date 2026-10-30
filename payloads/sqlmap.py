@@ -207,19 +207,13 @@ def sqlmap_status(job_id: str) -> dict[str, Any]:
 
 
 def _release_unit_for_job(job_id: str) -> None:
-    """Free the fleet unit whose bound job finished (best-effort: the unit
-    key lives in the scheduler table; job_id -> unit_key is a reverse
-    look-up, and a unit already released/stale is simply a no-op)."""
+    """Free the fleet unit whose bound job finished (the scheduler's
+    release_for_job does the conditional, first-releaser-wins update; a
+    unit already released/stale is a no-op)."""
     try:
         from utils.fleet_scheduler import get_scheduler
 
-        sched = get_scheduler()
-        rows = sched.conn.execute(
-            "SELECT unit_key FROM fleet_units WHERE job_id = ? AND status = 'running'",
-            (job_id,),
-        ).fetchall()
-        for r in rows:
-            sched.release_unit(r["unit_key"], force=True)  # poll-side release is bookkeeping, not a cross-agent stop
+        get_scheduler().release_for_job(job_id)
     except Exception:
         pass  # scheduling bookkeeping must never break a status poll
 
@@ -504,14 +498,9 @@ def sqlmap_fleet_status(fleet_id: str) -> dict[str, Any]:
     out["running"] = running
     out["done"] = done
     if running == 0 and batch["status"] == "running":
-        from utils.fleet_scheduler import FleetScheduler
-        with get_scheduler()._lock:
-            get_scheduler().conn.execute(
-                "UPDATE fleet_batches SET status = 'complete', finished = ? "
-                "WHERE batch_id = ?",
-                (__import__("time").time(), fleet_id),
-            )
-            get_scheduler().conn.commit()
+        from utils.fleet_scheduler import get_scheduler as _gs
+
+        _gs().mark_batch_complete(fleet_id)
         out["status"] = "complete"
     out["message"] = (
         f"{done} done, {running} running. "
