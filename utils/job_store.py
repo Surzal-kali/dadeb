@@ -60,6 +60,23 @@ _SCHEMA_VERSION = 2
 _JOBS_TTL_HOURS_DEFAULT = 24
 _REAPER_INTERVAL_S_DEFAULT = 2.0
 
+# Log garbage collect (2026-10-29): ROWS are collected (TTL sweep + per-agent
+# finished cap) but the LOG FILES they pointed at under run/jobs/<tool>/ were
+# never deleted — an unbounded disk leak on a busy fleet. BG_LOG_GC_HOURS is
+# the keep-window for files of collected rows (keep it comfortably above
+# BG_JOB_TTL_HOURS so a row that is still known is never GC'd early);
+# BG_LOG_GC_INTERVAL_S throttles repeated passes. Files younger than the
+# window keep existing even if their row is already gone — so a still-writing
+# job of a not-yet-collected row, or an unflushed writer of a very fresh row,
+# is never truncated out from under its process.
+_JOBS_LOG_GC_HOURS_DEFAULT = 48.0
+_JOBS_LOG_GC_INTERVAL_DEFAULT = 1800.0
+
+# Debounced GC state (module-level, not per-store: any instance's pass
+# counts). Zero = never ran — the first pass after import proceeds.
+_LOG_GC_LAST = 0.0
+_LOG_GC_LOCK = threading.Lock()
+
 # Process-liveness poll cadence inside a single terminate() await-grace loop.
 _TERMINATE_GRACE_S = 5.0
 
@@ -84,6 +101,16 @@ def _ttl_hours() -> float:
 def _reaper_interval() -> float:
     raw = os.getenv("BG_JOB_REAPER_INTERVAL_S", "").strip()
     return float(raw) if raw else _REAPER_INTERVAL_S_DEFAULT
+
+
+def _log_gc_hours() -> float:
+    raw = os.getenv("BG_LOG_GC_HOURS", "").strip()
+    return float(raw) if raw else _JOBS_LOG_GC_HOURS_DEFAULT
+
+
+def _log_gc_interval() -> float:
+    raw = os.getenv("BG_LOG_GC_INTERVAL_S", "").strip()
+    return float(raw) if raw else _JOBS_LOG_GC_INTERVAL_DEFAULT
 
 
 def _terminate_proc_tree(pid: int) -> None:
@@ -214,10 +241,10 @@ class JobStore:
     def conn(self):
         """The CALLING thread's connection (created on first use).
 
-        External callers that read ``store.conn`` directly (sqlmap's
-        release-on-done SELECT) keep working — and get a connection they
-        own, so a concurrent writer can never trip their cursor mid-read
-        (the InterfaceError class).
+        External callers that read ``store.conn`` directly keep working —
+        and get a connection they own, so a concurrent writer can never
+        trip their cursor mid-read (the InterfaceError class). They use it
+        read-only; all write paths go through the scheduler-facing API.
         """
         c = getattr(self._local, "conn", None)
         if c is None:
@@ -297,6 +324,13 @@ class JobStore:
         The subprocess detaches into its own session (pgid == pid) so the
         reaper can kill the tree surgically and orphans stay observable.
         Returns immediately — no wall-clock is spent on the child.
+
+        Failure discipline: if the post-spawn row INSERT fails (locked DB,
+        disk full, killed lane), the already-spawned child is terminated,
+        reaped and deregistered — a launch can never leave an UNRECORDED
+        running process behind (invisible job, permanently held slot,
+        prompt-blocking stdin) — and no row is ever written for a child
+        whose process failed to spawn.
         """
         if not agent_id:
             raise ValueError("job store requires a resolved agent_id (no silent shared default)")
@@ -310,19 +344,34 @@ class JobStore:
         cap = float(timeout or 0)
 
         log_fh = open(log_path, "w", buffering=1)  # line-buffered for live polls
-        proc = subprocess.Popen(
-            command,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-            env=env,
-        )
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+                env=env,
+            )
+        except BaseException:
+            # Spawn failed (bad argv / missing binary): no process exists,
+            # but neither the log handle nor its file may leak — a job that
+            # never was leaves no sidecar.
+            log_fh.close()
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
+            raise
+        # Register the live handles BEFORE the row INSERT (the reaper
+        # consults them from the moment the row appears). On an INSERT
+        # failure the launch is rolled DOWN: kill the spawned tree first
+        # (it must not outlive a rejected launch), close the log, then
+        # drop the handles.
         with self._live_lock:
             self._live_proc[job_id] = proc
             self._live_log_fh[job_id] = log_fh
-
         with self.db_lock:
             self._immediate()
             try:
@@ -345,6 +394,21 @@ class JobStore:
                     self._rollback()
                 except Exception:
                     pass
+                _terminate_proc_tree(proc.pid)
+                try:
+                    proc.wait(timeout=5)  # reap — no zombie, no ghost pid
+                except Exception:
+                    pass
+                try:
+                    log_fh.close()
+                except Exception:
+                    pass
+                with self._live_lock:
+                    self._live_proc.pop(job_id, None)
+                    self._live_log_fh.pop(job_id, None)
+                # Do NOT write the row: an envelope with a pid but no row
+                # would hand the model a job_id every poll answers with
+                # "unknown". Fail honestly instead.
                 raise
         self._enforce_caps(agent_id)
         _REAPER_WAKE.set()
@@ -627,6 +691,85 @@ class JobStore:
                 except Exception:
                     pass
                 raise
+        # Row collection ran (cap / TTL) — piggyback the log GC. Throttled;
+        # never raises; a GC failure cannot break launch/poll.
+        self._log_garbage_collect()
+
+    # -- log garbage collect ------------------------------------------------------
+
+    def _log_garbage_collect(self, *, force: bool = False) -> dict[str, Any]:
+        """Collect LOG FILES of jobs whose ROWS are already gone.
+
+        The rows are collected (TTL sweep + per-agent finished-cap) but the
+        runner log files under ``run/jobs/<tool>/`` they point at were never
+        deleted — an unbounded disk leak on a busy fleet. This closes it with
+        the same discipline as the row collection: never break the lane.
+
+        - **Mtime, not rows**: deletion is decided by the file's own age
+          against the keep-window (``BG_LOG_GC_HOURS``, default 48h, read
+          per call). Files younger than the window keep existing even if
+          their row is already gone — so an unflushed writer of a very
+          fresh row is never truncated, and a log of a not-yet-collected
+          row is never removed before the row's TTL.
+        - **Order**: file first, then the empty per-tool dir (an active
+          tool's dir reappears on its next launch).
+        - **Throttled**: at most one real pass per
+          ``BG_LOG_GC_INTERVAL_S`` (default 30 min) per process beyond the
+          anchor points. ``force=True`` bypasses the wait — tooling that
+          wants a pass NOW gets one — but a completed pass counts toward
+          the interval either way, so back-to-back invocations (a tooling
+          call right after an anchored pass) never scan twice.
+        - Log files written to an explicit per-call ``log_dir`` live
+          OUTSIDE the store's tree — their owning tool collects them.
+
+        Runs anchored at row-collection points (``_enforce_caps`` and the
+        reaper pass). A lane that is neither launching nor reaping jobs can
+        also call :func:`garbage_collect_logs` — otherwise its local files
+        wait for the next anchor pass, the same residency caveat as the
+        row sweeps. Every step is best-effort, never raises.
+        """
+        try:
+            gc_hours = _log_gc_hours()
+        except ValueError:
+            gc_hours = _JOBS_LOG_GC_HOURS_DEFAULT
+        if gc_hours <= 0:
+            return {"deleted": 0, "disabled": True}
+        global _LOG_GC_LAST
+        with _LOG_GC_LOCK:
+            if time.time() - _LOG_GC_LAST < _log_gc_interval() and not force:
+                return {"deleted": 0, "skipped": "interval"}
+            _LOG_GC_LAST = time.time()
+        cutoff = time.time() - gc_hours * 3600
+        deleted = 0
+        try:
+            for tool_dir in self.jobs_dir.iterdir():
+                try:
+                    if not tool_dir.is_dir():
+                        continue  # jobs.db / WAL sidecars
+                    for log in tool_dir.iterdir():
+                        try:
+                            st = log.stat()
+                        except OSError:
+                            continue
+                        if not log.is_file() or st.st_mtime > cutoff:
+                            continue
+                        try:
+                            log.unlink()
+                            deleted += 1
+                        except OSError:
+                            pass
+                    try:
+                        next(tool_dir.iterdir())
+                    except StopIteration:
+                        try:
+                            tool_dir.rmdir()
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return {"deleted": deleted}
 
     def sweep(self) -> dict[str, int]:  # pragma: no cover - thin wrapper
         """Manual TTL sweep (cleanup tooling); returns row counts."""
@@ -710,6 +853,7 @@ class JobStore:
                         )
             except OSError:
                 pass
+        self._log_garbage_collect()
 
     # -- helpers -------------------------------------------------------------------
 
@@ -774,3 +918,10 @@ def reset_store() -> None:
     global _store, _store_key
     _store = None
     _store_key = ""
+
+
+def garbage_collect_logs(force: bool = False) -> dict[str, Any]:
+    """Operator/tooling entry for the log-file garbage collect (docs: the
+    ``_log_garbage_collect`` method). Idle lanes that never launch jobs can
+    run this instead of waiting for the next launch-anchored pass."""
+    return get_store()._log_garbage_collect(force=force)

@@ -16,11 +16,29 @@ Wire compat: the Brain protocol carries session_id as a C int via
 agent_id -> stable int; it knows nothing about sockets. Small ints
 starting at 1 (``"0"`` short-circuits to 0 upstream, so 0 stays the
 shared session forever — do not change that).
+
+Degraded-fallback int space (2026-10-29): a lane whose store is broken
+still resolves (dispatch must not break over observability) via a
+process-local mint. Those ints used to be plain ascending ints,
+indistinguishable from durable-store ints — a cross-lane collision:
+with lane A degraded, agent X minted fallback int 7 while the healthy
+map had already durably assigned 7 to agent Y, so X's calls landed in
+Y's Brain-side session instances (shared stateful handles). The wire
+pins the value to an int, so the fix namespaces the SPACE, not the
+format: fallback ints come from a high per-instance-random band
+(``_FALLBACK_BAND_BASE + token + n``) that durable ints (ascending
+from 1) cannot realistically reach. Cross-agent collision is gone in
+both directions; the honest cost, stated plainly: a degraded lane
+loses cross-lane session continuity for agents it mints during the
+outage (its int means nothing to a store-resolved lane), and degraded
+mints evaporate on restart — exactly the pre-Phase-0 behavior the
+fallback was meant to preserve, minus the collision.
 """
 
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -32,6 +50,14 @@ from constants import resolve_workspace_root
 _DEFAULT_ROOT = resolve_workspace_root()
 _DEFAULT_DB = _DEFAULT_ROOT / "run" / "brain_sessions.db"
 
+# Degraded fallback band (module docstring). Base keeps the band above any
+# plausible durable space; randbits(28) + base stays below 2**30, far under
+# the C-int wire ceiling (2**31 - 1). Two degraded instances collide only
+# if their random tokens coincide AND the same counter slot meets the same
+# agent — negligible; a durable space reaches the band only past 100M
+# agents in ONE workspace.
+_FALLBACK_BAND_BASE = 100_000_000
+
 
 class BrainSessionMap:
     """SQLite-backed (agent_id, workspace) -> stable Brain session int.
@@ -40,26 +66,37 @@ class BrainSessionMap:
     gateway / executor / Brain lanes hit it concurrently. Failures never
     break dispatch: on any store error the resolver degrades to a
     process-local fallback (the pre-existing behavior) and reports why.
+
+    Degraded-fallback ints are namespaced in a high per-instance-random
+    band (module docstring) — never equal to a durable-store int, so a
+    degraded lane cannot route onto another agent's Brain session.
     """
 
     def __init__(self, db_path: str = str(_DEFAULT_DB)):
         self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._fallback_lock = threading.Lock()
+        self._fallback_lock = threading.RLock()  # reentrant: resolve() holds it while minting a slot
         self._fallback_map: dict[str, int] = {}
         self._fallback_next = 0
         self._fallback_failures = 0
+        # Per-instance random offset into the fallback band: one instance
+        # keeps one space across its (possibly repeating) store failures.
+        self._fallback_token = secrets.randbits(28)
         self.workspace = str(_DEFAULT_ROOT)
+        # The whole construction degrades, not just the connect: an
+        # unwritable parent (root-owned deb tree fallback, full disk) can
+        # make the mkdir itself raise BEFORE sqlite3 is ever called.
         try:
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             self.conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout=10000")
             self.conn.execute("PRAGMA journal_mode=WAL")
             self._init_table()
             self.degraded = False
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             # run/ unwritable (root-owned deb tree with no /var/lib path
-            # resolved, disk full, ...) — degrade to process-local.
+            # resolved, disk full, ...), un-openable path — degrade to
+            # process-local.
             self.conn = None
             self.degraded = True
             self.degraded_reason = f"brain session store unavailable: {exc}"
@@ -95,8 +132,13 @@ class BrainSessionMap:
             try:
                 return self._resolve_in_store(key)
             except sqlite3.Error as exc:
-                # Degrade after repeated store failures; log once per
-                # process — dispatch must never break over observability.
+                # Degradation: the store can fail not just at construction
+                # (the constructor already degrades on that) but later — a
+                # DB deleted/unmounted/read-only-flipped mid-process. Mark
+                # the instance degraded so doctor/telemetry sees it, then
+                # fall through to the fallback mapping.
+                self.degraded = True
+                self.degraded_reason = f"brain session store failed on resolve: {exc}"
                 with self._fallback_lock:
                     self._fallback_failures += 1
                     first = self._fallback_failures == 1
@@ -153,7 +195,7 @@ class BrainSessionMap:
     def _fallback_next_slot(self) -> int:
         with self._fallback_lock:
             self._fallback_next += 1
-            return self._fallback_next
+            return _FALLBACK_BAND_BASE + self._fallback_token + self._fallback_next
 
     def _resolve_in_fallback(self, key: str) -> int:
         with self._fallback_lock:
@@ -172,7 +214,8 @@ class BrainSessionMap:
             return {
                 "degraded": True,
                 "degraded_reason": getattr(self, "degraded_reason", ""),
-                "agents": dict(sorted(self._fallback_map.items())),
+                "fallback_band_base": _FALLBACK_BAND_BASE,
+                "agents": {k: v for k, v in sorted(self._fallback_map.items())},
             }
         rows = self.conn.execute(
             "SELECT agent_id, session_int, created_at, last_seen "

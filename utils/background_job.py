@@ -67,14 +67,40 @@ def _log_dir() -> str:
 # (parsers are closures — they don't survive a restart, same as pre-v2).
 
 
+# Parsers registered while no store was constructible (default store dir
+# unreadable — deb lane owned by root mid-upgrade, disk full) flush at the
+# next launch_job, when the store must exist anyway or the launch fails
+# loudly. Import-time construction is deferred, not dropped: modules that
+# register parsers must IMPORT successfully on any lane.
+_DEFERRED_PARSERS: list[tuple[str, Callable[[str], dict[str, Any]]]] = []
+
+
 def register_verdict_parser(tool_name: str, parser: Callable[[str], dict[str, Any]]) -> None:
     """Register a verdict parser for a tool used by ``poll_job``.
 
     Called by tool modules at import time (module-level, after the parser
     function is defined). The Brain's startup scan imports those modules,
     so parsers are registered before any ``CALL_TOOL`` can arrive.
+
+    Import-time safety (2026-10-29): constructing the store here would let
+    an unavailable DEFAULT store dir abort the module's ENTIRE import —
+    seven tool modules register parsers, so one bad path froze the import
+    of every one of them. When no store can be built yet the registration
+    is deferred and applied at the next ``launch_job`` (which needs the
+    store anyway; a launch without a store fails loudly regardless).
     """
-    get_store().register_parser(tool_name, parser)
+    try:
+        store = get_store()
+    except Exception:  # no store constructible yet — defer, never break import
+        _DEFERRED_PARSERS.append((tool_name, parser))
+        return
+    store.register_parser(tool_name, parser)
+
+
+def _flush_deferred_parsers(store: "JobStore") -> None:
+    while _DEFERRED_PARSERS:
+        tool_name, parser = _DEFERRED_PARSERS.pop(0)
+        store.register_parser(tool_name, parser)
 
 
 def launch_job(
@@ -149,6 +175,7 @@ def launch_job(
         model verbatim.
     """
     store = get_store()
+    _flush_deferred_parsers(store)
     owner = agent_id or current_agent_id()
     if verdict_parser is not None:
         store.register_parser(tool_name, verdict_parser)

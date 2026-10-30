@@ -8,6 +8,7 @@ the wrapper's signature compatibility.
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -255,3 +256,196 @@ def test_brain_session_map_shared_zero_shortcircuits(tmp_path):
 
     m = BrainSessionMap(db_path=str(tmp_path / "bs2.db"))
     assert m.resolve("0") == 0
+
+
+# --- log-file garbage collect (2026-10-29) ------------------------------------------
+
+
+def test_log_gc_deletes_files_of_collected_rows_keeps_fresh(store, tmp_path, monkeypatch):
+    """Files of rows ALREADY collected (TTL/cap) are deleted past the keep
+    window; fresh files (young mtime) survive even with no row at all."""
+    import os as _os
+
+    monkeypatch.setenv("BG_LOG_GC_HOURS", "48")
+    # The launch below anchors an UNTHROTTLED GC pass at _enforce_caps —
+    # build all fixtures BEFORE launching so that pass sees the intended
+    # state, and reset the throttle afterward for the explicit test pass.
+    from utils import job_store as jsm
+
+    jsm._LOG_GC_LAST = time.time()  # suppress anchored passes mid-setup
+
+    tool_dir = store.jobs_dir / "gone"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    old_log = tool_dir / "gone_deadbeef.log"
+    old_log.write_text("old runner log\n")
+    past = time.time() - 49 * 3600
+    os.utime(old_log, (past, past))
+
+    fresh_orphan_dir = store.jobs_dir / "orphan"
+    fresh_orphan_dir.mkdir(parents=True, exist_ok=True)
+    fresh_orphan = fresh_orphan_dir / "orphan_fresh.log"
+    fresh_orphan.write_text("just started\n")
+
+    # A row still present (young file): its log must survive any pass.
+    r = store.launch(["sleep", "0.1"], tool_name="kept", agent_id="gca", timeout=60)
+    kept_log = Path(r["log_file"])
+    assert kept_log.exists()
+
+    jsm._LOG_GC_LAST = 0.0  # let the explicit test pass through
+    out = store._log_garbage_collect(force=True)
+    assert out["deleted"] >= 1
+    assert not old_log.exists()          # collected row's old log: gone
+    assert kept_log.exists()             # live row: kept
+    assert fresh_orphan.exists()         # young, no row: kept
+
+
+def test_log_gc_prunes_empty_tool_dirs_and_throttles(store, tmp_path, monkeypatch):
+    """A per-tool dir left empty by the GC is pruned; a second immediate
+    non-forced pass is skipped by the interval throttle."""
+    import os as _os
+
+    monkeypatch.setenv("BG_LOG_GC_HOURS", "1")
+    from utils import job_store as jsm
+
+    jsm._LOG_GC_LAST = 0.0
+    tool_dir = store.jobs_dir / "swept"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    old_log = tool_dir / "swept_abc123.log"
+    old_log.write_text("x\n")
+    past = time.time() - 2 * 3600
+    os.utime(old_log, (past, past))
+
+    first = store._log_garbage_collect(force=True)
+    assert first["deleted"] == 1
+    assert not tool_dir.exists()         # empty dir pruned
+
+    second = store._log_garbage_collect()  # not forced; interval was just stamped
+    assert second.get("skipped") == "interval"
+
+
+def test_log_gc_disabled_by_zero_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("BG_LOG_GC_HOURS", "0")
+    s2 = JobStore(jobs_dir=tmp_path / "gc0")
+    out = s2._log_garbage_collect(force=True)
+    assert out.get("disabled") is True
+
+
+def test_garbage_collect_logs_public_entry(store, monkeypatch):
+    from utils.job_store import garbage_collect_logs
+
+    monkeypatch.setenv("BG_LOG_GC_HOURS", "1")
+    tool_dir = store.jobs_dir / "pub"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    old = tool_dir / "pub_1.log"
+    old.write_text("x\n")
+    past = time.time() - 2 * 3600
+    import os as _os
+
+    os.utime(old, (past, past))
+    out = garbage_collect_logs(force=True)
+    assert out["deleted"] == 1
+    assert not old.exists()
+
+
+# --- launch orphan window (2026-10-29) ----------------------------------------------
+
+
+def test_launch_popen_failure_leaves_no_row_or_handle(store, tmp_path):
+    """A command that cannot spawn (missing binary) must raise (no row is
+    minted, so no zombie "running" phantom with pid NULL) and must not
+    leak the log handle or its empty sidecar file."""
+    with pytest.raises(FileNotFoundError):
+        store.launch(
+            ["/nonexistent-binary-xyz", "--flag"],
+            tool_name="orph", agent_id="orph-a", timeout=60,
+        )
+    # No row for the agent; the (empty) log sidecar for the failed job is
+    # unlinked, not left behind.
+    assert store.list_jobs(agent_id="orph-a") == []
+    tool_dir = store.jobs_dir / "orph"
+    if tool_dir.exists():
+        assert sorted(p.name for p in tool_dir.iterdir()) == []
+
+
+def test_launch_insert_failure_rolls_down_spawned(store, tmp_path, monkeypatch):
+    """The dangerous window: Popen SUCCEEDS, then the row INSERT fails.
+    The launch must roll DOWN — the spawned tree is terminated, reaped and
+    deregistered, and no row is written (a pid-without-row launch envelope
+    would hand the model a job_id every poll answers "unknown")."""
+
+    class FailingConn:
+        """Wrapper over a real connection: the INSERT statement fails
+        (sqlite3.Connection.execute is read-only, so the seam is a proxy)."""
+
+        def __init__(self, real, sqlite3_mod):
+            self._real = real
+            self._s3 = sqlite3_mod
+
+        def execute(self, sql, *a, **kw):
+            if "INSERT INTO jobs" in sql:
+                raise self._s3.OperationalError("database is locked (test)")
+            return self._real.execute(sql, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    s = JobStore(jobs_dir=tmp_path / "roll")
+    real_conn_property = type(s).conn
+    try:
+        type(s).conn = property(
+            lambda self: FailingConn(real_conn_property.fget(self), s._sqlite3)
+        )
+        with pytest.raises(s._sqlite3.OperationalError):
+            s.launch(["sleep", "30"], tool_name="roll", agent_id="roll-a", timeout=600)
+    finally:
+        type(s).conn = real_conn_property
+    # Rolled down: no row; the spawned child must be gone (killed + reaped).
+    time.sleep(0.2)
+    assert [j for j in s.list_jobs(agent_id="roll-a") if j["tool"] == "roll"] == []
+    for proc in list(s._live_proc.values()):
+        assert proc.poll() is not None  # reaped — no orphan kept running
+
+
+
+# --- brain-session fallback band (2026-10-29) ----------------------------------------
+
+
+def test_brain_session_fallback_band_disjoint_from_store_ints(tmp_path, monkeypatch):
+    """Degraded fallback ints live in a high random band: they never equal
+    a durable-store int, so a degraded lane's calls can never land on
+    another agent's Brain session."""
+    from utils.brain_sessions import BrainSessionMap, _FALLBACK_BAND_BASE
+
+    db = tmp_path / "bs.band.db"
+    healthy = BrainSessionMap(db_path=str(db))
+    durable = {f"agent-{i}": healthy.resolve(f"agent-{i}") for i in range(5)}
+    assert max(durable.values()) < _FALLBACK_BAND_BASE
+
+    # Degraded instance: point at an un-openable path.
+    bad = BrainSessionMap(db_path="/proc/no/such/dir/bs.db")
+    assert bad.degraded
+    fbx = bad.resolve("agent-3")           # same agent id as the healthy map
+    fby = bad.resolve("agent-4")
+    assert fbx >= _FALLBACK_BAND_BASE and fby >= _FALLBACK_BAND_BASE
+    assert fbx != fby
+    # Collision guarantee: the degraded lane's ints match NONE of the
+    # durable ints — the Brain could never route X's calls into Y's session.
+    assert fbx not in set(durable.values())
+    assert fby not in set(durable.values())
+    # Stable within the degraded instance (same agent keeps its slot),
+    # and int-valued (the wire field is a C int).
+    assert bad.resolve("agent-3") == fbx
+    assert isinstance(fbx, int)
+
+
+def test_brain_session_fallback_token_stable_per_instance(tmp_path, monkeypatch):
+    """One degraded instance keeps ONE band offset across repeated store
+    failures (a repeating store must not re-randomize the lane's slots)."""
+    from utils.brain_sessions import BrainSessionMap
+
+    bad = BrainSessionMap(db_path="/proc/definitely/not/a/db/2")
+    tok = bad._fallback_token
+    a = bad.resolve("x-agent")
+    b = bad.resolve("y-agent")
+    assert bad._fallback_token == tok
+    assert b == a + 1  # same band, same instance → contiguous slots

@@ -261,10 +261,11 @@ class FleetScheduler:
     def conn(self):
         """The CALLING thread's connection (created on first use).
 
-        Kept as an attribute-compatible property: pre-hardening callers
-        read ``sched.conn`` directly (sqlmap's release-on-done SELECT);
-        those keep working — but they now get a connection they OWN, so a
-        concurrent writer never trips their cursor mid-read.
+        Kept as an attribute-compatible property: external readers that
+        read ``sched.conn`` directly keep working — but they now get a
+        connection they OWN, so a concurrent writer never trips their
+        cursor mid-read. They use it read-only; lifecycle writes go
+        through the scheduler API (``release_unit`` / ``release_for_job``).
         """
         c = getattr(self._local, "conn", None)
         if c is None:

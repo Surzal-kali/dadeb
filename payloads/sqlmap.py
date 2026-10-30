@@ -207,9 +207,11 @@ def sqlmap_status(job_id: str) -> dict[str, Any]:
 
 
 def _release_unit_for_job(job_id: str) -> None:
-    """Free the fleet unit whose bound job finished (the scheduler's
-    release_for_job does the conditional, first-releaser-wins update; a
-    unit already released/stale is a no-op)."""
+    """Free the fleet unit(s) bound to a finished job, via the public
+    scheduler API — ``release_for_job`` looks up running units by job_id
+    and releases each through the owner-fenced ``release_unit``
+    (conditional first-releaser-wins update; a unit already
+    released/stale is a no-op)."""
     try:
         from utils.fleet_scheduler import get_scheduler
 

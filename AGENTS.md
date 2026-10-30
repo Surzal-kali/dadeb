@@ -412,11 +412,46 @@ kill stamps `timed_out=True` — poll-side cap enforcement marks first,
 kills second, so a racing poll can't downgrade a timeout to a clean
 exit). Logs live under `run/jobs/<tool>/` — never /tmp.
 
+**Log collection (2026-10-29):** rows were always collected (TTL +
+finished-cap) but the log FILES they pointed at never were — a busy
+fleet leaked disk forever. A mtime-based GC (window `BG_LOG_GC_HOURS`,
+default 48h — comfortably above `BG_JOB_TTL_HOURS` so a known row's log
+is never GC'd early; throttle `BG_LOG_GC_INTERVAL_S`, default 30 min;
+window `0` disables) runs anchored at row-collection points
+(`_enforce_caps`, the reaper pass); an idle lane can invoke
+`utils.job_store.garbage_collect_logs()` directly. Deletion is decided
+by the FILE's age, not the row table — young files keep existing even
+when their row is already gone, so an unflushed writer is never
+truncated. Logs written to an explicit per-call `log_dir` remain their
+tool's own collection duty.
+
+**Launch roll-down (2026-10-29):** the request→launch→INSERT window no
+longer leaks orphans. A spawn failure (missing binary) closes the log
+handle and unlinks its (empty) file before raising — no row, no
+sidecar. An INSERT failure after a successful spawn rolls the launch
+DOWN: the spawned tree is terminated, reaped and deregistered, and no
+row is written — a pid-without-row envelope would hand the model a
+job_id every poll answers "unknown". The launch is honest in both
+directions: no phantom rows, no unrecorded running processes. Note
+`register_verdict_parser` no longer constructs the store at import
+time: with the default store dir unavailable it defers registrations
+and applies them at the next `launch_job` (otherwise one unreadable
+path aborted the import of every tool module that registers a parser —
+seven of them at last count).
+
 Brain session ints (`agent_id → stable int` for the C wire protocol)
 resolve through `utils/brain_sessions.py` (SQLite, keyed by workspace+
 agent) so the same agent re-resolves identically across restarts and
 lanes; in-process fallback when the store is down. `"0"` short-circuits
-to the shared session.
+to the shared session. The degraded-fallback int space is NAMESPACED
+(2026-10-29): fallback ints come from a high per-instance-random band
+(≈100M+) that durable ints (ascending from 1) can't realistically
+reach, so a degraded lane's calls can never land in another agent's
+Brain-side session instances (the wire field is a C int, so the fix is
+a disjoint space, not a format). The fallback lock is an RLock —
+`resolve()` holds it while minting a slot, and a plain Lock made the
+first-ever degraded resolve self-deadlock (never caught by tests until
+the band itself was tested, 2026-10-29).
 
 Zombie discipline (cost a full test-suite debug 2026-10-29): a dead
 child nobody `wait()`ed on still answers `os.kill(pid, 0)` — the
