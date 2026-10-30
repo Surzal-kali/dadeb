@@ -17,10 +17,36 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 
-/// Coarse backstop so a wedged worker can't pin a brain connection forever.
-/// This is NOT the per-tool execution ceiling (that's the execution tracker's
-/// job, a later milestone) — just a guard on the whole connect+exchange.
-const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+/// Tool-execution ceiling the worker applies (tool_exec's BRAIN_EXEC_CEILING);
+/// the backstop below must sit ABOVE it.
+const DEFAULT_EXEC_CEILING: f64 = 3600.0;
+
+/// Coarse backstop so a wedged worker can't pin a brain connection forever. This is NOT
+/// the per-tool execution ceiling (that's the execution tracker's job in tool_exec) and
+/// it must never pre-empt it: a brain that backstops before the ceiling would report
+/// "worker unreachable" while the tool is still executing, and the tracker's graceful
+/// kill + verdict would never reach the client. Default: BRAIN_EXEC_CEILING + 30s slack
+/// so the tracker always fires first. BRAIN_WORKER_TIMEOUT (seconds) overrides — 0
+/// disables the backstop entirely (a wedged worker then pins its connection, an
+/// operator's explicit choice).
+fn backstop_timeout() -> Option<Duration> {
+    if let Some(raw) = std::env::var_os("BRAIN_WORKER_TIMEOUT") {
+        if let Ok(secs) = raw.to_string_lossy().trim().parse::<f64>() {
+            return if secs > 0.0 {
+                Some(Duration::from_secs_f64(secs))
+            } else {
+                None
+            };
+        }
+        // Invalid override falls through to the ceiling-derived default.
+    }
+    let ceiling = std::env::var_os("BRAIN_EXEC_CEILING")
+        .map(|raw| raw.to_string_lossy().trim().parse::<f64>().unwrap_or(0.0))
+        .unwrap_or(0.0);
+    Some(Duration::from_secs_f64(
+        if ceiling > 0.0 { ceiling } else { DEFAULT_EXEC_CEILING } + 30.0,
+    ))
+}
 
 /// Forward one already-validated message to the Python worker and return its
 /// reply as a string.
@@ -47,11 +73,14 @@ pub async fn forward(worker_path: &Path, message: &str) -> std::io::Result<Strin
         }
     };
 
-    match tokio::time::timeout(WORKER_TIMEOUT, exchange).await {
-        Ok(result) => result,
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("worker did not reply within {WORKER_TIMEOUT:?}"),
-        )),
+    match backstop_timeout() {
+        Some(timeout) => match tokio::time::timeout(timeout, exchange).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("worker did not reply within {timeout:?}"),
+            )),
+        },
+        None => exchange.await,
     }
 }

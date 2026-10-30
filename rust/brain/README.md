@@ -17,7 +17,10 @@ framing, dispatch, and (later) execution tracking.
 ## Milestone 2 — Python tool-worker IPC seam
 
 - `worker.rs` — the brain's client to the Python worker. Forwards tool events
-  over the **same** `brain_codec()`; one framing layer, both links.
+  over the **same** `brain_codec()`; one framing layer, both links. The
+  forward's coarse backstop is ceiling-aware: it defaults to
+  `BRAIN_EXEC_CEILING + 30s` (the tracker's kill path always fires first),
+  `BRAIN_WORKER_TIMEOUT` overrides (seconds; `0` disables).
 - `worker.py` — a long-lived asyncio worker that holds the tool registry and
   executes tools. Ships a stdlib-only demo registry (`demo.echo`, `demo.add`,
   `demo.sysinfo`); the real registry wires in where marked in the file.
@@ -65,7 +68,10 @@ python3 smoke.py run/brain.sock
 
 With all three up, `demo.*` calls return execution envelopes through the shared
 `tool_exec` core, proving the full client -> brain -> worker -> client round-trip
-over one wire format. Stop the worker and re-run the client to see the brain's
+over one wire format. `demo.sleep` exercises the ceiling/kill path end to end
+(`demo.add`, long sleeps, etc. — the brain's forward backstop is
+`BRAIN_EXEC_CEILING + 30s`, so the tracker's verdict reaches the client before
+the brain gives up). Stop the worker and re-run the client to see the brain's
 `worker unreachable` fallback. Start a second brain to see the singleton guard
 refuse it; Ctrl-C the brain to see it unlink its own socket on the way out.
 

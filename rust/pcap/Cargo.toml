@@ -1,0 +1,22 @@
+[package]
+name = "pcap"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[features]
+default = ["capture"]
+# libpcap-backed wire capture (sniff_to_pcap) is on by default wherever
+# libpcap-dev + pkg-config exist. Boxes without them (some deb lanes) build
+# with `--no-default-features`: the codec/dissection/search core is
+# dependency-free and links nothing.
+capture = ["dep:libpcap"]
+
+[dependencies]
+sha2 = "0.10"
+serde_json = "1"
+regex = "1"
+libpcap = { package = "pcap", version = "2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
