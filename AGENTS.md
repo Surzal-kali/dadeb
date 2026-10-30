@@ -383,6 +383,47 @@ Deterministic, reference-keyed store the model retrieves from via
 - **Caps:** per-entry 256 MiB (`SCRATCH_MAX_PAYLOAD_MB`), per-agent 1 GiB (`SCRATCH_MAX_AGENT_MB`).
 - **Atomic writes:** payload written to temp → fsync → rename → metadata commit. A crash never leaves a torn entry.
 
+### Agent identity + jobs substrate — Phase 0 (`utils/agent_identity.py`, `utils/job_store.py`, `utils/brain_sessions.py`, scale-doctrine Annex B)
+
+Identity is **announce-or-mint** at one choke point
+(`utils.agent_identity.resolve_agent_id`): a normalized announcement
+(`[a-z0-9_.:-]{3,64}`) is used verbatim, exact `"0"` is the explicit
+shared-session opt-in, and anything else mints ephemeral
+`anon-<hex>` echoed as `result["identity"] = {agent_id, provenance}`
+(declared|shared|minted) — adopt-on-echo for clients that want
+continuity. The `anon-` prefix is gateway-reserved: an announced
+`anon-x` is re-minted. The executor resolves identity around every
+dispatch and sets the ambient ContextVar; tool bodies read
+`utils.agent_identity.current_agent_id()` for row ownership (jobs,
+evidence). **Never add a default agent_id to a store schema** — stores
+take NOT NULL columns and resolved callers only (the old three
+spellings — executor `"0"`, evidence `"secretary"`, PG `'unknown'` —
+are collapsed; evidence keeps `"secretary"` only for direct
+operator-store use). `replkit.core.run_tool` dispatches under the
+explicit `repl` identity.
+
+Background jobs (`launch_job`/`poll_job`/`get_job`/`terminate_job`,
+`utils/background_job.py` — same signatures as ever) are rows in the
+SQLite job store (`run/jobs/jobs.db`, scratch-store conventions, env
+`BG_JOB_*`): agent-scoped ownership (cross-agent `terminate_job`
+refused without `force=True`), per-agent finished-cap eviction that
+never evicts running jobs, TTL sweep, one shared reaper thread (a cap
+kill stamps `timed_out=True` — poll-side cap enforcement marks first,
+kills second, so a racing poll can't downgrade a timeout to a clean
+exit). Logs live under `run/jobs/<tool>/` — never /tmp.
+
+Brain session ints (`agent_id → stable int` for the C wire protocol)
+resolve through `utils/brain_sessions.py` (SQLite, keyed by workspace+
+agent) so the same agent re-resolves identically across restarts and
+lanes; in-process fallback when the store is down. `"0"` short-circuits
+to the shared session.
+
+Zombie discipline (cost a full test-suite debug 2026-10-29): a dead
+child nobody `wait()`ed on still answers `os.kill(pid, 0)` — the
+launching store reaps via live `Popen.poll()`; pid-probe is the
+cross-lane fallback; terminate-grace uses `waitpid(WNOHANG)` so the
+kill path can't stall on our own zombies.
+
 ### Memory Service (`memories.py`)
 
 SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections

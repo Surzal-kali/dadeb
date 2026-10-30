@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS journal.entries (
     args        JSONB NOT NULL DEFAULT '{}'::jsonb, -- material tier: secrets stay (scrubbing is a mid-engage self-own), 24h TTL applies, purge wipes
     scope_verdict TEXT,
     approval_path TEXT,                              -- gateway|repl_direct|mcp
+    agent_id    TEXT NOT NULL DEFAULT '0',           -- resolved identity (Phase 0: announce-or-mint at the gateway; '0' = legacy rows)
+    agent_provenance TEXT,                           -- declared|shared|minted (utils/agent_identity.py)
     status      TEXT NOT NULL,                       -- ok|error|timeout|budget_exhausted
     duration_s  REAL,
     result_mode TEXT,                                 -- large|digest|page
@@ -54,7 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_journal_expiry
 CREATE TABLE IF NOT EXISTS evidence.entries (
     entry_id      BIGSERIAL PRIMARY KEY,
     engagement    TEXT REFERENCES engagement.engagements(slug),
-    agent_id      TEXT NOT NULL DEFAULT 'unknown',
+    agent_id      TEXT NOT NULL DEFAULT '0',        -- resolved identity (Phase 0); legacy rows read 'unknown'
+    agent_provenance TEXT,                           -- declared|shared|minted
     kind          TEXT NOT NULL CHECK (kind IN (
                       'credential', 'service', 'ambiguity',
                       'scope_question', 'observation')),

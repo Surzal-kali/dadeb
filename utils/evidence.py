@@ -79,7 +79,7 @@ class EvidenceStore:
                 entry_id     TEXT PRIMARY KEY,
                 ts           REAL NOT NULL,
                 engagement   TEXT,
-                agent_id     TEXT NOT NULL DEFAULT 'unknown',
+                agent_id     TEXT NOT NULL,
                 kind         TEXT NOT NULL,
                 status       TEXT NOT NULL DEFAULT 'open',
                 source       TEXT,
@@ -162,7 +162,7 @@ class EvidenceStore:
         kind: str,
         summary: str,
         *,
-        agent_id: str = "secretary",
+        agent_id: str | None = None,
         source: str = "",
         content: dict[str, Any] | None = None,
         scratch_ref: str = "",
@@ -194,6 +194,19 @@ class EvidenceStore:
         entry_id = f"evid:{secrets.token_hex(8)}"
         now = time.time()
         expires_at = now + ttl * 3600 if ttl else None
+
+        # Owner identity (Phase 0): the ambient resolved agent_id when the
+        # dispatch lane set one; "secretary" is the honest fallback for
+        # direct/operator-store use — the old silent default. Never a
+        # schema-level default: the column is NOT NULL here.
+        if not agent_id:
+            try:
+                from utils.agent_identity import current_agent_id
+                agent_id = current_agent_id()
+            except Exception:
+                agent_id = ""
+        if not agent_id:
+            agent_id = "secretary"
 
         with self.conn:
             self.conn.execute(
@@ -483,6 +496,7 @@ def record_evidence(
             kind, summary, source=source, content=content,
             scratch_ref=scratch_ref,
             ttl_hours=None if ttl_hours < 0 else ttl_hours,
+            agent_id=None,  # resolved inside record() from ambient identity
         )
     except EvidenceError as exc:
         return f"Error: {exc}"

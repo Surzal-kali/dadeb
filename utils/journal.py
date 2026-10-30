@@ -140,21 +140,30 @@ def write_dispatch(
     digest = result_digest(result) if result is not None else None
     entry_id: int | None = None
 
+    # Phase 0 identity: the executor stamps envelope_meta.identity with the
+    # resolved agent_id + provenance (announce-or-mint). Legacy callers that
+    # don't stamp it get the shared-session '0' — never 'unknown'.
+    identity = (envelope_meta or {}).get("identity") or {}
+    agent_id = str(identity.get("agent_id") or "0")
+    agent_provenance = identity.get("provenance") or None
+
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO journal.entries
                     (engagement, lane, tool_id, args, scope_verdict,
-                     approval_path, status, duration_s, result_mode,
+                     approval_path, agent_id, agent_provenance, status,
+                     duration_s, result_mode,
                      scratch_ref, result_digest, envelope_meta)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING entry_id
                 """,
                 (
                     engagement_slug, lane, tool_id,
                     json.dumps(redacted, default=str),
-                    scope_verdict, approval_path, status, duration_s,
+                    scope_verdict, approval_path, agent_id, agent_provenance,
+                    status, duration_s,
                     result_mode, scratch_ref, digest,
                     json.dumps(envelope_meta, default=str) if envelope_meta else None,
                 ),

@@ -206,11 +206,12 @@ def scratch(scratch_ref: str, *, filter: str = "", regex: str = "",
 
     The REPL agent_id is ``"repl"``.
     """
+    from utils.agent_identity import REPL_AGENT_ID
     from utils.scratch_store import get_store
     store = get_store()
     return store.retrieve(
         scratch_ref,
-        agent_id="repl",
+        agent_id=REPL_AGENT_ID,
         offset=offset,
         limit=limit,
         filter_pattern=filter or None,

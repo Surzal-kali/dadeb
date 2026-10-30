@@ -101,7 +101,15 @@ async def run_tool(tool_id: str, arguments: dict[str, Any], manifests: list[Tool
 
     start = time.monotonic()
     try:
-        result = await executor.execute_tool(manifest, arguments)
+        # Phase 0 identity: the REPL announces itself ('repl') instead of
+        # silently landing in the shared session "0" — the envelope's
+        # agent_id="repl" claim was never actually wired into dispatch
+        # before this. Job rows, evidence rows, and Brain sessions created
+        # from the REPL now carry 'repl' ownership.
+        from utils.agent_identity import REPL_AGENT_ID
+        result = await executor.execute_tool(
+            manifest, arguments, session_id=REPL_AGENT_ID
+        )
     except Exception as exc:
         result = {"error": f"Exception during execution: {exc}", "status": "Failed"}
         traceback.print_exc()

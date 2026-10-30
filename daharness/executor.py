@@ -23,6 +23,10 @@ from typing import Any
 from constants import TransportType, brain_socket_path
 from .models import ToolManifest
 from .preflight import normalize_arguments, validate_against_manifest
+from utils.agent_identity import (
+    reset_current_agent_id,
+    set_current_agent_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,37 @@ class ExecutorMixin:
     """
 
     async def execute_tool(self, manifest: ToolManifest, arguments: dict, *, session_id: str = "0"):
+        manifest = self._ensure_valid_manifest(manifest)
+
+        # --- Identity resolution (Phase 0, announce-or-mint). ``session_id``
+        # is the caller's announced identity; an unusable announcement (None,
+        # empty, bad charset, spoofed anon- prefix) is MINTED here -- the
+        # single minting point. The resolved id + provenance ride the result
+        # envelope so the model sees what it ran as; the ambient contextvar
+        # makes identity-bearing tool writes (jobs, evidence) tag the row
+        # without every tool signature changing.
+        from utils.agent_identity import resolve_agent_id
+        resolved_agent_id, agent_provenance = resolve_agent_id(session_id)
+        _agent_token = set_current_agent_id(resolved_agent_id)
+        try:
+            result = await self._execute_tool_inner(
+                manifest, arguments, session_id=session_id,
+                resolved_agent_id=resolved_agent_id,
+                agent_provenance=agent_provenance,
+            )
+        finally:
+            reset_current_agent_id(_agent_token)
+        if isinstance(result, dict):
+            result.setdefault(
+                "identity",
+                {"agent_id": resolved_agent_id, "provenance": agent_provenance},
+            )
+        return result
+
+    async def _execute_tool_inner(
+        self, manifest: ToolManifest, arguments: dict, *,
+        session_id: str, resolved_agent_id: str, agent_provenance: str,
+    ) -> dict:
         manifest = self._ensure_valid_manifest(manifest)
 
         # --- Pre-flight (deterministic, <1ms): validate BEFORE anything that
@@ -112,7 +147,13 @@ class ExecutorMixin:
             status = "error"
         duration_s = time.time() - started
 
-        self._journal_dispatch(manifest, arguments, result, status, duration_s, session_id)
+        # Journal the identity the OUTER wrapper resolved (never re-resolve:
+        # a minted id re-resolves to a DIFFERENT anon id, which would split
+        # the audit row from the execution). Session id stays the announced
+        # form for continuity with legacy readers.
+        self._journal_dispatch(manifest, arguments, result, status, duration_s, session_id,
+                               resolved_agent_id=resolved_agent_id,
+                               agent_provenance=agent_provenance)
         return result
 
     async def _dispatch_by_transport(self, manifest: ToolManifest, arguments: dict, session_id: str):
@@ -141,12 +182,17 @@ class ExecutorMixin:
 
         raise ValueError(f"Unsupported transport type: {manifest.transport}")
 
-    def _journal_dispatch(self, manifest, arguments, result, status, duration_s, session_id):
+    def _journal_dispatch(self, manifest, arguments, result, status, duration_s, session_id,
+                          resolved_agent_id=None, agent_provenance=None):
         """Append one row to the engagement journal (best-effort, never
         raises — the journal is additive and must not affect dispatch)."""
         try:
             from utils.journal import write_dispatch
             from utils.engagement import lane_name
+            identity_meta = (
+                {"agent_id": resolved_agent_id, "provenance": agent_provenance}
+                if resolved_agent_id is not None else None
+            )
             write_dispatch(
                 tool_id=manifest.module_id,
                 status=status,
@@ -159,6 +205,7 @@ class ExecutorMixin:
                 envelope_meta={
                     "transport": manifest.transport.value,
                     "untrusted_target": bool(getattr(manifest, "untrusted_target", False)),
+                    **({"identity": identity_meta} if identity_meta else {}),
                 },
             )
         except Exception:
@@ -237,19 +284,17 @@ class ExecutorMixin:
         ``"0"`` / empty -> ``0`` (the default *shared* session, backward
         compatible with the old hardcoded ``CALL_TOOL|0|...``). Any other id —
         numeric or not (e.g. an agent_id) — is mapped to a stable, unique int
-        slot so the same caller always lands on the same Brain session and a
-        concurrent agent gets its own. This is what lets multiple agents run
-        concurrently without sharing one stateful tool instance (e.g. one
-        msfconsole handle) on the Brain side.
+        via the durable ``utils.brain_sessions`` store, so the same agent
+        resumes the same Brain session even after a gateway restart (the
+        pre-Phase-0 in-RAM map re-minted ints on restart). This is what lets
+        multiple agents run concurrently without sharing one stateful tool
+        instance (e.g. one msfconsole handle) on the Brain side.
         """
         sid = str(session_id if session_id is not None else "0").strip() or "0"
         if sid == "0":
             return 0
         with self._brain_session_lock:
-            if sid not in self._brain_session_map:
-                self._next_brain_session += 1
-                self._brain_session_map[sid] = self._next_brain_session
-            return self._brain_session_map[sid]
+            return self._brain_sessions.resolve(sid)
 
     async def _execute_brain_tool(self, tool_id: str, arguments: dict, *, session_id: str = "0"):
         """Dispatch a tool call, launching the decorated function directly.

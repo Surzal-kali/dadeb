@@ -570,13 +570,23 @@ class APIGateway:
                     f"Accepted keys: {sorted(self._manifest_param_names(manifest))}",
                 )
 
+            # Phase 0 identity (announce-or-mint): the client's announced
+            # agent_id is normalized and used as-is; "0" stays the explicit
+            # shared session; null/bad announcements get a minted
+            # anon-<8hex> with an adopt-on-echo hint on the response. This
+            # is THE minting point for the REST lane — downstream consumers
+            # (budget, Brain session, scratch, jobs, journal) all key on the
+            # resolved value.
+            from utils.agent_identity import resolve_agent_id
+            resolved_agent_id, agent_provenance = resolve_agent_id(req.agent_id)
+
             # Per-turn tool budget (utils/tool_budget.py): count the call,
             # refuse executions past the cap, and wrap the turn's final
             # result with an end-turn directive. Terminal-lane tools
             # (memory/findings) stay callable past the cap so the model can
             # still write itself up.
             budget_decision, budget_meta = self.tool_budget.pre_dispatch(
-                req.agent_id or "0", req.turn_key, manifest.module_id
+                resolved_agent_id, req.turn_key, manifest.module_id
             )
             if budget_decision == BUDGET_EXHAUSTED:
                 logging.info(
@@ -591,10 +601,11 @@ class APIGateway:
                 }
 
             # agent_id doubles as the Brain session id, so each identified
-            # agent gets its own isolated tool state on the sidecar; omitted
-            # falls back to the shared default session ("0").
+            # agent gets its own isolated tool state on the sidecar; the
+            # resolved value (never the raw announcement) is what the
+            # executor re-resolves — announcement already validated here.
             execution_result = await self.tool_registry.execute_tool(
-                manifest, req.arguments or {}, session_id=req.agent_id or "0"
+                manifest, req.arguments or {}, session_id=resolved_agent_id
             )
 
             # Result projection: ``large`` (default) caps field sizes so a single
@@ -611,7 +622,7 @@ class APIGateway:
                     execution_result,
                     result_mode=mode,
                     tool_id=manifest.module_id,
-                    agent_id=req.agent_id or "0",
+                    agent_id=resolved_agent_id,
                     chat_id=req.chat_id,
                     page_offset=req.page_offset or 0,
                     page_limit=req.page_limit or 50,
@@ -627,11 +638,26 @@ class APIGateway:
                     budget_meta,
                 )
 
-            # Return the result along with identifying information about the tool used
+            # Return the result along with identifying information about the
+            # tool used + the resolved identity (a minted id echoes here as
+            # identity.hint so a client can adopt it for continuity).
             logging.info(f"Executed tool {manifest.module_id} for intent '{req.intent}' with result: {execution_result}")
             return {
                 "tool_id": manifest.module_id,
                 "tool_name": manifest.external_sanitized_description,
+                "identity": {
+                    "agent_id": resolved_agent_id,
+                    "provenance": agent_provenance,
+                    **(
+                        {"hint": (
+                            f"No agent_id was announced; this call ran as minted "
+                            f"identity '{resolved_agent_id}'. Adopt this id on "
+                            "your next calls (agent_id field) for scratch/job "
+                            "continuity."
+                        )}
+                        if agent_provenance == "minted" else {}
+                    ),
+                },
                 "result": execution_result
             }
 
@@ -683,9 +709,14 @@ class APIGateway:
             payload via this endpoint and swallowed it wholesale.
             """
             # Per-turn tool budget — scratch_search pulls context into the
-            # model, so it counts like a regular tool call.
+            # model, so it counts like a regular tool call. Ownership is
+            # checked against the RESOLVED identity (announced ids pass
+            # through normalized; minted ids match how the original call's
+            # payload was stored).
+            from utils.agent_identity import resolve_agent_id
+            resolved_agent_id, agent_provenance = resolve_agent_id(req.agent_id)
             budget_decision, budget_meta = self.tool_budget.pre_dispatch(
-                req.agent_id or "0", req.turn_key, SCRATCH_SEARCH
+                resolved_agent_id, req.turn_key, SCRATCH_SEARCH
             )
             if budget_decision == BUDGET_EXHAUSTED:
                 logging.info(
@@ -699,7 +730,7 @@ class APIGateway:
             store = get_store()
             result = store.retrieve(
                 req.scratch_ref,
-                agent_id=req.agent_id or "0",
+                agent_id=resolved_agent_id,
                 offset=req.offset or 0,
                 limit=req.limit or 0,
                 filter_pattern=req.filter,
@@ -962,8 +993,14 @@ class APIGateway:
                             f"'{manifest.module_id}' schema: {unknown}. "
                             f"Accepted keys: {sorted(self._manifest_param_names(manifest))}"
                         )
-                    # agent_id -> Brain session id for per-agent isolation.
-                    session_id = arguments.get("agent_id") or "0"
+                    # Phase 0 identity (announce-or-mint) — the MCP lane
+                    # accepts agent_id as a tool argument (documented
+                    # client contract); an unusable announcement mints
+                    # anon-<8hex> exactly like the REST lane.
+                    from utils.agent_identity import resolve_agent_id
+                    session_id, identity_provenance = resolve_agent_id(
+                        arguments.get("agent_id")
+                    )
                     # Per-turn tool budget — same rules as the REST path.
                     budget_decision, budget_meta = self.tool_budget.pre_dispatch(
                         session_id, arguments.get("turn_key"), manifest.module_id
@@ -1010,6 +1047,19 @@ class APIGateway:
                     payload = {
                         "tool_id": manifest.module_id,
                         "tool_name": manifest.external_sanitized_description,
+                        "identity": {
+                            "agent_id": session_id,
+                            "provenance": identity_provenance,
+                            **(
+                                {"hint": (
+                                    f"No agent_id was announced; this call ran as minted "
+                                    f"identity '{session_id}'. Adopt this id on your "
+                                    "next calls (agent_id argument) for scratch/job "
+                                    "continuity."
+                                )}
+                                if identity_provenance == "minted" else {}
+                            ),
+                        },
                         "result": result,
                     }
                     return _mcp_text(payload)

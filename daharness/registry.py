@@ -202,14 +202,18 @@ class ToolRegistry(ExecutorMixin):
         # One instance per class per registry, so stateful clients keep
         # their process/handles across calls.
         self._tool_instances: dict[str, Any] = {}
-        # Brain session-id mapping. The Brain wire protocol carries session_id
-        # as a C int; non-numeric caller ids (agent_id) are
-        # mapped to stable unique ints here so concurrent agents get isolated
-        # Brain sessions (and thus isolated stateful tool instances on the
-        # sidecar) instead of all sharing session 0. ``"0"`` is the default
-        # shared session.
-        self._brain_session_map: dict[str, int] = {}
-        self._next_brain_session: int = 1
+        # Brain session-id mapping (Phase 0: durable). The Brain wire
+        # protocol carries session_id as a C int; non-numeric caller ids
+        # (agent_id) are mapped to stable unique ints via
+        # ``utils.brain_sessions.BrainSessionMap`` (SQLite store keyed by
+        # workspace+agent_id) so the SAME agent resumes the SAME Brain
+        # session after a gateway restart, distinct from other agents',
+        # instead of all sharing session 0. ``"0"`` is the shared session
+        # and short-circuits to 0 before the store is consulted. When the
+        # store is unavailable the BrainSessionMap degrades to a
+        # process-local mapping (pre-Phase-0 behavior).
+        from utils.brain_sessions import BrainSessionMap
+        self._brain_sessions = BrainSessionMap()
         self._brain_session_lock = threading.Lock()
 
         # Removed automatic background bootstrap to avoid race conditions

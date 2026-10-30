@@ -24,6 +24,25 @@ if str(_FRAMEWORK_ROOT) not in sys.path:
 from constants import framework_tool, brain_socket_path  # noqa: F401 — framework_tool re-exported for memories.py
 from listeners.execution_tracker import EXECUTION_TRACKER
 
+# Ambient identity plumbing (Phase 0) — imported lazily per call site, but
+# the set/reset pair is bound here so the sync-tool wrapper below can close
+# over them even when utils.agent_identity import happens inside the handler.
+try:
+    from utils.agent_identity import (
+        set_current_agent_id as _set_agent,
+        reset_current_agent_id as _reset_agent,
+    )
+except Exception:  # pragma: no cover — identity must never wedge startup
+    from typing import Any as _Any
+
+    def _set_agent(agent_id) -> _Any:
+        """Type-compatible no-op fallback (matches set_current_agent_id)."""
+        return None
+
+    def _reset_agent(token) -> None:
+        """Type-compatible no-op fallback (matches reset_current_agent_id)."""
+        return None
+
 # --- dedicated tool-executor pool (2026-09-25 executor-starvation fix) -------
 #
 # Sync tools previously ran on ``loop.run_in_executor(None, ...)`` — the
@@ -665,6 +684,51 @@ async def dispatch(event, full_payload=None):
                 # execution that outlives every caller's timeout.
                 loop = asyncio.get_event_loop()
                 EXECUTION_TRACKER.set_caller_session(event.session_id)
+                # Ambient identity inside tool bodies (Phase 0): thread/async
+                # workers inherit the resolved caller identity so identity-
+                # bearing writes (jobs, evidence, memory) tag rows per agent.
+                # The wire carries the executor's resolved session INT; the
+                # authoritative string id is journaled by the dispatching
+                # executor, so this prefix keeps Brain-side rows distinct
+                # per agent without pretending to know the string spelling.
+                _agent_ctx: Any = None
+                _identity_wrapped: Any = None
+                _inner_agent: Any = None
+                try:
+                    from utils.agent_identity import (
+                        agent_id_context,
+                        BRAIN_AGENT_PREFIX,
+                    )
+                except Exception:  # identity must never wedge the Brain
+                    agent_id_context = None
+                    BRAIN_AGENT_PREFIX = "s"
+                try:
+                    # The contextvar is a ContextVar: the async tool task
+                    # inherits it via ensure_future; the sync pool thread does
+                    # NOT (asyncio.to_thread copies context, run_in_executor
+                    # does not) — so for sync tools the value is set inside
+                    # the call itself via a context-wrapped partial.
+                    if inspect.iscoroutinefunction(tool):
+                        _agent_ctx = agent_id_context(
+                            f"{BRAIN_AGENT_PREFIX}{event.session_id}"
+                        )
+                        _agent_ctx.__enter__()
+                    else:
+                        # Sync tools: run_in_executor does NOT copy the
+                        # current context, so the value must be set INSIDE
+                        # the worker thread — the call itself is wrapped.
+                        _inner_agent = f"{BRAIN_AGENT_PREFIX}{event.session_id}"
+
+                        def _identity_wrapped(fn, *a, **kw):
+                            tok = _set_agent(_inner_agent)
+                            try:
+                                return fn(*a, **kw)
+                            finally:
+                                _reset_agent(tok)
+                except Exception:  # identity must never wedge the Brain
+                    _agent_ctx = None
+                    _identity_wrapped = None
+                    _inner_agent = None
                 kind = "async" if inspect.iscoroutinefunction(tool) else "thread"
                 exec_id = EXECUTION_TRACKER.begin(tool_id, event.session_id, kind)
                 ceiling = float(os.getenv("BRAIN_EXEC_CEILING", "3600"))
@@ -681,9 +745,19 @@ async def dispatch(event, full_payload=None):
                         )
                     else:
                         if kwargs:
-                            call = functools.partial(tool, **kwargs)
+                            if _identity_wrapped is not None:
+                                call = functools.partial(
+                                    _identity_wrapped, tool, **kwargs
+                                )
+                            else:
+                                call = functools.partial(tool, **kwargs)
                         else:
-                            call = functools.partial(tool, *args)
+                            if _identity_wrapped is not None:
+                                call = functools.partial(
+                                    _identity_wrapped, tool, *args
+                                )
+                            else:
+                                call = functools.partial(tool, *args)
                         # Dedicated tool pool (2026-09-25): NOT the default
                         # executor. A wedged sync tool pins its thread for the
                         # ceiling duration (or forever for a thread the kill
@@ -723,6 +797,8 @@ async def dispatch(event, full_payload=None):
                     })
                 finally:
                     EXECUTION_TRACKER.finish(exec_id)
+                    if _agent_ctx is not None:
+                        _agent_ctx.__exit__(None, None, None)
 
                 print(f"[+] Tool {tool_id} executed successfully: {result}")
                 # JSON status envelope — the harness parses this structurally
