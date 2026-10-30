@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use nix::unistd::{chown, geteuid, Gid, Uid};
+use nix::unistd::{geteuid, Gid, Uid};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -674,13 +674,26 @@ fn set_wal(conn: &Connection) -> Result<()> {
 /// prior root run outlive it, the next NON-root run gets "attempt to write a
 /// readonly database" because WAL mode needs write access to `scratch.db`,
 /// `-wal`, and `-shm`. The python repair shells `chown` out; the port calls
-/// `chown(2)` directly via nix (no PATH dependency, no timeout dance).
+/// the syscalls directly via nix (no PATH dependency, no timeout dance).
 /// Never raises — a failed repair logs and lets the caller proceed (the
 /// projection layer degrades gracefully to field-capping without scratch).
+///
+/// SECURITY: this runs as root over paths the (non-root) workspace owner
+/// controls. Every operation is no-follow: `lchown` for the top-level files,
+/// and the data-dir walk is descriptor-relative (`openat(O_NOFOLLOW |
+/// O_DIRECTORY)` + `fchownat(AT_SYMLINK_NOFOLLOW)`), so a planted symlink —
+/// or a directory swapped for one mid-walk — can only ever get the LINK
+/// chowned, never its target. (A path-based walk that follows links would
+/// let the workspace owner aim root's chown at e.g. /etc/shadow.) Python's
+/// `chown -R` is likewise no-follow during recursion (implicit -P).
 fn repair_ownership_if_needed(db_path: &Path, data_dir: &Path) {
     fn uid_of(path: &Path) -> Option<(u32, u32)> {
         let st = nix::sys::stat::stat(path).ok()?; // OSError → nothing to say
         Some((st.st_uid, st.st_gid))
+    }
+    /// lstat: owner of the path itself, never a link target.
+    fn luid_of(path: &Path) -> Option<u32> {
+        nix::sys::stat::lstat(path).ok().map(|st| st.st_uid)
     }
 
     // Target owner = the UID of the workspace root dir (python stat's
@@ -709,9 +722,7 @@ fn repair_ownership_if_needed(db_path: &Path, data_dir: &Path) {
         data_dir.to_path_buf(),
     ];
 
-    let needs_repair = files
-        .iter()
-        .any(|f| f.exists() && uid_of(f).map(|(uid, _)| uid == 0).unwrap_or(false));
+    let needs_repair = files.iter().any(|f| luid_of(f) == Some(0));
     if !needs_repair {
         return;
     }
@@ -730,12 +741,15 @@ fn repair_ownership_if_needed(db_path: &Path, data_dir: &Path) {
         return;
     }
 
-    for f in &files {
-        if f.exists() {
-            let _ = chown(f, Some(Uid::from_raw(target_uid)), Some(Gid::from_raw(target_gid)));
+    let (uid, gid) = (Uid::from_raw(target_uid), Gid::from_raw(target_gid));
+    // Top-level db files: lchown — a symlinked scratch.db gets the link
+    // re-owned, never the file it points at.
+    for f in &files[..3] {
+        if luid_of(f).is_some() {
+            let _ = std::os::unix::fs::lchown(f, Some(target_uid), Some(target_gid));
         }
     }
-    chown_tree(data_dir, target_uid, target_gid);
+    chown_tree_nofollow(data_dir, uid, gid);
     eprintln!(
         "[scratch] Root guard: chowned scratch DB + WAL + SHM + data dir back to \
          uid={target_uid} (workspace owner). A prior root run had root-owned these files, \
@@ -743,17 +757,68 @@ fn repair_ownership_if_needed(db_path: &Path, data_dir: &Path) {
     );
 }
 
-fn chown_tree(dir: &Path, uid: u32, gid: u32) {
-    let _ = chown(dir, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)));
-    if let Ok(rd) = fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                chown_tree(&p, uid, gid);
-            } else {
-                // best-effort, mirror python's debug-swallowed chown failures
-                let _ = chown(&p, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)));
-            }
+/// Max directory depth the repair walk descends (scratch-data is flat in
+/// practice; the cap only bounds a hostile deep tree).
+const CHOWN_MAX_DEPTH: usize = 32;
+
+fn nofollow_dir_flags() -> nix::fcntl::OFlag {
+    use nix::fcntl::OFlag;
+    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
+}
+
+/// Descriptor-relative, symlink-proof recursive chown of `root`.
+/// A symlinked `root` is refused outright (O_NOFOLLOW open fails); entries
+/// are re-owned with AT_SYMLINK_NOFOLLOW and only descended into when an
+/// O_NOFOLLOW|O_DIRECTORY `openat` succeeds — i.e. it is a real directory at
+/// the moment we open it, so a swap-to-symlink race fails closed.
+fn chown_tree_nofollow(root: &Path, uid: Uid, gid: Gid) {
+    use nix::dir::Dir;
+    use nix::sys::stat::Mode;
+    use std::os::fd::AsRawFd;
+
+    let dir = match Dir::open(root, nofollow_dir_flags(), Mode::empty()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "[scratch] Root guard: not walking {} ({e}); refusing to follow a symlinked or \
+                 non-directory data dir",
+                root.display()
+            );
+            return;
+        }
+    };
+    let _ = nix::unistd::fchown(dir.as_raw_fd(), Some(uid), Some(gid));
+    chown_dir_entries(dir, uid, gid, 0);
+}
+
+fn chown_dir_entries(mut dir: nix::dir::Dir, uid: Uid, gid: Gid, depth: usize) {
+    use nix::dir::Dir;
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::Mode;
+    use std::os::fd::AsRawFd;
+
+    if depth >= CHOWN_MAX_DEPTH {
+        return;
+    }
+    let fd = dir.as_raw_fd();
+    // Collect names first: the iterator borrows the Dir mutably.
+    let names: Vec<std::ffi::CString> = dir
+        .iter()
+        .flatten()
+        .map(|e| e.file_name().to_owned())
+        .filter(|n| n.as_bytes() != b"." && n.as_bytes() != b"..")
+        .collect();
+    for name in names {
+        // best-effort, mirror python's debug-swallowed chown failures
+        let _ = nix::unistd::fchownat(
+            Some(fd),
+            name.as_c_str(),
+            Some(uid),
+            Some(gid),
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        );
+        if let Ok(sub) = Dir::openat(Some(fd), name.as_c_str(), nofollow_dir_flags(), Mode::empty()) {
+            chown_dir_entries(sub, uid, gid, depth + 1);
         }
     }
 }
@@ -1179,5 +1244,50 @@ mod tests {
             .unwrap();
         assert_eq!(env["status"], "ok");
         assert_eq!(env["result"], json!(["csrf", "plain"]));
+    }
+
+    #[test]
+    fn chown_walk_never_follows_symlinks() {
+        // Exercises the real attack: the (non-root) workspace owner plants
+        // symlinks inside scratch-data pointing at root-owned files; a root
+        // repair run must re-own the LINKS and real entries, never targets.
+        // Needs root to chown to a foreign uid — skipped (passes) otherwise;
+        // run `sudo -E cargo test chown_walk` to exercise it.
+        use std::os::unix::fs::{symlink, MetadataExt};
+        if !geteuid().is_root() {
+            eprintln!("skipping chown_walk_never_follows_symlinks: needs root");
+            return;
+        }
+        let (uid, gid) = (Uid::from_raw(4242), Gid::from_raw(4242));
+        let d = tempfile::tempdir().unwrap();
+        let data = d.path().join("scratch-data");
+        let outside = d.path().join("outside"); // stands in for /etc
+        fs::create_dir_all(data.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("shadow"), b"x").unwrap();
+        fs::write(data.join("sub").join("abc.json.gz"), b"y").unwrap();
+        symlink(&outside, data.join("evil-dir")).unwrap();
+        symlink(outside.join("shadow"), data.join("evil-file")).unwrap();
+
+        chown_tree_nofollow(&data, uid, gid);
+
+        let owner = |p: &Path| fs::symlink_metadata(p).unwrap().uid();
+        // Real entries re-owned (including nested) ...
+        assert_eq!(owner(&data), 4242);
+        assert_eq!(owner(&data.join("sub")), 4242);
+        assert_eq!(owner(&data.join("sub").join("abc.json.gz")), 4242);
+        // ... the links themselves re-owned ...
+        assert_eq!(owner(&data.join("evil-dir")), 4242);
+        assert_eq!(owner(&data.join("evil-file")), 4242);
+        // ... and NOTHING behind them touched.
+        assert_eq!(owner(&outside), 0);
+        assert_eq!(owner(&outside.join("shadow")), 0);
+
+        // A symlinked data dir itself is refused outright.
+        let linked = d.path().join("linked-data");
+        symlink(&outside, &linked).unwrap();
+        chown_tree_nofollow(&linked, uid, gid);
+        assert_eq!(owner(&outside), 0);
+        assert_eq!(owner(&outside.join("shadow")), 0);
     }
 }
