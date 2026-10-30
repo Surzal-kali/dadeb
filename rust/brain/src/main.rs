@@ -1,22 +1,23 @@
-//! Milestone 2 of the Rust Brain port: the Python tool-worker IPC seam.
+//! Rust Brain port — transport, framing, typed dispatch, the Python tool-worker
+//! IPC seam, and the start-up OS singleton dance.
 //!
-//! Milestone 1 stood up the transport: a tokio Unix-socket server, length-
-//! prefixed framing (codec.rs) wire-compatible with the Python Brain, and the
-//! `event_type|session_id|payload` triplet parsed into a typed `Event` (event.rs)
-//! dispatched through an exhaustive `match`.
+//! Milestones so far:
+//!   1. transport + framing (codec.rs) + typed `Event` dispatch (event.rs);
+//!   2. tool events forwarded to a long-lived Python worker (worker.rs ->
+//!      worker.py) over the same codec; the brain is a transparent proxy for
+//!      the tool-execution half (tools stay in Python);
+//!   3. the OS singleton dance (singleton.rs): flock guard, stale-socket probe,
+//!      per-lane umask/permissions, unlink-on-exit — ported from
+//!      listeners/thebrain.py start_brain(), with SIGTERM/SIGINT routed to a
+//!      graceful shutdown so the cleanup actually runs.
 //!
-//! Milestone 2 (this commit) wires the stub arms to a real backend: tool events
-//! are forwarded to a long-lived Python worker (worker.rs -> worker.py) over the
-//! SAME codec, and its reply is relayed back to the client. The brain is now a
-//! transparent proxy for the tool-execution half; tools stay in Python.
-//!
-//! Still scoped out for later milestones:
-//!   * the OS-level singleton dance (flock, stale-inode unlink, per-lane umask);
-//!   * the execution tracker / kill switch / per-tool ceilings (the brain-side
-//!     control plane — `Other` events land here when that work begins).
+//! Still in Python (by design): tool execution, the registry + per-session
+//! isolation, the scope gate, and the execution tracker / kill switch — all in
+//! the worker, next to where the threads and child processes actually live.
 
 mod codec;
 mod event;
+mod singleton;
 mod worker;
 
 use bytes::Bytes;
@@ -28,7 +29,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::Framed;
 
 /// Client-facing socket: `$BRAIN_SOCKET`, else `./run/brain.sock`. Mirrors
-/// `brain_socket_path()` in the Python tree, so clients reach the same inode.
+/// `brain_socket_path()` in the Python tree so clients reach the same inode.
 fn socket_path() -> PathBuf {
     std::env::var_os("BRAIN_SOCKET")
         .map(PathBuf::from)
@@ -36,7 +37,6 @@ fn socket_path() -> PathBuf {
 }
 
 /// Backend worker socket: `$BRAIN_WORKER_SOCKET`, else `./run/brain-worker.sock`.
-/// The brain is a CLIENT to this; worker.py binds it.
 fn worker_socket_path() -> PathBuf {
     std::env::var_os("BRAIN_WORKER_SOCKET")
         .map(PathBuf::from)
@@ -47,23 +47,34 @@ fn worker_socket_path() -> PathBuf {
 async fn main() -> std::io::Result<()> {
     let path = socket_path();
     let worker_path = worker_socket_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    // Real stale-socket handling (flock guard + inode-probe + per-lane umask) is
-    // milestone-3 work; for now just clear a leftover so bind() doesn't EADDRINUSE.
-    let _ = std::fs::remove_file(&path);
 
-    let listener = UnixListener::bind(&path)?;
+    // Singleton guard + stale-socket handling + lane-correct bind, all in one.
+    // `_guard` MUST stay in scope for the whole run: dropping it releases the
+    // flock and unlinks our socket.
+    let (listener, _guard) = singleton::acquire_and_bind(&path)?;
     eprintln!("[rust-brain] listening on {}", path.display());
     eprintln!("[rust-brain] tool worker at {}", worker_path.display());
 
+    // Accept loop vs. shutdown signal. On SIGTERM/SIGINT we break out so main
+    // returns, `_guard` drops, and its Drop unlinks the socket + releases the
+    // lock — the Rust analog of thebrain.py routing both signals through task
+    // cancellation so its `finally` cleanup runs. (A bare process exit on an
+    // unhandled signal would skip Drop and leak the socket file.)
+    tokio::select! {
+        _ = accept_loop(listener, worker_path) => {}
+        _ = shutdown_signal() => {
+            eprintln!("[rust-brain] shutdown signal received; cleaning up");
+        }
+    }
+    Ok(())
+}
+
+/// Accept connections forever, one task per connection on the multi-thread
+/// runtime — where real (non-GIL-serialized) parallelism lives.
+async fn accept_loop(listener: UnixListener, worker_path: PathBuf) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                // One task per connection, on the multi-thread runtime — this is
-                // where real (non-GIL-serialized) parallelism lives. Each task
-                // gets its own handle to the worker path.
                 let worker_path = worker_path.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(stream, worker_path).await {
@@ -73,6 +84,18 @@ async fn main() -> std::io::Result<()> {
             }
             Err(e) => eprintln!("[rust-brain] accept failed: {e}"),
         }
+    }
+}
+
+/// Resolve when the process is asked to terminate (SIGTERM, what bootstrap.stop()
+/// sends) or interrupted (SIGINT / Ctrl-C).
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut intr = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = intr.recv() => {}
     }
 }
 
@@ -104,15 +127,12 @@ async fn handle_client(stream: UnixStream, worker_path: PathBuf) -> std::io::Res
 async fn dispatch(message: &str, worker_path: &Path) -> String {
     let event = match Event::parse(message) {
         Ok(ev) => ev,
-        // Same reply the Python handle_client gives — rejected before it ever
-        // reaches the worker.
         Err(ParseError::Malformed(_)) => return "Error: Malformed event".to_string(),
     };
 
     match event {
         // Tool events execute in Python. Forward the ORIGINAL validated message
-        // verbatim (no re-serialization) and relay the worker's reply — the
-        // brain is a transparent proxy for the tool-execution half.
+        // verbatim (no re-serialization) and relay the worker's reply.
         ev @ (Event::ScanTools { .. } | Event::CallTool { .. }) => {
             match worker::forward(worker_path, message).await {
                 Ok(reply) => reply,
@@ -120,9 +140,7 @@ async fn dispatch(message: &str, worker_path: &Path) -> String {
             }
         }
 
-        // Handler-table / control-plane events (the EVENT_HANDLERS table and the
-        // legacy C fallthrough in Python dispatch). Not yet designed in Rust;
-        // this is where the execution tracker / kill switch will land.
+        // Handler-table / control-plane events: not yet designed in Rust.
         Event::Other {
             event_type,
             session_id,
@@ -133,11 +151,9 @@ async fn dispatch(message: &str, worker_path: &Path) -> String {
     }
 }
 
-/// Build the reply when the worker can't be reached, in the shape the client
-/// expects for that event type: a JSON error envelope for CALL_TOOL (clients
-/// `json.loads` it), a plain `ERROR:` string for SCAN_TOOLS. Proper JSON
-/// serialization (serde) is worth adding once the brain emits more envelopes;
-/// one hand-built fallback doesn't justify the dep yet.
+/// Reply when the worker can't be reached, in the shape the client expects for
+/// that event type: a JSON error envelope for CALL_TOOL (clients `json.loads`
+/// it), a plain `ERROR:` string for SCAN_TOOLS.
 fn worker_unreachable_reply(event: &Event, err: &std::io::Error) -> String {
     let detail = err.to_string().replace('"', "'"); // keep the JSON well-formed
     match event {

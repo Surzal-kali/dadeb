@@ -8,9 +8,12 @@ license = "GPL-3.0-or-later"
 [dependencies]
 # Async runtime + Unix socket server. Multi-thread runtime because real
 # parallelism (not GIL-serialized) is the whole point of leaving Python here.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal"] }
 # LengthDelimitedCodec: our entire read_message/pack_message framing, as config.
 tokio-util = { version = "0.7", features = ["codec"] }
 # SinkExt/StreamExt for Framed (.send() / .next()).
 futures = "0.3"
 bytes = "1"
+# Unix-only syscalls the singleton dance needs (umask, flock). nix wraps the
+# raw libc calls so the unsafe stays inside the crate; our code is safe calls.
+nix = { version = "0.29", features = ["fs", "user"] }
