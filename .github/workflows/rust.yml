@@ -1,0 +1,57 @@
+name: rust
+
+# Gate for the Rust crates under rust/: formatting, lints, tests.
+# rust/brain is not included yet (it hasn't been through cargo fmt);
+# add it to the matrix once it has.
+on:
+  push:
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [scratch, pcap]
+    defaults:
+      run:
+        working-directory: rust/${{ matrix.crate }}
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libpcap (pcap crate's capture feature)
+        if: matrix.crate == 'pcap'
+        working-directory: .
+        run: sudo apt-get update -q && sudo apt-get install -y -q libpcap-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/${{ matrix.crate }}
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test
+
+      # The pcap file/dissect core must keep building without libpcap
+      # (deb lanes that don't ship libpcap-dev).
+      - name: test (no capture feature)
+        if: matrix.crate == 'pcap'
+        run: cargo test --no-default-features
