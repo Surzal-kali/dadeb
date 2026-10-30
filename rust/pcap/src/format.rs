@@ -278,7 +278,7 @@ pub fn is_truncated(&self) -> bool {
             self.truncated = true;
             return Ok(None);
         }
-        let (ts_sec, ts_subsec, incl_len, orig_len) = if self.header.big_endian {
+        let (mut ts_sec, ts_subsec, incl_len, orig_len) = if self.header.big_endian {
             (
                 u32::from_be_bytes(hdr[0..4].try_into().unwrap()),
                 u32::from_be_bytes(hdr[4..8].try_into().unwrap()),
@@ -297,9 +297,13 @@ pub fn is_truncated(&self) -> bool {
             return Err(PcapFormatError::OversizedRecord { incl_len });
         }
         // Nanosecond-magic files carry nanoseconds in the sub-second field;
-        // normalize so Record.ts_usec stays honest microseconds.
+        // normalize so Record.ts_usec stays honest microseconds. A writer
+        // that put >= 1e9 ns there (not a valid sub-second value) gets the
+        // whole seconds carried into ts_sec (saturating) rather than an
+        // impossible ts_usec >= 1_000_000 leaking downstream.
         let ts_usec = if self.header.nanosecond {
-            ts_subsec / 1_000
+            ts_sec = ts_sec.saturating_add(ts_subsec / 1_000_000_000);
+            (ts_subsec % 1_000_000_000) / 1_000
         } else {
             ts_subsec
         };
@@ -597,8 +601,34 @@ mod tests {
         let mut r = PcapReader::open(&path).unwrap();
         assert!(r.header().nanosecond);
         assert!(r.header().big_endian);
+        // 1.5e9 ns is not a valid sub-second value: the whole second carries
+        // into ts_sec, ts_usec stays < 1_000_000.
         let rec = r.next_record().unwrap().unwrap();
-        assert_eq!((rec.ts_sec, rec.ts_usec), (1_700_000_005, 1_500_000));
+        assert_eq!((rec.ts_sec, rec.ts_usec), (1_700_000_006, 500_000));
+    }
+
+    #[test]
+    fn nanosecond_overflow_carries_and_saturates() {
+        // u32::MAX ns = 4.294967295 s: carry 4 s, keep 294_967 us; and a
+        // ts_sec already at u32::MAX saturates instead of wrapping to 1970.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nano_ovf.pcap");
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&[0x4d, 0x3c, 0xb2, 0xa1, 2, 0, 4, 0]).unwrap();
+        f.write_all(&[0; 16]).unwrap();
+        for sec in [1_700_000_000u32, u32::MAX] {
+            f.write_all(&sec.to_le_bytes()).unwrap();
+            f.write_all(&u32::MAX.to_le_bytes()).unwrap();
+            f.write_all(&1u32.to_le_bytes()).unwrap();
+            f.write_all(&1u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xaa]).unwrap();
+        }
+        drop(f);
+        let mut r = PcapReader::open(&path).unwrap();
+        let a = r.next_record().unwrap().unwrap();
+        assert_eq!((a.ts_sec, a.ts_usec), (1_700_000_004, 294_967));
+        let b = r.next_record().unwrap().unwrap();
+        assert_eq!((b.ts_sec, b.ts_usec), (u32::MAX, 294_967));
     }
 
     #[test]
