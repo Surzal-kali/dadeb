@@ -873,6 +873,20 @@ def reset_scheduler() -> None:
     _sched = None
 
 
+def release_units_for_job(job_id: str) -> int:
+    """Fleet bookkeeping for ANY tool lane: release the running unit(s)
+    bound to a finished job. No-op when the fleet store was never created —
+    a lane that never used fleet accounting must not have a done-poll
+    conjure fleet.db into existence. Best-effort (returns released count
+    or 0); never raises."""
+    try:
+        if not _store_dir().exists():
+            return 0
+        return get_scheduler().release_for_job(job_id)
+    except Exception:
+        return 0
+
+
 # --- Observability surface ------------------------------------------------------
 
 

@@ -176,10 +176,16 @@ def run_nmap(
 
     command = ["nmap", *opt_list, *_nmap_target_argv(target)]
 
+    # launch_job(target=...) routes through the fleet scheduler: a duplicate
+    # (same canonical unit already running) returns the running job's id to
+    # poll; a refusal returns the structured slot/auth-adjacent envelope.
+    # Neither launches a process. The raw target string is the unit identity
+    # (multi-target strings stay one string — an exact-repeat dedupe key).
     return launch_job(
         command,
         tool_name="nmap",
         timeout=float(__import__("os").getenv("NMAP_TIMEOUT", "1800")),
+        target=target,
         verdict_parser=_parse_nmap_verdict,
     )
 

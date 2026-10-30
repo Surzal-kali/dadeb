@@ -247,7 +247,15 @@ def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:
         by the indexed job_id key — no log-dir scan, works from any lane
         that can read the store).
     """
-    return get_store().poll(job_id)
+    result = get_store().poll(job_id)
+    # Poll-side fleet release (scale-doctrine rule: a finished job frees
+    # its slot at the FIRST done observation). Best-effort and idempotent
+    # — no-op when the job holds no fleet unit or the store doesn't exist.
+    if result.get("status") == "done" and result.get("job_id"):
+        from utils.fleet_scheduler import release_units_for_job
+
+        release_units_for_job(result["job_id"])
+    return result
 
 
 # --- lifecycle + introspection -------------------------------------------------
