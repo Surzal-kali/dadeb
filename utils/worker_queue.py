@@ -34,6 +34,22 @@ Design constraints, evidence-backed (2026-10-30):
   fails either is QUEUED, not refused — the lossy failure the queue
   exists to prevent is OOM-killing a STARTED unit (its work dies
   mid-decompile); waiting costs nothing but time.
+- **Claims are evidence-backed, not operator-guessed** (RSS feedback,
+  2026-10-30): every running unit's peak RSS is read from the kernel's
+  VmHWM high-water mark at each observation point (poll_unit +
+  advance_queue's release loop), and a finished unit's measured worst
+  footprint is recorded into a small evidence table (one row per
+  content key, MAX-of-runs, 30d TTL — deliberately outliving the
+  weekly ledger rows). Future admissions of the SAME content bytes use
+  ``max(budget, recorded_peak)`` as their claim: the operator's guess
+  that undershot reality is overruled by the measurement, stamped
+  additively on the envelope (``claim_mib``/``evidence_peak_mib`` — a
+  plain-budget envelope stays byte-identical). The ``-Xmx`` heap PIN
+  stays the operator's declared budget — evidence is accounting, not
+  JVM config; the envelope suggests raising it. An evidence-backed
+  claim above total-minus-floor refuses like any other permanent
+  impossibility (a box that cannot back these bytes' MEASURED appetite
+  will not admit them with a token claim and queue-wedge instead).
 - **Hard caps keep the queue honest** (2026-10-30 review): a budget
   above total RAM minus the floor is a PERMANENT impossibility — free
   RAM is bounded by total, so queueing it would wedge the FIFO forever;
@@ -71,6 +87,8 @@ Knobs (env, read per call):
   admit/keep running units, in MiB (default: 25% of total RAM, min 2048)
 - ``WORKER_QUEUE_MAX_Q``    max queued rows per tool (default 16; a queue
   that deep means the operator should rethink the pool size)
+- ``WORKER_QUEUE_EVIDENCE_TTL_HOURS``  how long recorded peak-RSS evidence
+  stays (default 720 = 30 days; the ledger row TTLs are separate)
 """
 
 from __future__ import annotations
@@ -99,6 +117,11 @@ _WORKER_QUEUE_MAX_DEFAULT = 16
 # Queued rows older than this are swept (a queue entry is a REQUEST, not a
 # commitment; the operator re-requests rather than inheriting a stale one).
 _QUEUE_TTL_HOURS_DEFAULT = 24
+
+# Recorded peak-RSS evidence lifetime — this outlives the ledger rows
+# (finished rows age out weekly; the evidence the queue is supposed to
+# LEARN from must not evaporate with them).
+_EVIDENCE_TTL_HOURS_DEFAULT = 720.0
 
 
 def _store_dir() -> Path:
@@ -183,6 +206,41 @@ def _queue_ttl_hours() -> float:
         return float(raw) if raw else _QUEUE_TTL_HOURS_DEFAULT
     except ValueError:
         return _QUEUE_TTL_HOURS_DEFAULT
+
+
+def _evidence_ttl_hours() -> float:
+    raw = os.getenv("WORKER_QUEUE_EVIDENCE_TTL_HOURS", "").strip()
+    try:
+        return float(raw) if raw else _EVIDENCE_TTL_HOURS_DEFAULT
+    except ValueError:
+        return _EVIDENCE_TTL_HOURS_DEFAULT
+
+
+def _rss_hwm_mib(pid: Any) -> float | None:
+    """Peak resident set (VmHWM) of ONE process, in MiB.
+
+    VmHWM is the kernel's own high-water mark — reading it once answers
+    "worst footprint so far" with zero sampling bias; we never have to
+    track growth ourselves. Only the MAIN pid of the unit's process tree
+    is measured (the JVM that owns the job — its threads share its RSS;
+    transient helpers are noise). Returns None when the pid exited
+    (its /proc entry is gone — this is why the evidence for a fast unit
+    comes from the samples taken WHILE it ran) or the read fails.
+    """
+    try:
+        pid_n = int(pid or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid_n <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid_n}/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024.0
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 def heap_pin_env(memory_budget: int, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -325,6 +383,27 @@ class WorkerQueue:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(worker_units)").fetchall()}
         if "launching_at" not in cols:
             c.execute("ALTER TABLE worker_units ADD COLUMN launching_at REAL")
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(worker_units)").fetchall()}
+        if "peak_rss_mib" not in cols:
+            c.execute("ALTER TABLE worker_units ADD COLUMN peak_rss_mib REAL")
+        # Peak-RSS evidence (the RSS-feedback ledger): one row per content
+        # key, MAX-of-runs — the WORST measured peak is what future
+        # admissions must defend against. Deliberately separate from the
+        # live ledger: finished rows age out weekly, evidence keeps
+        # informing for a month.
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_rss (
+                unit_key      TEXT PRIMARY KEY,
+                tool          TEXT NOT NULL,
+                peak_rss_mib  REAL NOT NULL,
+                memory_budget REAL NOT NULL,   -- the claim the finishing unit ran under
+                runs          INTEGER NOT NULL DEFAULT 1,
+                finished_at   REAL NOT NULL,
+                updated_at    REAL NOT NULL
+            )
+            """
+        )
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_wq_status_req "
             "ON worker_units(status, requested)"
@@ -407,6 +486,86 @@ class WorkerQueue:
 
     # -- admission ------------------------------------------------------------
 
+    def rss_evidence_for(self, unit_key: str) -> dict[str, Any] | None:
+        """Recorded peak-RSS evidence for a content key (None when this
+        content's bytes never ran here, or their evidence aged out)."""
+        r = self.conn.execute(
+            "SELECT unit_key, tool, peak_rss_mib, memory_budget, runs, "
+            "finished_at, updated_at FROM worker_rss WHERE unit_key = ?",
+            (unit_key,),
+        ).fetchone()
+        return dict(r) if r is not None else None
+
+    def rss_evidence(self) -> list[dict[str, Any]]:
+        """The whole evidence table, newest first (small — one row per
+        content key ever measured)."""
+        rows = self.conn.execute(
+            "SELECT unit_key, tool, peak_rss_mib, memory_budget, runs, "
+            "finished_at, updated_at FROM worker_rss ORDER BY updated_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _sample_unit_peak(self, unit_key: str, pid: Any) -> float | None:
+        """Raise a unit's `peak_rss_mib` to the kernel's current VmHWM.
+        Monotonic-by-construction (VmHWM never regresses), the guarded
+        UPDATE tolerates double samples. Autocommit single statement —
+        safe inside poll paths that hold no transaction. Returns the peak
+        seen (None when the pid is gone — the LAST stored sample stands)."""
+        peak = _rss_hwm_mib(pid)
+        if peak is None:
+            return None
+        self.conn.execute(
+            "UPDATE worker_units SET peak_rss_mib = ? WHERE unit_key = ? "
+            "AND (peak_rss_mib IS NULL OR peak_rss_mib < ?)",
+            (peak, unit_key, peak),
+        )
+        return peak
+
+    def _record_evidence(self, unit_key: str) -> None:
+        """Upsert one content key's evidence at finish: the unit's sampled
+        peak next to the claim it ran under. MAX-of-runs — future
+        admissions must defend against the worst measured peak of these
+        bytes, not the most recent one. A unit that finished without a
+        single live sample (too fast even for one reaper pass) has no
+        evidence to give — no row is written."""
+        row = self.conn.execute(
+            "SELECT tool, memory_budget, peak_rss_mib FROM worker_units "
+            "WHERE unit_key = ?",
+            (unit_key,),
+        ).fetchone()
+        if row is None or row["peak_rss_mib"] is None:
+            return
+        now = time.time()
+        self.conn.execute(
+            "INSERT INTO worker_rss (unit_key, tool, peak_rss_mib, "
+            "memory_budget, runs, finished_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 1, ?, ?) "
+            "ON CONFLICT(unit_key) DO UPDATE SET "
+            "peak_rss_mib = MAX(COALESCE(worker_rss.peak_rss_mib, 0), "
+            "excluded.peak_rss_mib), "
+            "memory_budget = excluded.memory_budget, "
+            "runs = worker_rss.runs + 1, updated_at = excluded.updated_at",
+            (unit_key, row["tool"], row["peak_rss_mib"],
+             row["memory_budget"], now, now),
+        )
+
+    def _effective_claim(
+        self, unit_key: str, memory_budget: int
+    ) -> tuple[int, float | None]:
+        """Evidence-backed admission claim: the operator's budget, raised
+        to the RECORDED peak of the same content bytes when evidence
+        exceeds it (the guess is overruled by the measurement). Returns
+        ``(claim_mib, evidence_peak_mib)``; evidence_peak is None when
+        no evidence exists. The -Xmx heap PIN deliberately stays the
+        operator's declared budget — evidence is ACCOUNTING, not a
+        config override (raising the pin is the operator's decision,
+        which the envelope suggests)."""
+        evidence = self.rss_evidence_for(unit_key)
+        peak = evidence["peak_rss_mib"] if evidence else None
+        if peak is not None and peak > memory_budget:
+            return int(round(peak)), float(peak)
+        return memory_budget, None
+
     def account(self) -> dict[str, Any]:
         """Pool accounting snapshot: slots, running claims, free RAM,
         floor, and the max budget the pool could EVER admit. Pure
@@ -480,12 +639,20 @@ class WorkerQueue:
         unit_key = content_key(tool, target)
         now = time.time()
         # Heap pin decided HERE (centrally): the row's env carries it, the
-        # launcher never overrides a budget at launch time.
+        # launcher never overrides a budget at launch time. The PIN stays
+        # the operator's declared budget even when evidence bumps the
+        # claim (below) — pin is JVM config, claim is accounting.
         launch_env = heap_pin_env(memory_budget, env)
-
+        # Evidence-backed claim: a past run of these exact bytes sets the
+        # floor of what admission must be able to back (RSS feedback —
+        # the operator's guess is overruled by the measurement, not
+        # silently: the envelope stamps both values).
         with self.db_lock:
             self._immediate()
             try:
+                claim_mib, evidence_peak = self._effective_claim(
+                    unit_key, memory_budget
+                )
                 existing = self.conn.execute(
                     "SELECT * FROM worker_units WHERE unit_key = ?", (unit_key,)
                 ).fetchone()
@@ -496,27 +663,59 @@ class WorkerQueue:
                     out = self._existing_envelope(existing)
                     self._commit()
                     return out
+                # A finished identical unit still owns its key: same bytes
+                # already ran to completion, so re-running is waste — point
+                # at the finished run (its results stay retrievable by
+                # job_id). Returning the row (not falling through) also
+                # keeps the INSERT from colliding on the PK, which used to
+                # raise IntegrityError here (found live 2026-10-30).
+                if existing is not None and existing["status"] == "finished":
+                    out = self._existing_envelope(existing)
+                    self._commit()
+                    return out
+                # A cancelled row retracts the prior decision — a
+                # re-request is a fresh one. Drop the terminal row so the
+                # fresh INSERT can reuse the key (release_unit's fresh-row
+                # promise).
+                if existing is not None and existing["status"] == "cancelled":
+                    self.conn.execute(
+                        "DELETE FROM worker_units WHERE unit_key = ? AND "
+                        "status = 'cancelled'",
+                        (unit_key,),
+                    )
 
                 # --- admission arithmetic ---
                 acct = self.account()
                 # --- hard caps: refuse what queueing can never fix ---
                 cap = acct["budget_capacity_mib"]
-                if cap is not None and memory_budget > cap:
+                if cap is not None and claim_mib > cap:
                     self._commit()
+                    msg = (
+                        f"claim {claim_mib} MiB exceeds this box's admission "
+                        f"capacity ({acct['total_ram_mib']} MiB total - "
+                        f"{acct['ram_floor_mib']} MiB pool floor = {cap} MiB)"
+                    )
+                    if evidence_peak is not None:
+                        msg += (
+                            f" — the requested budget was {memory_budget} MiB "
+                            f"but a past run of these bytes peaked at "
+                            f"{evidence_peak:.0f} MiB, so the claim tracks "
+                            "the measurement"
+                        )
+                    msg += (
+                        ". Free RAM can never exceed total, so no amount of "
+                        "queueing can admit it — lower the "
+                        "budget or WORKER_QUEUE_RAM_FLOOR."
+                    )
                     return {
                         "decision": "refused",
                         "reason": "budget_impossible",
                         "unit_key": unit_key,
                         "memory_budget": memory_budget,
+                        "claim_mib": claim_mib,
+                        "evidence_peak_mib": evidence_peak,
                         "budget_capacity_mib": cap,
-                        "message": (
-                            f"memory_budget {memory_budget} MiB exceeds this "
-                            f"box's admission capacity ({acct['total_ram_mib']} "
-                            f"MiB total - {acct['ram_floor_mib']} MiB pool floor "
-                            f"= {cap} MiB). Free RAM can never exceed total, so "
-                            "no amount of queueing can admit it — lower the "
-                            "budget or WORKER_QUEUE_RAM_FLOOR."
-                        ),
+                        "message": msg,
                     }
                 if acct["free_ram_mib"] <= 0:
                     self._commit()
@@ -543,8 +742,8 @@ class WorkerQueue:
                 usable = max(0, acct["free_ram_mib"] - acct["ram_floor_mib"])
                 admissible = (
                     n_running < acct["slots"]
-                    and claims + memory_budget <= usable
-                    and acct["free_ram_mib"] - acct["ram_floor_mib"] >= memory_budget
+                    and claims + claim_mib <= usable
+                    and acct["free_ram_mib"] - acct["ram_floor_mib"] >= claim_mib
                 )
 
                 queued_n = self.conn.execute(
@@ -579,7 +778,7 @@ class WorkerQueue:
                         " launching_at, note) "
                         "VALUES (?, ?, ?, ?, 'launching', ?, ?, ?, ?, ?, ?, ?)",
                         (
-                            unit_key, tool, target, agent_id, memory_budget,
+                            unit_key, tool, target, agent_id, claim_mib,
                             json.dumps(command), json.dumps(launch_env),
                             now, now, now, note or "",
                         ),
@@ -593,14 +792,14 @@ class WorkerQueue:
                         " memory_budget, command, env, queued_at, requested, note) "
                         "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
                         (
-                            unit_key, tool, target, agent_id, memory_budget,
+                            unit_key, tool, target, agent_id, claim_mib,
                             json.dumps(command), json.dumps(launch_env),
                             now, now, note or "",
                         ),
                     )
                     position = self._queue_position(now, unit_key)
                     self._commit()
-                    return {
+                    out = {
                         "decision": "queued",
                         "unit_key": unit_key,
                         "position": position,
@@ -611,6 +810,8 @@ class WorkerQueue:
                             "pass). Heap will be pinned via JAVA_OPTS when launched."
                         ),
                     }
+                    self._stamp_claim(out, claim_mib, memory_budget, evidence_peak)
+                    return out
             except BaseException:
                 try:
                     self._rollback()
@@ -648,7 +849,28 @@ class WorkerQueue:
                 "poll_job."
             ),
         }
+        self._stamp_claim(out, claim_mib, memory_budget, evidence_peak)
         return out
+
+    def _stamp_claim(
+        self,
+        out: dict[str, Any],
+        claim_mib: int,
+        memory_budget: int,
+        evidence_peak: float | None,
+    ) -> None:
+        """Additive envelope stamps for an evidence-backed claim — added
+        only when the recorded peak actually overruled the guess (a
+        plain-budget envelope stays byte-identical to pre-evidence shape)."""
+        if evidence_peak is None or claim_mib <= memory_budget:
+            return
+        out["claim_mib"] = claim_mib
+        out["evidence_peak_mib"] = evidence_peak
+        out["message"] += (
+            f" (claim raised from {memory_budget} to {claim_mib} MiB — a past "
+            f"run of this content peaked at {evidence_peak:.0f} MiB; raise "
+            "memory_budget if the heap pin should follow)"
+        )
 
     def _queue_position(self, requested: float, unit_key: str) -> int:
         """1-based position of a queued row under the head's deterministic
@@ -667,6 +889,22 @@ class WorkerQueue:
         its lifecycle (queued|launching|running) so callers label the hit
         honestly instead of mistaking someone else's launch for a fresh
         one."""
+        if row["status"] == "finished":
+            job_id = row["job_id"] or ""
+            return {
+                "decision": "duplicate",
+                "state": "finished",
+                "unit_key": row["unit_key"],
+                "job_id": job_id,
+                "memory_budget": row["memory_budget"],
+                "agent_id": row["agent_id"],
+                "message": (
+                    "identical unit already ran to completion "
+                    f"(job {job_id}, by {row['agent_id']}) — its results stay "
+                    "retrievable by job_id; identical input bytes need not "
+                    "run again"
+                ),
+            }
         if row["status"] == "queued":
             position = self._queue_position(row["requested"], row["unit_key"])
             return {
@@ -773,11 +1011,17 @@ class WorkerQueue:
         if row["status"] == "finished":
             out.update({
                 "status": "finished",
+                "peak_rss_mib": row["peak_rss_mib"],
                 "message": (
                     "unit ran to completion and its slot was freed — the "
                     "workspace artifacts remain; re-request to re-run"
                 ),
             })
+            if row["peak_rss_mib"] is not None:
+                out["message"] += (
+                    f" Measured peak RSS: {row['peak_rss_mib']:.0f} MiB "
+                    f"(recorded as admission evidence for this content key)."
+                )
             return out
         if row["status"] == "launching" and row["job_id"] is None:
             out.update({
@@ -789,6 +1033,14 @@ class WorkerQueue:
         from utils.job_store import get_store
 
         poll = get_store().poll(row["job_id"], tail=tail)
+        # Sample the unit's peak WHILE it runs — the kernel's VmHWM, read
+        # at this observation (and at every reaper pass), so a finished
+        # unit carries its measured worst footprint on the row.
+        peak_observed = self._sample_unit_peak(row["unit_key"], poll.get("pid"))
+        if peak_observed is not None:
+            row = self.conn.execute(
+                "SELECT * FROM worker_units WHERE unit_key = ?", (unit_key,)
+            ).fetchone()
         out.update({
             "status": poll.get("status", "unknown"),
             "job_id": row["job_id"],
@@ -796,6 +1048,7 @@ class WorkerQueue:
             "recent_lines": poll.get("recent_lines"),
             "exit_code": poll.get("exit_code"),
             "elapsed": poll.get("elapsed"),
+            "peak_rss_mib": row["peak_rss_mib"],
         })
         if poll.get("status") == "done":
             out["message"] = (
@@ -941,18 +1194,29 @@ class WorkerQueue:
 
             jobs = get_store()
             rows = self.conn.execute(
-                "SELECT unit_key, job_id FROM worker_units "
+                "SELECT unit_key, job_id, tool FROM worker_units "
                 "WHERE status = 'launched'"
             ).fetchall()
             for r in rows:
-                state = jobs.poll(r["job_id"]).get("status")
-                if state == "done":
+                poll = jobs.poll(r["job_id"])
+                if poll.get("status") == "done":
+                    # Sample one last time (harmless when the pid is
+                    # already gone — the last live sample stands), then
+                    # record the unit's measured peak as evidence for
+                    # future admissions of the same content bytes.
+                    self._sample_unit_peak(r["unit_key"], poll.get("pid"))
+                    self._record_evidence(r["unit_key"])
                     cur = self.conn.execute(
                         "UPDATE worker_units SET status = 'finished' "
                         "WHERE unit_key = ? AND status = 'launched'",
                         (r["unit_key"],),
                     )
                     out["freed"] += cur.rowcount
+                else:
+                    # Running: raise the row's peak to the kernel's
+                    # current VmHWM before the process exits and takes
+                    # its /proc entry with it.
+                    self._sample_unit_peak(r["unit_key"], poll.get("pid"))
         except Exception:
             pass  # job store down: promotions can still happen if slots free
 
@@ -975,6 +1239,14 @@ class WorkerQueue:
                 "AND queued_at < ?",
                 (cutoff - 7 * 3600,),
             )
+            # Peak-RSS evidence ages out too (30d default) — long enough
+            # that finished rows always age out FIRST and the evidence
+            # outlives them; old measurements stop constraining new runs.
+            cur = self.conn.execute(
+                "DELETE FROM worker_rss WHERE updated_at < ?",
+                (time.time() - _evidence_ttl_hours() * 3600,),
+            )
+            out["evidence_swept"] = cur.rowcount
         except Exception:
             pass
 
@@ -989,12 +1261,17 @@ class WorkerQueue:
                 ).fetchone()
                 if head is None:
                     break
-                # A head whose budget exceeds the box's admission capacity
+                # A head whose claim exceeds the box's admission capacity
                 # (total - floor) can NEVER fit — strict FIFO would wedge
                 # the whole queue behind it forever. Cancel it and keep
                 # walking (transient shortfalls below still stop the FIFO).
+                # The claim is evidence-backed (RSS feedback): a head whose
+                # recorded peak outruns capacity is cancelled the same way.
                 cap = acct["budget_capacity_mib"]
-                if cap is not None and head["memory_budget"] > cap:
+                head_effective, _evidence_peak = self._effective_claim(
+                    head["unit_key"], head["memory_budget"]
+                )
+                if cap is not None and head_effective > cap:
                     cur = self.conn.execute(
                         "UPDATE worker_units SET status = 'cancelled' "
                         "WHERE unit_key = ? AND status = 'queued'",
@@ -1015,9 +1292,9 @@ class WorkerQueue:
                 if len(running) >= acct["slots"]:
                     out["blocked"] += 1
                     break  # FIFO: head blocks, so no further promotion
-                if claims + head["memory_budget"] > usable:
+                if claims + head_effective > usable:
                     out["blocked"] += 1
-                    break  # head's budget doesn't fit — strict FIFO stop
+                    break  # head's claim doesn't fit — strict FIFO stop
                 # Claim (conditional): exactly one lane wins this update.
                 # launching_at stamps the CLAIM clock — sweep_stale reads
                 # it, never the queue-entry time, or a long-queued unit
@@ -1092,8 +1369,8 @@ class WorkerQueue:
         acct = self.account()
         rows = self.conn.execute(
             "SELECT unit_key, tool, target, agent_id, status, memory_budget, "
-            "job_id, requested, queued_at, launching_at FROM worker_units "
-            "ORDER BY queued_at DESC LIMIT 100"
+            "peak_rss_mib, job_id, requested, queued_at, launching_at "
+            "FROM worker_units ORDER BY queued_at DESC LIMIT 100"
         ).fetchall()
         return {
             "slots": acct["slots"],

@@ -659,3 +659,195 @@ def test_worker_queue_status_lens(env):
     assert out["slots"] >= 1
     assert out["free_ram_mib"] >= 0
     assert len(out["units"]) == 1
+
+# --- RSS feedback: record the measured peak, admit from the evidence ----
+
+
+def _seed_evidence(q, unit_key, tool="jadx", peak=512.0, budget=64.0):
+    """Pre-record a run's peak for a content key (as advance_queue would
+    at finish) without having to launch anything."""
+    now = time.time()
+    q.conn.execute(
+        "INSERT INTO worker_rss (unit_key, tool, peak_rss_mib, memory_budget, "
+        "runs, finished_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (unit_key, tool, peak, budget, now, now),
+    )
+
+
+def test_rss_evidence_recorded_on_finish(env, monkeypatch):
+    """A finished unit's measured worst footprint (kernel VmHWM read while
+    it ran) lands on the row and in the evidence table, next to the claim
+    it ran under. Stub sleeps long enough that the reaper's advance pass
+    always samples at least once."""
+    monkeypatch.setenv("STUB_SLEEP", "1.0")
+    q = get_worker_queue()
+    r = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws", env["jar"]],
+    )
+    assert r["decision"] == "launched"
+    _drain(q, r["job_id"])
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        ev = q.rss_evidence()
+        if ev:
+            break
+        q.advance_queue()
+        time.sleep(0.1)
+    ev = q.rss_evidence()
+    assert len(ev) == 1
+    assert ev[0]["unit_key"] == r["unit_key"]
+    assert ev[0]["tool"] == "jadx"
+    assert ev[0]["memory_budget"] == 64
+    assert 0 < ev[0]["peak_rss_mib"] < 500  # bash VmHWM: single-digit MiB
+    # The ledger row carries the same peak, and poll_unit surfaces it.
+    units = q.host_pressure()["units"]
+    assert units[0]["peak_rss_mib"] > 0
+    st = q.poll_unit(r["unit_key"])
+    assert st["status"] == "finished"
+    assert st.get("peak_rss_mib") > 0
+    # The pid exposure that makes sampling possible is in the poll return.
+    from utils.job_store import get_store
+
+    assert get_store().poll(r["job_id"]).get("pid")
+
+
+def test_rss_evidence_informs_claim_envelope(env, monkeypatch):
+    """A future request of the SAME bytes carries an additively-stamped,
+    evidence-backed claim (max of budget and recorded peak); a fresh
+    content key with no evidence keeps the plain-budget envelope shape."""
+    q = get_worker_queue()
+    jar2 = env["tmp"] / "two.jar"
+    _make_jar(jar2, tag="two")
+    _seed_evidence(q, content_key("jadx", jar2), peak=512.0, budget=64.0)
+    r = q.request_unit(
+        "jadx", str(jar2), agent_id="a1", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws2", str(jar2)],
+    )
+    # Unconstrained RAM on any dev box: launched. (If the box is squeezed
+    # the decision is queued — either way the claim stamp must be there.)
+    assert r["decision"] in ("launched", "queued")
+    assert r["claim_mib"] == 512
+    assert r["evidence_peak_mib"] == 512.0
+    assert "peaked at 512 MiB" in r["message"]
+    fresh = env["tmp"] / "evidence_free.jar"
+    _make_jar(fresh, tag="clean")
+    r2 = q.request_unit(
+        "jadx", str(fresh), agent_id="a2", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws3", str(fresh)],
+    )
+    assert r2["decision"] in ("launched", "queued")
+    assert "claim_mib" not in r2  # no evidence → no additive stamps
+    assert "evidence_peak_mib" not in r2
+
+
+def test_rss_evidence_changes_queue_decision(env, monkeypatch):
+    """The claim is the admission currency: with free RAM staged so a
+    plain 64 MiB budget fits but the measured 512 MiB peak does not, the
+    evidence-backed request QUEUES where the guess-backed one would
+    have launched straight into the same over-commitment."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 448)
+    # Floor is 64 (fixture) → usable 384: budget 64 fits, claim 512 doesn't.
+    q = get_worker_queue()
+    jar2 = env["tmp"] / "three.jar"
+    _make_jar(jar2, tag="three")
+    _seed_evidence(q, content_key("jadx", jar2), peak=512.0, budget=64.0)
+    r = q.request_unit(
+        "jadx", str(jar2), agent_id="a1", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws4", str(jar2)],
+    )
+    assert r["decision"] == "queued"
+    assert r["claim_mib"] == 512
+    fresh = env["tmp"] / "four.jar"
+    _make_jar(fresh, tag="four")
+    r2 = q.request_unit(
+        "jadx", str(fresh), agent_id="a2", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws5", str(fresh)],
+    )
+    assert r2["decision"] == "launched"  # same arithmetic, no evidence
+
+
+def test_evidence_bump_refuses_permanent_impossibility(env, monkeypatch):
+    """An evidence-backed claim above total-minus-floor is refused
+    (budget_impossible) with the measurement named — a box that cannot
+    back the bytes' MEASURED appetite will not admit them with a token
+    claim."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 2048)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 1024)
+    q = get_worker_queue()
+    _seed_evidence(q, content_key("jadx", env["jar"]), peak=8192.0)
+    r = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws6", env["jar"]],
+    )
+    assert r["decision"] == "refused"
+    assert r["reason"] == "budget_impossible"
+    assert r["claim_mib"] == 8192
+    assert r["evidence_peak_mib"] == 8192.0
+    assert "peaked at 8192 MiB" in r["message"]
+
+
+def test_rss_evidence_ttl_sweep(env, monkeypatch):
+    """Evidence ages out (WORKER_QUEUE_EVIDENCE_TTL_HOURS) — old
+    measurements stop constraining new runs."""
+    monkeypatch.setenv("WORKER_QUEUE_EVIDENCE_TTL_HOURS", "0.001")
+    q = get_worker_queue()
+    _seed_evidence(q, content_key("jadx", env["jar"]))
+    q.conn.execute(
+        "UPDATE worker_rss SET updated_at = ? WHERE unit_key = ?",
+        (time.time() - 100, content_key("jadx", env["jar"])),
+    )
+    adv = q.advance_queue()
+    assert adv.get("evidence_swept", 0) >= 1
+    assert q.rss_evidence() == []
+
+
+# --- terminal-row re-requests (2026-10-30 PK-conflict fix) --------------------------
+
+
+def test_rerun_of_finished_unit_points_at_run(env):
+    """Re-requesting a COMPLETED unit's identical bytes returns a
+    duplicate pointing at the finished run (state=finished + job_id) —
+    never a second launch, and never the IntegrityError the old fall-
+    through-to-INSERT produced (PK conflict on worker_units.unit_key)."""
+    q = get_worker_queue()
+    r = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws-fin", env["jar"]],
+    )
+    assert r["decision"] == "launched"
+    _drain(q, r["job_id"])
+    q.advance_queue()  # release the done job → status='finished'
+    again = q.request_unit(
+        "jadx", env["jar"], agent_id="a2", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws-fin2", env["jar"]],
+    )
+    assert again["decision"] == "duplicate"
+    assert again["state"] == "finished"
+    assert again["job_id"] == r["job_id"]
+    assert "retrievable by job_id" in again["message"]
+
+
+def test_rerun_after_cancel_launches_fresh_row(env, monkeypatch):
+    """A cancelled unit's re-request is a FRESH decision: the terminal row
+    is dropped, the new request launches (release_unit's fresh-row
+    promise — previously an IntegrityError)."""
+    monkeypatch.setenv("STUB_SLEEP", "4.0")
+    q = get_worker_queue()
+    r = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws-c", env["jar"]],
+    )
+    assert r["decision"] == "launched"
+    q.release_unit(r["unit_key"], agent_id="a1")
+    # Stop the cancelled run's own job so no 4s orphan outlives the test.
+    from utils.job_store import get_store
+
+    get_store().stop(r["job_id"], force=True)
+    monkeypatch.setenv("STUB_SLEEP", "0.1")
+    again = q.request_unit(
+        "jadx", env["jar"], agent_id="a2", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws-c2", env["jar"]],
+    )
+    assert again["decision"] == "launched", again
+    _drain(q, again["job_id"])

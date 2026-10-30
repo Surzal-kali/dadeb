@@ -402,9 +402,23 @@ def test_launch_insert_failure_rolls_down_spawned(store, tmp_path, monkeypatch):
     # Rolled down: no row; the spawned child must be gone (killed + reaped).
     time.sleep(0.2)
     assert [j for j in s.list_jobs(agent_id="roll-a") if j["tool"] == "roll"] == []
-    for proc in list(s._live_proc.values()):
-        assert proc.poll() is not None  # reaped — no orphan kept running
+    # No UNREAPED child anywhere in this process's registry (other tests'
+    # intentionally-live sleepers are fine — a zombie never is).
+    from utils.job_store import _LIVE_CHILD_PROCS
 
+    for proc in list(_LIVE_CHILD_PROCS.values()):
+        assert proc.poll() is not None or _pid_stat_is_zombie(proc.pid) is False
+
+
+def _pid_stat_is_zombie(pid: int) -> bool | None:
+    """True when pid's /proc entry shows state Z (unreaped zombie); None
+    when the process is gone entirely (already reaped and exited)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return None
+    return stat.rsplit(")", 1)[1].strip()[0] == "Z"
 
 
 # --- brain-session fallback band (2026-10-29) ----------------------------------------
@@ -449,3 +463,39 @@ def test_brain_session_fallback_token_stable_per_instance(tmp_path, monkeypatch)
     b = bad.resolve("y-agent")
     assert bad._fallback_token == tok
     assert b == a + 1  # same band, same instance → contiguous slots
+
+
+# --- cross-instance poll observation (2026-10-30 flake) ----------------------------
+
+
+def test_second_instance_poll_observes_exit(store, tmp_path):
+    """Two JobStore instances over the SAME directory: a poll through the
+    second must still observe the child the FIRST launched.
+
+    The env-keyed singleton may legitimately rebuild at fixture boundaries
+    (its env reads race teardown lanes), leaving two live instances in one
+    process; but the launched child is THIS process's child no matter which
+    instance did the Popen. The old per-instance ``_live_proc`` register
+    made the second instance's poll take the cross-lane pid path — which
+    reports the unreaped zombie ALIVE forever, so drains stalled and tests
+    flaked (found live in suite combos 2026-10-30).
+    """
+    a = store  # the fixture's instance launched nothing yet; use it fresh
+    j = a.launch(_quick_cmd(tmp_path, 0.2), tool_name="xi", agent_id="xi-a", timeout=60)
+    b = JobStore(jobs_dir=store.jobs_dir)  # a SECOND instance, same dir
+    deadline = time.time() + 5
+    poll = {}
+    while time.time() < deadline:
+        poll = b.poll(j["job_id"])
+        if poll["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert poll["status"] == "done", (
+        "poll through an instance that never saw the Popen hung on a"
+        " zombie — live-proc registry must be process-scoped"
+    )
+    # The reaping must have happened (no zombie left behind).
+    import subprocess
+    dead = subprocess.run(["ps", "-o", "stat=", "-p", str(poll["pid"])],
+                          capture_output=True, text=True)
+    assert not dead.stdout.strip().startswith("Z"), "child left unreaped"

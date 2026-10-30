@@ -614,6 +614,29 @@ with zero coordination. The queue exists because that arithmetic OOMs boxes.
   to half the cores clamped 1..8 (the pool bounds processes, -j tunes
   threads within one).
 
+**RSS ledger feedback (2026-10-30):** every finished unit's measured
+kernel VmHWM peak (`utils/worker_queue.py:_rss_hwm_mib`, single /proc read
+while the unit runs — sampled live by `poll_unit` and by the release loop's
+last-chance sample before the process takes its /proc entry away) is
+recorded in the `worker_rss` evidence table (MAX-of-runs upsert, TTL
+`WORKER_QUEUE_EVIDENCE_TTL_HOURS` default 720h). Future `request_unit` calls
+for the same content key claim `max(budget, recorded_peak)` via
+`_effective_claim`, and the envelope stamps the overrulement additively
+(`claim_mib` + `evidence_peak_mib` only when the measurement actually
+overruled the guess — a plain-budget envelope stays shape-identical to
+pre-evidence). Envelope budget caps (`budget_impossible`) now track the
+evidence-backed claim, so the honest message carries the measured
+justification. Same-day queue fixes found by the RSS suite-run flake
+debug: the job store's live-proc registry is PROCESS-SCOPED
+(`_LIVE_CHILD_PROCS`, `utils/job_store.py`) — the env-keyed singleton
+rebuilds at fixture boundaries, and a poll through the second instance
+used to miss the launcher's Popen and sit on the cross-lane pid path,
+which reports our own unreaped zombie alive forever (drains stalled);
+and terminal-row re-requests are honest (`worker_units.unit_key` PK): a
+`finished` content key returns a finished-duplicate pointing at the
+completed run's `job_id` (same bytes need not run again), a `cancelled`
+row is deleted so `release_unit`'s fresh-row promise finally holds.
+
 ### Memory Service (`memories.py`)
 
 SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections

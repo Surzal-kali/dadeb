@@ -87,6 +87,22 @@ _REAPER_WAKE = threading.Event()
 _ACTIVE_STORES: "weakref.WeakSet[JobStore]" = weakref.WeakSet()
 _ACTIVE_LOCK = threading.Lock()
 
+# Live children OF THIS PROCESS, process-scoped — deliberately NOT
+# per-instance. The env-keyed singleton may legitimately rebuild mid-flight
+# (its env reads race fixture teardown lanes), and every JobStore instance
+# created for a directory coexists with every other while the reaper holds
+# them; but a launched child is this PROCESS's child no matter which
+# instance did the Popen. A per-instance live-proc register meant the
+# observation path (_observe) could poll through an instance that never saw
+# the Popen and fall to the cross-lane pid probe — which reports the
+# unreaped zombie ALIVE forever, stalling every drain that touches that
+# job (found live 2026-10-30: two instances in one fixture window, launch
+# on one, polls on the other, exit never observed). One registry + one
+# lock; any instance's poll can reap any child this process launched.
+_LIVE_CHILD_PROCS: dict[str, subprocess.Popen] = {}
+_LIVE_LOG_FHS: dict[str, Any] = {}
+_LIVE_CHILDREN_LOCK = threading.Lock()
+
 
 def _jobs_root() -> Path:
     override = os.getenv("BG_JOB_STORE_DIR", "").strip()
@@ -225,15 +241,12 @@ class JobStore:
         self._bootstrap.row_factory = sqlite3.Row
         self._bootstrap.execute("PRAGMA busy_timeout=30000")
         self._bootstrap.execute("PRAGMA journal_mode=WAL")
-        # Live handles for THIS process's jobs: the Popen (for a watcher
-        # that must wait() on the real child — hash_crack's hashfile
-        # lifecycle) and the open log fh (closed when the job finishes).
-        # Cross-process/restarted polls get the row + pid instead — that is
-        # enough to distinguish running from done (the pre-v2 design's
-        # goal, now with an indexed lookup).
-        self._live_proc: dict[str, subprocess.Popen] = {}
-        self._live_log_fh: dict[str, Any] = {}
-        self._live_lock = threading.Lock()
+        # Live-handle note: the Popen + log fh are process-scoped module
+        # registries (_LIVE_CHILD_PROCS / _LIVE_LOG_FHS, module level), NOT
+        # per-instance — see their comment there. This instance holds only
+        # row-facing state; observation and handle-closing work identically
+        # from any instance (the env-keyed singleton rebuilds, so instance
+        # identity is not a reliable handle owner).
         # Worker-queue instance bound to THIS store (Phase 3). Resolved lazily
         # on the first launch that lands in this store, and cached for the
         # store's lifetime: the reaper thread later reads it without ANY env
@@ -387,9 +400,9 @@ class JobStore:
         # failure the launch is rolled DOWN: kill the spawned tree first
         # (it must not outlive a rejected launch), close the log, then
         # drop the handles.
-        with self._live_lock:
-            self._live_proc[job_id] = proc
-            self._live_log_fh[job_id] = log_fh
+        with _LIVE_CHILDREN_LOCK:
+            _LIVE_CHILD_PROCS[job_id] = proc
+            _LIVE_LOG_FHS[job_id] = log_fh
         with self.db_lock:
             self._immediate()
             try:
@@ -421,9 +434,9 @@ class JobStore:
                     log_fh.close()
                 except Exception:
                     pass
-                with self._live_lock:
-                    self._live_proc.pop(job_id, None)
-                    self._live_log_fh.pop(job_id, None)
+                with _LIVE_CHILDREN_LOCK:
+                    _LIVE_CHILD_PROCS.pop(job_id, None)
+                    _LIVE_LOG_FHS.pop(job_id, None)
                 # Do NOT write the row: an envelope with a pid but no row
                 # would hand the model a job_id every poll answers with
                 # "unknown". Fail honestly instead.
@@ -472,8 +485,8 @@ class JobStore:
            its lane's process reaps or its row hits TTL).
         """
         job_id = row["job_id"]
-        with self._live_lock:
-            proc = self._live_proc.get(job_id)
+        with _LIVE_CHILDREN_LOCK:
+            proc = _LIVE_CHILD_PROCS.get(job_id)
         if proc is not None:
             rc = proc.poll()  # reaps the zombie in-process
             fresh = self._row(job_id) or row
@@ -513,9 +526,9 @@ class JobStore:
         self._close_live_handles(job_id)
 
     def _close_live_handles(self, job_id: str) -> None:
-        with self._live_lock:
-            fh = self._live_log_fh.pop(job_id, None)
-            self._live_proc.pop(job_id, None)
+        with _LIVE_CHILDREN_LOCK:
+            fh = _LIVE_LOG_FHS.pop(job_id, None)
+            _LIVE_CHILD_PROCS.pop(job_id, None)
         if fh is not None:
             try:
                 fh.close()
@@ -580,6 +593,10 @@ class JobStore:
             "recent_lines": recent,
             "log_file": row["log_file"],
             "tool": row["tool"],
+            # Live pid while running (row-stamped for cross-lane polls) —
+            # /proc readers (worker-queue VmHWM sampling, watchers) need it
+            # without reaching into the raw row.
+            "pid": row["pid"],
         }
 
         parser = self._get_parser(row["tool"])
@@ -628,8 +645,8 @@ class JobStore:
         if row is None:
             return None
         out = dict(row)
-        with self._live_lock:
-            proc = self._live_proc.get(job_id)
+        with _LIVE_CHILDREN_LOCK:
+            proc = _LIVE_CHILD_PROCS.get(job_id)
         if proc is not None:
             out["proc"] = proc
         return out
