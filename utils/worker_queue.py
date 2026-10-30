@@ -34,6 +34,20 @@ Design constraints, evidence-backed (2026-10-30):
   fails either is QUEUED, not refused — the lossy failure the queue
   exists to prevent is OOM-killing a STARTED unit (its work dies
   mid-decompile); waiting costs nothing but time.
+- **Hard caps keep the queue honest** (2026-10-30 review): a budget
+  above total RAM minus the floor is a PERMANENT impossibility — free
+  RAM is bounded by total, so queueing it would wedge the FIFO forever;
+  such requests are refused (``budget_impossible``) and advance_queue
+  cancels any legacy row like that instead of blocking behind it. When
+  free RAM is UNMEASURABLE (``/proc/meminfo`` unreadable) admission
+  FAILS CLOSED (``memory_unmeasurable``) — an unverifiable claim is a
+  refusal, not a maybe. Transient shortfalls (slots, free-RAM-now)
+  still queue.
+- **Two clocks** (2026-10-30 review): ``requested`` is the queue-ENTRY
+  time and is never rewritten on promotion (fairness order); the
+  bind-grace sweep reads the ``launching_at`` claim stamp instead —
+  measured from entry, a long-queued unit would be killed at the
+  instant it finally launches.
 - **Launch is inline and atomic** (the fleet-scheduler roll-down
   precedent): admission claims the row (\'launching\'), launches through
   the job store OUTSIDE the DB transaction, then binds — an INSERT-fail
@@ -298,7 +312,8 @@ class WorkerQueue:
                 env            TEXT,                   -- JSON env dict (JAVA_OPTS heap pin)
                 job_id         TEXT,
                 queued_at      REAL NOT NULL,
-                requested      REAL,                   -- first request ts (fairness order)
+                requested      REAL,                   -- first request ts (fairness order; never rewritten)
+                launching_at   REAL,                   -- queued->launching claim ts (the bind-grace clock)
                 launched_at    REAL,
                 log_file       TEXT,
                 note           TEXT,
@@ -306,6 +321,10 @@ class WorkerQueue:
             )
             """
         )
+        # Legacy-store migration: launching_at postdates the first schema.
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(worker_units)").fetchall()}
+        if "launching_at" not in cols:
+            c.execute("ALTER TABLE worker_units ADD COLUMN launching_at REAL")
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_wq_status_req "
             "ON worker_units(status, requested)"
@@ -390,19 +409,26 @@ class WorkerQueue:
 
     def account(self) -> dict[str, Any]:
         """Pool accounting snapshot: slots, running claims, free RAM,
-        floor. Pure observation — admission math lives here so callers
-        and tests see ONE formula."""
+        floor, and the max budget the pool could EVER admit. Pure
+        observation — admission math lives here so callers and tests see
+        ONE formula."""
         rows = self.conn.execute(
             "SELECT COALESCE(SUM(memory_budget), 0) AS claimed "
             "FROM worker_units WHERE status IN ('launching','launched')"
         ).fetchone()
+        total = _total_ram_mib()
+        floor = _ram_floor_mib()
         return {
             "tool": None,
             "slots": _slots(),
             "running_claims_mib": rows["claimed"] or 0,
-            "ram_floor_mib": _ram_floor_mib(),
+            "ram_floor_mib": floor,
             "free_ram_mib": free_ram_mib(),
-            "total_ram_mib": _total_ram_mib(),
+            "total_ram_mib": total,
+            # Total minus floor: even an idle box can never back more than
+            # this (free RAM is bounded by total). None when total RAM
+            # itself is unmeasurable — then only the live free check runs.
+            "budget_capacity_mib": (total - floor) if total > 0 else None,
         }
 
     def request_unit(
@@ -416,29 +442,36 @@ class WorkerQueue:
         env: dict[str, str] | None = None,
         note: str = "",
     ) -> dict[str, Any]:
-        """Ask to START one Arch-D unit. Decision envelope:
+        """Ask to START one Arch-D unit. Decision envelope — one shape per
+        decision, no relabelling downstream:
 
-        - ``{"decision": "running", ...}`` — dedupe hit on an ALREADY
-          RUNNING unit: poll its job_id (never launch a twin).
-        - ``{"decision": "queued", "position": N}`` — dedupe hit on a
-          QUEUED unit, or this request was queued for resources. Poll
-          the queue (``poll_unit``) — the reaper launch-promotes it when
-          the head fits.
-        - ``{"decision": "running"}`` again with a fresh job_id — no, one
-          decision per shape: ``{"decision": "launched"}`` — admitted,
-          the queue LAUNCHED it inline (claim → job-store launch →
-          bind, atomic here); ``job_id`` is in the envelope.
-        - ``{"decision": "refused", "reason": "queue_full"}`` — the queue
-          itself is deep-capped; the envelope says what to do.
+        - ``{"decision": "duplicate", "state": "running"|"launching"|
+          "queued", ...}`` — dedupe hit: a LIVE twin owns the content
+          key. Its ref is in the envelope (``job_id`` when running/
+          launching, ``position`` when queued) — poll it, never launch
+          a new unit for the same bytes.
+        - ``{"decision": "queued", "position": N}`` — THIS request waits
+          for resources; the queue launch-promotes the head when it
+          fits. Poll via ``poll_unit``.
+        - ``{"decision": "launched", "job_id": ...}`` — admitted; the
+          queue launched it inline (claim → job-store launch → bind,
+          atomic here).
+        - ``{"decision": "refused", "reason": ...}`` — policy refusals:
+          ``budget_impossible`` (budget above total RAM − pool floor:
+          even an idle box can never back it, a PERMANENT impossibility —
+          queueing would wedge the FIFO forever), ``memory_unmeasurable``
+          (free RAM unreadable — the admission gate fails closed),
+          ``queue_full``, ``launch_failed``.
 
         Admission (the one formula, in order):
-        1. Dedupe on content key — running/queued wins over ad-hoc re-run.
-        2. Slots: running < ``WORKER_QUEUE_SLOTS``.
-        3. Memory math: running_claims + budget <= usable, where usable =
+        1. Dedupe on content key — a live twin wins, labelled duplicate.
+        2. Hard caps — permanent impossibility and unmeasurable free RAM
+           refuse; nothing else ever waits in the queue forever.
+        3. Slots: running < ``WORKER_QUEUE_SLOTS``.
+        4. Memory math: running_claims + budget <= usable, where usable =
            free_ram_now - ram_floor (the pool's reservation for the rest
-           of the box), and free_now - floor >= budget directly.
-        Passing 1, failing 2 or 3 ⇒ QUEUED (memory/slot pressure, not
-        policy).
+           of the box). Passing 2 but failing 3/4 ⇒ QUEUED (transient
+           pressure, not policy — waiting is cheap, OOM is not).
         """
         if not agent_id:
             raise ValueError("worker queue requires a resolved agent_id")
@@ -466,6 +499,38 @@ class WorkerQueue:
 
                 # --- admission arithmetic ---
                 acct = self.account()
+                # --- hard caps: refuse what queueing can never fix ---
+                cap = acct["budget_capacity_mib"]
+                if cap is not None and memory_budget > cap:
+                    self._commit()
+                    return {
+                        "decision": "refused",
+                        "reason": "budget_impossible",
+                        "unit_key": unit_key,
+                        "memory_budget": memory_budget,
+                        "budget_capacity_mib": cap,
+                        "message": (
+                            f"memory_budget {memory_budget} MiB exceeds this "
+                            f"box's admission capacity ({acct['total_ram_mib']} "
+                            f"MiB total - {acct['ram_floor_mib']} MiB pool floor "
+                            f"= {cap} MiB). Free RAM can never exceed total, so "
+                            "no amount of queueing can admit it — lower the "
+                            "budget or WORKER_QUEUE_RAM_FLOOR."
+                        ),
+                    }
+                if acct["free_ram_mib"] <= 0:
+                    self._commit()
+                    return {
+                        "decision": "refused",
+                        "reason": "memory_unmeasurable",
+                        "unit_key": unit_key,
+                        "message": (
+                            "free RAM could not be measured (/proc/meminfo "
+                            "missing or unparsable) — the admission gate "
+                            "cannot be verified, so it fails closed instead "
+                            "of queueing a unit that may never launch"
+                        ),
+                    }
                 running = self.conn.execute(
                     "SELECT unit_key FROM worker_units "
                     "WHERE status IN ('launching','launched')"
@@ -510,12 +575,13 @@ class WorkerQueue:
                     self.conn.execute(
                         "INSERT INTO worker_units "
                         "(unit_key, tool, target, agent_id, status, "
-                        " memory_budget, command, env, queued_at, requested, note) "
-                        "VALUES (?, ?, ?, ?, 'launching', ?, ?, ?, ?, ?, ?)",
+                        " memory_budget, command, env, queued_at, requested, "
+                        " launching_at, note) "
+                        "VALUES (?, ?, ?, ?, 'launching', ?, ?, ?, ?, ?, ?, ?)",
                         (
                             unit_key, tool, target, agent_id, memory_budget,
                             json.dumps(command), json.dumps(launch_env),
-                            now, now, note or "",
+                            now, now, now, note or "",
                         ),
                     )
                     self._commit()
@@ -532,10 +598,7 @@ class WorkerQueue:
                             now, now, note or "",
                         ),
                     )
-                    position = self.conn.execute(
-                        "SELECT COUNT(*) AS n FROM worker_units "
-                        "WHERE status = 'queued' AND requested <= ?", (now,)
-                    ).fetchone()["n"]
+                    position = self._queue_position(now, unit_key)
                     self._commit()
                     return {
                         "decision": "queued",
@@ -587,43 +650,64 @@ class WorkerQueue:
         }
         return out
 
+    def _queue_position(self, requested: float, unit_key: str) -> int:
+        """1-based position of a queued row under the head's deterministic
+        order — ``requested`` first, ``unit_key`` breaks exact ties (rows
+        stamped in the same ``time.time()`` tick must not race on insertion
+        luck). Every position count and the head SELECT share this order."""
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM worker_units WHERE status = 'queued' "
+            "AND (requested < ? OR (requested = ? AND unit_key <= ?))",
+            (requested, requested, unit_key),
+        ).fetchone()["n"]
+
     def _existing_envelope(self, row: Any) -> dict[str, Any]:
-        """Decision envelope for a dedupe hit (running or queued)."""
+        """Decision envelope for a dedupe hit. The decision is ALWAYS
+        ``duplicate`` — a live twin owns the key — and ``state`` carries
+        its lifecycle (queued|launching|running) so callers label the hit
+        honestly instead of mistaking someone else's launch for a fresh
+        one."""
         if row["status"] == "queued":
-            position = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM worker_units "
-                "WHERE status = 'queued' AND requested <= ?",
-                (row["requested"],),
-            ).fetchone()["n"]
+            position = self._queue_position(row["requested"], row["unit_key"])
             return {
-                "decision": "queued",
+                "decision": "duplicate",
+                "state": "queued",
                 "unit_key": row["unit_key"],
                 "position": position,
                 "memory_budget": row["memory_budget"],
+                "agent_id": row["agent_id"],
                 "message": (
                     "identical unit already queued "
-                    f"(position {position}, by {row['agent_id']}) — poll it, "
-                    "don't re-request"
+                    f"(position {position}, by {row['agent_id']}) — poll the "
+                    "queue, don't re-request"
                 ),
             }
-        state = "launched" if row["job_id"] else "launching"
-        out = {
-            "decision": "launched" if row["job_id"] else "launching",
+        if row["job_id"]:
+            return {
+                "decision": "duplicate",
+                "state": "running",
+                "unit_key": row["unit_key"],
+                "job_id": row["job_id"],
+                "memory_budget": row["memory_budget"],
+                "agent_id": row["agent_id"],
+                "message": (
+                    "identical unit already running "
+                    f"(job {row['job_id']}, by {row['agent_id']}) — poll "
+                    "job_id, never launch a twin"
+                ),
+            }
+        return {
+            "decision": "duplicate",
+            "state": "launching",
             "unit_key": row["unit_key"],
-            "job_id": row["job_id"],
             "memory_budget": row["memory_budget"],
             "agent_id": row["agent_id"],
             "message": (
-                "identical unit already running "
-                f"(job {row['job_id'] or '<binding>'}, by {row['agent_id']}) — "
-                "poll its job, never launch a twin"
+                "identical unit already claimed but not yet bound to a job "
+                f"(by {row['agent_id']}) — its launch is in flight; the "
+                "bind-grace sweep reclaims it if the launcher died"
             ),
         }
-        if row["status"] == "launching" and row["job_id"] is None:
-            # A launcher died between claim and bind: fleet bind-grace
-            # semantics apply — the sweep reclaims it; report the state.
-            out["decision"] = "launching"
-        return out
 
     def bind_unit(self, unit_key: str, job_id: str, log_file: str | None = None) -> dict[str, Any]:
         """Attach the launched job_id to a claimed 'launching' row.
@@ -673,11 +757,7 @@ class WorkerQueue:
             "queued_at": row["queued_at"],
         }
         if row["status"] == "queued":
-            position = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM worker_units "
-                "WHERE status = 'queued' AND requested <= ?",
-                (row["requested"],),
-            ).fetchone()["n"]
+            position = self._queue_position(row["requested"], row["unit_key"])
             out.update({
                 "status": "queued",
                 "position": position,
@@ -827,17 +907,24 @@ class WorkerQueue:
         """Free the slots of LAUNCHED units whose jobs are FINISHED, then
         promote head-of-queue units whose admission now fits.
 
+        FIFO order is ``(requested, unit_key)`` — deterministic even when
+        two rows share a timestamp tick (positions agree with the head).
+        A head whose budget is a PERMANENT impossibility (> total − floor)
+        is cancelled and skipped: keeping it would wedge every unit
+        behind it forever (transient shortfalls still stop the FIFO).
+
         Claim protocol (Annex E guarded-UPDATE rule): the promotion claim
-        is a conditional UPDATE ``queued -> launching`` on the row's PK —
-        two lanes sweeping the same queue yield exactly one promoter per
-        row (the loser's claim touches 0 rows and skips the launch).
+        is a conditional UPDATE ``queued -> launching`` (stamping
+        ``launching_at``) on the row's PK — two lanes sweeping the same
+        queue yield exactly one promoter per row (the loser's claim
+        touches 0 rows and skips the launch).
 
         Runs on EVERY reaper pass (wired at ``JobStore._reaper_pass``) and
         is safe to call manually (a poll lane can advance the queue when
         the reaper is wedged). Best-effort: never raises.
         """
         out: dict[str, Any] = {"freed": 0, "promoted": 0, "launch_failed": 0,
-                               "blocked": 0}
+                               "blocked": 0, "impossible": 0}
         try:
             acct = self.account()
             usable = max(0, acct["free_ram_mib"] - acct["ram_floor_mib"])
@@ -898,10 +985,24 @@ class WorkerQueue:
                 acct = self.account()
                 head = self.conn.execute(
                     "SELECT * FROM worker_units WHERE status = 'queued' "
-                    "ORDER BY requested, queued_at LIMIT 1"
+                    "ORDER BY requested, unit_key LIMIT 1"
                 ).fetchone()
                 if head is None:
                     break
+                # A head whose budget exceeds the box's admission capacity
+                # (total - floor) can NEVER fit — strict FIFO would wedge
+                # the whole queue behind it forever. Cancel it and keep
+                # walking (transient shortfalls below still stop the FIFO).
+                cap = acct["budget_capacity_mib"]
+                if cap is not None and head["memory_budget"] > cap:
+                    cur = self.conn.execute(
+                        "UPDATE worker_units SET status = 'cancelled' "
+                        "WHERE unit_key = ? AND status = 'queued'",
+                        (head["unit_key"],),
+                    )
+                    if cur.rowcount:
+                        out["impossible"] += 1
+                    continue
                 running = self.conn.execute(
                     "SELECT unit_key FROM worker_units "
                     "WHERE status IN ('launching','launched')"
@@ -918,10 +1019,14 @@ class WorkerQueue:
                     out["blocked"] += 1
                     break  # head's budget doesn't fit — strict FIFO stop
                 # Claim (conditional): exactly one lane wins this update.
+                # launching_at stamps the CLAIM clock — sweep_stale reads
+                # it, never the queue-entry time, or a long-queued unit
+                # would be killed at the instant it finally launches.
                 cur = self.conn.execute(
-                    "UPDATE worker_units SET status = 'launching' "
+                    "UPDATE worker_units SET status = 'launching', "
+                    "launching_at = ? "
                     "WHERE unit_key = ? AND status = 'queued'",
-                    (head["unit_key"],),
+                    (time.time(), head["unit_key"]),
                 )
                 if cur.rowcount == 0:
                     continue  # another lane claimed it — re-read the head
@@ -948,7 +1053,15 @@ class WorkerQueue:
         bound (launch failed between claim and bind) is reclaimed after
         the bind-grace window (``WORKER_QUEUE_BIND_GRACE_S``, default 600
         — the request→bind is sub-second in process). Mirrors the fleet
-        scheduler's bind-grace discipline."""
+        scheduler's bind-grace discipline.
+
+        The grace is measured from the ``launching_at`` claim stamp — set
+        when ``queued → launching`` — NOT from ``requested`` (the
+        queue-entry clock, never rewritten on promotion): the entry time
+        of a long-queued unit is ancient by the time it finally launches,
+        and measuring from it would kill the unit at the instant of its
+        launch. Rows without a stamp (pre-migration) fall back to
+        ``requested``."""
         try:
             grace = float(os.getenv("WORKER_QUEUE_BIND_GRACE_S", "").strip() or 600.0)
         except ValueError:
@@ -958,7 +1071,8 @@ class WorkerQueue:
         try:
             rows = self.conn.execute(
                 "SELECT unit_key FROM worker_units "
-                "WHERE status = 'launching' AND requested < ?",
+                "WHERE status = 'launching' "
+                "AND COALESCE(launching_at, requested) < ?",
                 (cutoff,),
             ).fetchall()
             for r in rows:
@@ -978,7 +1092,7 @@ class WorkerQueue:
         acct = self.account()
         rows = self.conn.execute(
             "SELECT unit_key, tool, target, agent_id, status, memory_budget, "
-            "job_id, requested, queued_at FROM worker_units "
+            "job_id, requested, queued_at, launching_at FROM worker_units "
             "ORDER BY queued_at DESC LIMIT 100"
         ).fetchall()
         return {
@@ -987,9 +1101,22 @@ class WorkerQueue:
             "ram_floor_mib": acct["ram_floor_mib"],
             "free_ram_mib": acct["free_ram_mib"],
             "total_ram_mib": acct["total_ram_mib"],
+            "budget_capacity_mib": acct["budget_capacity_mib"],
             "units": [dict(r) for r in rows],
             "db": self.db_path,
         }
+
+    def units_by_note(self, note: str) -> list[dict[str, Any]]:
+        """Every live ledger row stamped with ``note`` (an adapter's batch
+        handle, e.g. a jadx ``fleet_id``), in queue order. The queue-side
+        batch API — adapter twins read this instead of reaching into
+        ``.conn`` directly."""
+        rows = self.conn.execute(
+            "SELECT * FROM worker_units WHERE note = ? "
+            "ORDER BY requested, unit_key",
+            (note,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         try:

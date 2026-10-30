@@ -111,7 +111,9 @@ def jadx_fleet(
             admits units only while running budgets stay within measured
             free RAM minus the pool floor. Raise for big real APKs
             (upstream evidence: medium apps 1-4 GB; large tails 10 GB+) —
-            the admission gate will simply queue more.
+            transient shortfalls simply queue more, but a budget above the
+            box's total RAM minus the pool floor is refused outright (the
+            pool can never admit it, no matter how long it waits).
         threads: ``-j`` per unit, clamped 1..16 (default: half the box's
             cores, max 8 — the pool bounds processes; -j tunes threads
             WITHIN one).
@@ -121,8 +123,8 @@ def jadx_fleet(
     Returns per-unit decisions: ``launched`` (job_id to poll), ``queued``
     (position; launches as slots free), ``duplicate`` (identical bytes
     already running/queued — poll the given ref), ``refused`` (queue
-    full/input error), plus a ``fleet_id`` binding the batch for
-    status/stop.
+    full, impossible budget, launch or input error), plus a ``fleet_id``
+    binding the batch for status/stop.
     """
     try:
         memory_budget = int(memory_budget)
@@ -220,24 +222,26 @@ def jadx_fleet(
         }
         if decision["decision"] == "launched":
             entry["job_id"] = decision.get("job_id")
-            if decision.get("unit_key") and decision.get("launch_reused"):
-                entry["decision"] = "duplicate"
+        elif decision["decision"] == "duplicate":
+            # The queue labels dedupe hits `duplicate` itself (state:
+            # queued|launching|running) — entry carries the twin's ref.
+            entry["state"] = decision.get("state")
+            if decision.get("job_id"):
+                entry["job_id"] = decision["job_id"]
+            if decision.get("position") is not None:
+                entry["position"] = decision["position"]
         elif decision["decision"] == "queued":
             entry["position"] = decision.get("position")
         elif decision["decision"] == "refused":
             entry["reason"] = decision.get("reason")
-        # Normalize duplicates: request_unit reports an already-running twin
-        # as "launched" with the EXISTING unit's job_id — surface that as
-        # duplicate so the model understands it must poll, not wait-fresh.
-        # (Detection: a row bound BEFORE this request's admission — resolved
-        # inside _existing_envelope; carry the flag through.)
+            entry["message"] = decision.get("message")
         units.append(entry)
 
-    # The queued decision envelope already carries the dedupe facts; the
-    # fleet_id is a client-side batch handle (the queue is the ledger).
+    # The fleet_id is a client-side batch handle (the queue is the ledger).
     counts: dict[str, int] = {}
     for u in units:
         counts[u["decision"]] = counts.get(u["decision"], 0) + 1
+    acct = queue.account()
     return {
         "status": "ok",
         "fleet_id": batch_id,
@@ -245,9 +249,10 @@ def jadx_fleet(
         "decision_counts": counts,
         "units": units,
         "pool": {
-            "slots": queue.account()["slots"],
-            "free_ram_mib": queue.account()["free_ram_mib"],
-            "ram_floor_mib": queue.account()["ram_floor_mib"],
+            "slots": acct["slots"],
+            "free_ram_mib": acct["free_ram_mib"],
+            "ram_floor_mib": acct["ram_floor_mib"],
+            "budget_capacity_mib": acct["budget_capacity_mib"],
         },
         "message": (
             f"{counts.get('launched', 0)} launched, {counts.get('queued', 0)} "
@@ -274,10 +279,7 @@ def jadx_fleet_status(fleet_id: str) -> dict[str, Any]:
         fleet_id: The ``fleet_id`` returned by ``jadx_fleet``.
     """
     queue = get_worker_queue()
-    rows = queue.conn.execute(
-        "SELECT * FROM worker_units WHERE note = ? ORDER BY requested",
-        (fleet_id,),
-    ).fetchall()
+    rows = queue.units_by_note(fleet_id)
     if not rows:
         # The batch may have finished + aged out of the live ledger; report
         # unknown rather than silently empty.
@@ -315,14 +317,15 @@ def jadx_fleet_status(fleet_id: str) -> dict[str, Any]:
             if state == "done":
                 from auxiliaries.jadx import _workspace_for, _workspace_state
 
-                row_path = r["target"]
-                resolved = _resolve_targets(row_path)
-                path = (resolved[0]["path"] if resolved and resolved[0]["path"] else None)
-                if path:
-                    ws = _workspace_for(path)
-                    st = _workspace_state(ws, path)
-                    entry["workspace"] = ws
-                    entry["workspace_done"] = bool(st["exists"] and st["has_sources"])
+                # The row's target IS the absolute input path the fleet
+                # request already resolved — never re-resolve it against
+                # the drop folder (an APK removed after decompile must
+                # not hide the workspace it produced).
+                path = r["target"]
+                ws = _workspace_for(path)
+                st = _workspace_state(ws, path)
+                entry["workspace"] = ws
+                entry["workspace_done"] = bool(st["exists"] and st["has_sources"])
         out["units"].append(entry)
     # Piggyback the queue sweep — finished units free their slots so the
     # next queued unit promotes on THIS status call, not just on reaper.
@@ -339,6 +342,7 @@ def jadx_fleet_status(fleet_id: str) -> dict[str, Any]:
         "freed": adv.get("freed", 0),
         "promoted": adv.get("promoted", 0),
         "blocked": adv.get("blocked", 0),
+        "impossible": adv.get("impossible", 0),
     }
     running = counts.get("running", 0) + counts.get("launching", 0)
     queued = counts.get("queued", 0)
@@ -374,10 +378,7 @@ def jadx_fleet_stop(fleet_id: str, force: bool = False) -> dict[str, Any]:
         force: Operator-level crossing of agent ownership.
     """
     queue = get_worker_queue()
-    rows = queue.conn.execute(
-        "SELECT * FROM worker_units WHERE note = ? ORDER BY requested",
-        (fleet_id,),
-    ).fetchall()
+    rows = queue.units_by_note(fleet_id)
     if not rows:
         return {
             "status": "unknown",

@@ -7,16 +7,13 @@ launch roll-down, bind-grace reclaim, ownership fence, and pool
 observability. Concurrency primitives are Annex E's (same store family).
 """
 
-import json
 import os
 import time
 
 import pytest
 
 from utils.worker_queue import (
-    WorkerQueue,
     content_key,
-    free_ram_mib,
     get_worker_queue,
     heap_pin_env,
     reset_worker_queue,
@@ -159,7 +156,8 @@ def test_dedupe_running_returns_existing_job(env):
         command=["jadx", "-d", "/tmp/other", env["jar"]],
     )
     assert r1["decision"] == "launched"
-    assert r2["decision"] in ("launched", "launching")
+    assert r2["decision"] == "duplicate"  # labelled at the source
+    assert r2["state"] == "running"
     assert r2["job_id"] == r1["job_id"]  # the twin's ref, not a new launch
     assert "already running" in r2["message"]
 
@@ -190,14 +188,19 @@ def test_pool_full_queues_fifo(env, monkeypatch):
     assert r3["decision"] == "queued" and r3["position"] == 2
 
 
-def test_memory_overcommit_queues_instead_of_refusing(env):
-    """A unit whose budget cannot fit in free RAM QUEUES (waiting is
-    cheap; OOM is the lossy failure the queue prevents)."""
+def test_memory_overcommit_queues_instead_of_refusing(env, monkeypatch):
+    """A unit whose budget cannot fit in free RAM NOW queues (waiting is
+    cheap; OOM is the lossy failure the queue prevents) — but only while
+    the box could EVENTUALLY back it (budget <= total - floor). Budgets
+    above that capacity are a permanent impossibility; their refusal is
+    tested separately."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 2048)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
     q = get_worker_queue()
-    # Ask for a budget bigger than free RAM (huge number under any box).
-    huge = max(free_ram_mib(), 1) + 10_000
+    # 4096 MiB: above free-minus-floor (2048-64=1984), under capacity
+    # (8192-64=8128) — transient shortfall, must queue.
     r = q.request_unit(
-        "jadx", env["jar"], agent_id="a", memory_budget=huge,
+        "jadx", env["jar"], agent_id="a", memory_budget=4096,
         command=["jadx", "-d", "/tmp/ws", env["jar"]],
     )
     assert r["decision"] == "queued"
@@ -205,21 +208,62 @@ def test_memory_overcommit_queues_instead_of_refusing(env):
     row = q.conn.execute(
         "SELECT env FROM worker_units WHERE unit_key = ?", (r["unit_key"],)
     ).fetchone()
-    assert f"-Xmx{huge}m" in row["env"]
+    assert "-Xmx4096m" in row["env"]
+
+
+def test_budget_impossible_refused_not_queued(env, monkeypatch):
+    """budget > total - floor is a PERMANENT impossibility: free RAM can
+    never grow past total, so queueing it would wedge the FIFO forever —
+    refused with a clear reason, no row, no slot held."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 2048)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
+    q = get_worker_queue()
+    r = q.request_unit(
+        "jadx", env["jar"], agent_id="a", memory_budget=9000,  # > 8192-64
+        command=["jadx", "-d", "/tmp/ws", env["jar"]],
+    )
+    assert r["decision"] == "refused"
+    assert r["reason"] == "budget_impossible"
+    assert r["budget_capacity_mib"] == 8128
+    rows = q.conn.execute(
+        "SELECT * FROM worker_units WHERE unit_key = ?", (r["unit_key"],)
+    ).fetchall()
+    assert rows == []  # nothing queued — a permanent impossibility is policy
+
+
+def test_unmeasurable_free_ram_fails_closed(env, monkeypatch):
+    """Free RAM unreadable (probe returns 0): the admission gate cannot
+    be verified, so it FAILS CLOSED with a clear reason instead of
+    queueing a unit that may never launch."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 0)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
+    q = get_worker_queue()
+    r = q.request_unit(
+        "jadx", env["jar"], agent_id="a", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws", env["jar"]],
+    )
+    assert r["decision"] == "refused"
+    assert r["reason"] == "memory_unmeasurable"
+    rows = q.conn.execute(
+        "SELECT * FROM worker_units WHERE unit_key = ?", (r["unit_key"],)
+    ).fetchall()
+    assert rows == []
 
 
 def test_queue_full_refusal(env, monkeypatch):
     monkeypatch.setenv("WORKER_QUEUE_MAX_Q", "1")
     monkeypatch.setenv("WORKER_QUEUE_SLOTS", "1")
     monkeypatch.setenv("BG_JOB_REAPER_INTERVAL_S", "600")
-    monkeypatch.setenv("WORKER_QUEUE_RAM_FLOOR", str(free_ram_mib() + 999999))
+    # Deterministic memory probes: free RAM below the budget, but the box
+    # COULD back it eventually (total >> budget) — a transient shortfall
+    # queues; only then does the queue cap refuse.
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 100)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
     q = get_worker_queue()
     jar2 = env["tmp"] / "two.jar"
     _make_jar(jar2, tag="two")
-    jar3 = env["tmp"] / "three.jar"
-    _make_jar(jar3, tag="three")
 
-    # Fill the queue with a unit that will never fit (floor above free RAM).
+    # Fill the queue with a unit that cannot launch right now.
     r1 = q.request_unit(
         "jadx", env["jar"], agent_id="a", memory_budget=64,
         command=["jadx", "-d", "/tmp/ws1", env["jar"]],
@@ -297,7 +341,7 @@ def test_promotion_is_one_lane_wins(env, monkeypatch):
     jobs = get_store().list_jobs(agent_id="a")
     first_job = [j for j in jobs if j["tool"] == "jadx_queue"][0]
     _drain(q, first_job["job_id"])
-    other = WorkerQueue(store_dir=os.environ["WORKER_QUEUE_DIR"])
+    other = wq.WorkerQueue(store_dir=os.environ["WORKER_QUEUE_DIR"])
     a = q.advance_queue()
     b = other.advance_queue()
     # Promotion may land in either sweep — but each row is claimed exactly
@@ -316,7 +360,8 @@ def test_promotion_is_one_lane_wins(env, monkeypatch):
 
 
 def test_bind_grace_reclaims_crashed_launcher(env, monkeypatch):
-    """A 'launching' claim that never bound is reclaimed after grace."""
+    """A 'launching' claim that never bound is reclaimed after grace
+    (legacy row without a launch stamp falls back to ``requested``)."""
     monkeypatch.setenv("WORKER_QUEUE_BIND_GRACE_S", "0.3")
     q = get_worker_queue()
     # Fake a crashed claim by inserting a 'launching' row directly.
@@ -333,6 +378,106 @@ def test_bind_grace_reclaims_crashed_launcher(env, monkeypatch):
         "SELECT status FROM worker_units WHERE unit_key = ?", (key,)
     ).fetchone()
     assert row["status"] == "cancelled"
+
+
+def test_bind_grace_measured_from_claim_not_queue_entry(env, monkeypatch):
+    """The bind-grace clock is the queued->launching claim stamp, not the
+    queue-entry time: a long-queued unit's fresh claim must NOT be killed
+    at the instant it finally launches."""
+    monkeypatch.setenv("WORKER_QUEUE_BIND_GRACE_S", "0.3")
+    q = get_worker_queue()
+    key = content_key("jadx", env["jar"])
+    now = time.time()
+    long_ago = now - 3600
+    q.conn.execute(
+        "INSERT INTO worker_units (unit_key, tool, target, agent_id, status, "
+        " memory_budget, command, env, queued_at, requested, launching_at) "
+        "VALUES (?, 'jadx', ?, 'a', 'launching', 64, '[]', '{}', ?, ?, ?)",
+        (key, env["jar"], long_ago, long_ago, now),
+    )
+    out = q.sweep_stale()
+    assert out["count"] == 0  # fresh claim of a long-queued row — safe
+    row = q.conn.execute(
+        "SELECT status FROM worker_units WHERE unit_key = ?", (key,)
+    ).fetchone()
+    assert row["status"] == "launching"
+    # The same claim aging PAST grace is reclaimed (the crashed-launcher case).
+    q.conn.execute(
+        "UPDATE worker_units SET launching_at = ? WHERE unit_key = ?",
+        (now - 60, key),
+    )
+    out = q.sweep_stale()
+    assert out["count"] == 1
+
+
+def test_advance_queue_cancels_impossible_head(env, monkeypatch):
+    """A legacy queued row whose budget is permanently impossible must
+    not wedge strict FIFO: the advance cancels it and the REAL head
+    promotes (the wedge the request-time cap now prevents, for rows
+    queued before that cap existed)."""
+    monkeypatch.setenv("WORKER_QUEUE_SLOTS", "1")
+    monkeypatch.setenv("BG_JOB_REAPER_INTERVAL_S", "600")  # no periodic reaper
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 2048)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
+    q = get_worker_queue()
+    jar2 = env["tmp"] / "two.jar"
+    _make_jar(jar2, tag="two")
+    r1 = q.request_unit(
+        "jadx", env["jar"], agent_id="a", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws1", env["jar"]],
+    )
+    assert r1["decision"] == "launched"
+    r_good = q.request_unit(
+        "jadx", str(jar2), agent_id="a", memory_budget=64,
+        command=["jadx", "-d", "/tmp/ws2", str(jar2)],
+    )
+    assert r_good["decision"] == "queued"  # slot held by r1
+    # Legacy impossible head: older than the good row, budget > capacity.
+    old = time.time() - 30
+    q.conn.execute(
+        "INSERT INTO worker_units (unit_key, tool, target, agent_id, status, "
+        " memory_budget, command, env, queued_at, requested, note) "
+        "VALUES ('jadx:pimpossible', 'jadx', ?, 'a', 'queued', 9000, "
+        "'[]', '{}', ?, ?, '')",
+        (env["jar"], old, old),
+    )
+    _drain(q, r1["job_id"])  # free the slot so promotion is possible
+    adv = q.advance_queue()
+    # The reaper also runs advance_queue in-process (a launch's pending
+    # _REAPER_WAKE beats the interval), so cancel/promote may land on
+    # either observer's counters — the contract is the final ledger
+    # state, which is identical whichever pass wins the claim race.
+    key_good = r_good["unit_key"]
+    deadline = time.time() + 5
+    row_good = None
+    while time.time() < deadline:
+        row_good = q.conn.execute(
+            "SELECT status, job_id FROM worker_units WHERE unit_key = ?",
+            (key_good,),
+        ).fetchone()
+        if row_good is not None and row_good["status"] in ("launched", "finished"):
+            break
+        time.sleep(0.05)
+    row_imp = q.conn.execute(
+        "SELECT status, job_id FROM worker_units "
+        "WHERE unit_key = 'jadx:pimpossible'"
+    ).fetchone()
+    # The impossible head is gone from the FIFO (cancelled, never
+    # launched) and the queue is un-wedged behind it.
+    assert row_imp["status"] == "cancelled"
+    assert row_imp["job_id"] is None
+    assert row_good is not None
+    assert row_good["status"] in ("launched", "finished")
+    # No double launch: r1 is finished, the impossible head cancelled —
+    # the only live claim left is the good row itself.
+    rows = q.conn.execute(
+        "SELECT unit_key FROM worker_units WHERE status IN "
+        "('launching','launched')"
+    ).fetchall()
+    if row_good["status"] == "launched":
+        assert len(rows) == 1 and rows[0]["unit_key"] == key_good
+    else:
+        assert rows == []
 
 
 def test_launch_failure_deletes_claim_no_phantom(env, monkeypatch):
@@ -477,9 +622,10 @@ def test_jadx_fleet_dedupes_content(env, monkeypatch):
     assert r1["decision_counts"].get("launched") == 1
     # Second request hits the running unit — one unit total across both.
     jobs1 = [u.get("job_id") for u in r1["units"] if u.get("job_id")]
-    ref2 = [u for u in r2["units"]][0]
-    if ref2["decision"] in ("launched", "launching"):
-        assert ref2["job_id"] in jobs1
+    ref2 = r2["units"][0]
+    assert ref2["decision"] == "duplicate"  # labelled by the queue itself
+    assert ref2["state"] == "running"
+    assert ref2["job_id"] in jobs1
 
 
 def test_jadx_fleet_batch_queues_when_full(env, monkeypatch):

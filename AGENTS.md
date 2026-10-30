@@ -540,9 +540,17 @@ with zero coordination. The queue exists because that arithmetic OOMs boxes.
 - **Content-keyed dedupe** (`content_key`): `"<tool>:c<sha256[:12]>"` of the
   BYTES — identical APK bytes at a different filename are the same unit
   (snapshot-cache precedent). Unhashable input falls back to a path+size key.
-- **Admission is one formula** (`request_unit`): dedupe → slots
+  Dedupe hits are labelled at the SOURCE: `_existing_envelope` returns
+  decision `duplicate` + `state` (`running`/`launching`/`queued`, with the
+  twin's `job_id` or queue `position`) — adapters never relabel it.
+- **Admission is one formula** (`request_unit`): dedupe → hard caps → slots
   (`WORKER_QUEUE_SLOTS`, default 2) → claims+budget ≤ (free RAM − pool floor
-  `WORKER_QUEUE_RAM_FLOOR`, default 25% of total RAM, min 2 GiB). Failing
+  `WORKER_QUEUE_RAM_FLOOR`, default 25% of total RAM, min 2 GiB). The hard
+  caps run BEFORE the queue-wait branches, inside the tx: `budget > total
+  RAM − floor` is refused outright (`budget_impossible` — a permanen
+  impossibility must not silently wedge the queue behind it) and an
+  unmeasurable free-RAM probe fails closed (`memory_unmeasurable`); both
+  commit and return with no row written. Everything else failing
   memory/slots ⇒ QUEUED, never refused — waiting is cheap, OOM-killing a
   started decompile loses its work. Queue depth is capped
   (`WORKER_QUEUE_MAX_Q`, 16) — deeper demand is an operator signal.
@@ -559,13 +567,22 @@ with zero coordination. The queue exists because that arithmetic OOMs boxes.
   `jadx_fleet_status`) releases `launched` rows whose job VERIFIED finished
   (`poll()`, not `get()` — only poll observes/reaps; get-only sweeps leak
   slots) and launch-promotes FIFO heads while admission fits, one attempt
-  per pass (a persistently failing binary cannot wedge the reaper).
+  per pass (a persistently failing binary cannot wedge the reaper). FIFO
+  order is deterministic — head is `ORDER BY requested, unit_key`, and the
+  impossible-head cancel from the admission cap (legacy rows predating it)
+  keeps the queue moving instead of wedging behind a permanently
+  impossible budget.
 - **Statuses**: `queued → launching → launched → finished|cancelled`.
   `finished` = ran, exited, slot freed (SUCCESS — keep it distinct from
   `cancelled` = operator stop/crash reclaim; conflating them made the pool
   ledger unobservable, first lesson of Phase 3). Terminal rows age out (TTL
   7d); queued rows TTL 24h (`WORKER_QUEUE_TTL_HOURS`); `launching` claims
-  past `WORKER_QUEUE_BIND_GRACE_S` are swept as crashed launchers.
+  past `WORKER_QUEUE_BIND_GRACE_S` are swept as crashed launchers — the
+  grace reads the `launching_at` CLAIM stamp (stamped on `queued →
+  launching`), never `requested` (the queue-entry time, never rewritten on
+  promotion — measuring from it would kill a long-queued unit at the
+  instant it finally launches). Legacy rows without the stamp fall back
+  via `COALESCE(launching_at, requested)`.
 - **Popen(env=) is a REPLACEMENT, not a merge** — found live: queue-launched
   children got ONLY the pin env (no PATH → execvp fell back to the compiled-in
   default and silently ignored both test stubs and the operator's bin dir;
@@ -574,11 +591,15 @@ with zero coordination. The queue exists because that arithmetic OOMs boxes.
   store with a custom env starts from `os.environ` and updates.
 - **jadx twins** (`payloads/jadx_fleet.py`): `jadx_fleet(targets,
   memory_budget=640, threads, deobf, no_res)` → per-unit
-  launched/queued/duplicate/refused + `fleet_id`; `jadx_fleet_status` (per-
-  unit state, workspace-done check, pools the advance sweep); `jadx_fleet_
-  stop` (terminate jobs + cancel queued, ownership-fenced);
-  `worker_queue_status` observability lens. Default budget 640 MiB (2× the
-  measured synthetic peak — operators raise for real APKs 1-4 GB+).
+  launched/queued/duplicate/refused + `fleet_id` (decisions are consumed as
+  the queue labelled them — no downstream relabelling);
+  `jadx_fleet_status` (per-unit state via `WorkerQueue.units_by_note`,
+  workspace-done check resolved directly from the row's stored target —
+  already an absolute path at admission, and may be gone post-decompile —
+  pools the advance sweep); `jadx_fleet_stop` (terminate jobs + cancel
+  queued, ownership-fenced, same queue API); `worker_queue_status`
+  observability lens. Default budget 640 MiB (2× the measured synthetic
+  peak — operators raise for real APKs 1-4 GB+).
 - Budget cap 16 GiB/unit (`_JADX_FLEET_BUDGET_CAP`); `-j` per unit defaults
   to half the cores clamped 1..8 (the pool bounds processes, -j tunes
   threads within one).
