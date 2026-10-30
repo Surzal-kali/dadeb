@@ -24,15 +24,35 @@ framing, dispatch, and (later) execution tracking.
 - `main.rs` `dispatch` now routes `CALL_TOOL`/`SCAN_TOOLS` to the worker and
   relays the reply (transparent proxy); `Other` events still stub locally.
 
-Not yet here: the flock/stale-inode/umask singleton dance, and the execution
-tracker + kill switch (the brain-side control plane — where `Other` lands).
+## Milestone 3 — real registry + execution core in the worker
+
+- `tool_exec.py` (repo root) — the shared CALL_TOOL execution core lifted from
+  `thebrain.py`: JSON arg parsing, scope-gate brake, per-session instance
+  rebind, execution tracking + `BRAIN_EXEC_CEILING`, status envelope. Import-
+  light (stdlib only) so it carries no `scapy`/tool-chain weight.
+- `worker.py` — now selects a backend: REAL (imports the harness registry +
+  `EXECUTION_TRACKER`, primes it with a startup scan) or DEMO (stdlib-only
+  registry + no-op tracker, for `BRAIN_WORKER_DEMO=1` or a bare env). Both run
+  through `tool_exec`.
+
+## Milestone 4 — OS singleton dance (`singleton.rs`)
+
+Ported from `thebrain.py` `start_brain()`: an exclusive advisory `flock`
+singleton guard, a connect-probe before unlinking a stale socket, per-lane
+socket permissions via a `umask` swap around bind, and unlink-on-exit (only if
+the socket is still the inode we bound). SIGTERM/SIGINT are routed to a graceful
+shutdown so the cleanup runs. Uses `nix` for the Unix-only syscalls, `std::fs`
+for the portable file ops.
+
+Still in Python (by design): tool execution, registry + per-session isolation,
+the scope gate, and the execution tracker / kill switch — all in the worker.
 
 ## Run it (three pieces: worker, brain, client)
 
 ```sh
-# 1. the Python tool-worker
+# 1. the Python tool-worker  (drop BRAIN_WORKER_DEMO on a full harness checkout)
 cd rust/brain
-BRAIN_WORKER_SOCKET=run/brain-worker.sock python3 worker.py
+BRAIN_WORKER_DEMO=1 BRAIN_WORKER_SOCKET=run/brain-worker.sock python3 worker.py
 
 # 2. the Rust brain (new shell) — forwards tool events to the worker
 cd rust/brain
@@ -43,10 +63,11 @@ cd rust/brain
 python3 smoke.py run/brain.sock
 ```
 
-With all three up, `demo.*` calls return real execution envelopes from the
-worker, proving the full client -> brain -> worker -> client round-trip over
-one shared wire format. Stop the worker and re-run the client to see the
-brain's `worker unreachable` fallback.
+With all three up, `demo.*` calls return execution envelopes through the shared
+`tool_exec` core, proving the full client -> brain -> worker -> client round-trip
+over one wire format. Stop the worker and re-run the client to see the brain's
+`worker unreachable` fallback. Start a second brain to see the singleton guard
+refuse it; Ctrl-C the brain to see it unlink its own socket on the way out.
 
 ## Tests
 
