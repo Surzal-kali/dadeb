@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Minimal wire-compat smoke test for the Rust Brain (milestone 1).
+"""Minimal wire-compat smoke test for the Rust Brain.
 
 Speaks the SAME length-prefixed framing as listeners/thebrain.py
 (pack_message/read_message): a 4-byte big-endian length header + payload.
-Connects to the Unix socket, sends one event, prints the framed reply.
+Connects to the brain's Unix socket, sends one event per connection, prints the
+framed reply.
 
-Usage:  python3 smoke.py [socket_path]
+Milestone 2: the brain forwards tool events to the Python worker, so with both
+the brain and worker.py running, demo.* calls return real execution envelopes.
+
+Usage:  python3 smoke.py [brain_socket_path]
+        (use the path the brain printed after 'listening on')
 """
 import socket
 import struct
@@ -41,10 +46,12 @@ def send(sock_path: str, message: bytes) -> str:
 
 if __name__ == "__main__":
     for msg in (
-        b'CALL_TOOL|0|nmap.scan|{"target":"10.0.0.1"}',
-        b"SCAN_TOOLS|0|auxiliaries",
-        b"PING|7|hello",
-        b"garbage-no-pipes",
+        b"CALL_TOOL|0|demo.add|[2,3]",              # -> result 5
+        b'CALL_TOOL|0|demo.echo|{"hi":"there"}',    # -> kwargs echoed
+        b"CALL_TOOL|0|demo.sysinfo",                # -> worker pid + python version
+        b"SCAN_TOOLS|0|",                           # -> SCAN_COMPLETE|demo...
+        b"CALL_TOOL|0|nope.notatool",               # -> not-found envelope
+        b"garbage-no-pipes",                        # -> rejected by the brain
     ):
         reply = send(SOCK, msg)
-        print(f"{msg.decode():45s} -> {reply}")
+        print(f"{msg.decode():42s} -> {reply}")
