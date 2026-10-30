@@ -84,7 +84,9 @@ fn surfaces(view: &FrameView) -> Vec<String> {
 /// EXCLUDES the frame even if the regex lane would have hit.
 fn frame_matches(view: &FrameView, filter_lower: Option<&str>, re: Option<&Regex>) -> bool {
     match (filter_lower, re) {
-        (Some(needle), _) => surfaces(view).iter().any(|s| s.to_lowercase().contains(needle)),
+        (Some(needle), _) => surfaces(view)
+            .iter()
+            .any(|s| s.to_lowercase().contains(needle)),
         (None, Some(re)) => surfaces(view).iter().any(|s| re.is_match(s)),
         (None, None) => true,
     }
@@ -107,7 +109,11 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
     loop {
         let rec = reader.next_record().map_err(|e| e.to_string())?;
         let Some(rec) = rec else { break };
-        if frame_matches(&dissect_frame_linktype(&rec.data, linktype), filter_lower.as_deref(), re.as_ref()) {
+        if frame_matches(
+            &dissect_frame_linktype(&rec.data, linktype),
+            filter_lower.as_deref(),
+            re.as_ref(),
+        ) {
             match_indices.push(total);
         }
         total += 1;
@@ -147,7 +153,7 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
         match entry {
             Some(idx) => wanted.push((*idx, false)),
             None if !wanted.is_empty() => wanted.push((usize::MAX, true)), // gap marker rides last
-            None => {}                                     // leading gap dropped
+            None => {}                                                     // leading gap dropped
         }
     }
 
@@ -163,7 +169,9 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
             next = wanted_iter.next().copied();
             continue;
         }
-        let Some(rec) = reader.next_record().map_err(|e| e.to_string())? else { break };
+        let Some(rec) = reader.next_record().map_err(|e| e.to_string())? else {
+            break;
+        };
         if idx == want_idx {
             let view = dissect_frame_linktype(&rec.data, linktype);
             entries.push(OutcomeEntry::Frame {
@@ -228,8 +236,13 @@ mod tests {
         let path = dir.join("s.pcap");
         let mut w = crate::format::PcapWriter::create(&path).unwrap();
         for i in 0..6 {
-            let tag = if i == 2 || i == 4 { "needle-hit" } else { "quiet" };
-            w.write_record(1700000000 + i as u32, 0, &marker_frame(tag)).unwrap();
+            let tag = if i == 2 || i == 4 {
+                "needle-hit"
+            } else {
+                "quiet"
+            };
+            w.write_record(1700000000 + i as u32, 0, &marker_frame(tag))
+                .unwrap();
         }
         path
     }
@@ -251,7 +264,10 @@ mod tests {
             limit: 0,
         };
         let out = search_frames(&path, &opts).unwrap();
-        assert_eq!(out.meta.matches, 0, "substring miss excludes despite regex hit");
+        assert_eq!(
+            out.meta.matches, 0,
+            "substring miss excludes despite regex hit"
+        );
         assert!(out.entries.is_empty());
     }
 
@@ -372,7 +388,10 @@ mod tests {
             offset: 0,
             limit: 0,
         };
-        assert_eq!(no_match_note(&opts), "[no packets matched filter: 'login failed']");
+        assert_eq!(
+            no_match_note(&opts),
+            "[no packets matched filter: 'login failed']"
+        );
     }
 
     #[test]
@@ -390,14 +409,23 @@ mod tests {
             },
         )
         .unwrap();
-        let Some(OutcomeEntry::Frame { hex, summary, ascii, index, .. }) = out.entries.first() else {
+        let Some(OutcomeEntry::Frame {
+            hex,
+            summary,
+            ascii,
+            index,
+            ..
+        }) = out.entries.first()
+        else {
             panic!("expected frame");
         };
         assert_eq!(*index, 2);
         assert_eq!(summary, "Ether / Raw");
         assert_eq!(ascii, "needle-hit");
         assert!(hex.starts_with("0000000000000000000000009999"), "{hex}");
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_eq!(hex.len(), 2 * (14 + "needle-hit".len()));
     }
 }

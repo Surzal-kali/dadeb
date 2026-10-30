@@ -150,7 +150,9 @@ impl ScratchStore {
         // O_NOFOLLOW descriptor (fchmod), never by path. A symlinked data
         // dir is allowed (e.g. pointed at a bigger disk) but never chmodded
         // through: a planted `scratch-data -> /etc` must not get /etc 0700.
-        match open_nofollow(data_dir, true).and_then(|d| d.set_permissions(fs::Permissions::from_mode(0o700))) {
+        match open_nofollow(data_dir, true)
+            .and_then(|d| d.set_permissions(fs::Permissions::from_mode(0o700)))
+        {
             Ok(()) => {}
             Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => eprintln!(
                 "[scratch] data dir {} is a symlink; leaving its target's permissions alone",
@@ -290,7 +292,12 @@ impl ScratchStore {
         // budget. Divergence: python evicts before writing the payload; here
         // the payload is already on disk (written outside the lock above),
         // so disk use can briefly exceed the cap by this one entry.
-        enforce_agent_cap(&mut conn, agent_id, self.config.max_agent_bytes, &self.data_dir)?;
+        enforce_agent_cap(
+            &mut conn,
+            agent_id,
+            self.config.max_agent_bytes,
+            &self.data_dir,
+        )?;
 
         let now = now_secs();
         let expires_at = now + self.config.ttl_hours * 3600.0;
@@ -561,21 +568,23 @@ fn prepare_db_file(db_path: &Path) -> Result<()> {
         .open(db_path);
     let file = match created {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match open_nofollow(db_path, false) {
-            Ok(f) => f,
-            Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => {
-                return Err(ScratchError::Io(std::io::Error::other(format!(
-                    "refusing to open {}: it is a symlink",
-                    db_path.display()
-                ))))
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match open_nofollow(db_path, false) {
+                Ok(f) => f,
+                Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => {
+                    return Err(ScratchError::Io(std::io::Error::other(format!(
+                        "refusing to open {}: it is a symlink",
+                        db_path.display()
+                    ))))
+                }
+                Err(e) => {
+                    // e.g. root-owned db under a non-root run: the root guard
+                    // already warned; let sqlite report the real failure.
+                    eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
+                    return Ok(());
+                }
             }
-            Err(e) => {
-                // e.g. root-owned db under a non-root run: the root guard
-                // already warned; let sqlite report the real failure.
-                eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
-                return Ok(());
-            }
-        },
+        }
         Err(e) => return Err(e.into()),
     };
     if !file.metadata()?.file_type().is_file() {
@@ -695,9 +704,7 @@ fn delete_entry(conn: &mut Connection, id: &str, data_dir: &Path) -> Result<()> 
 
 fn cleanup_expired_locked(conn: &mut Connection, now: f64, data_dir: &Path) -> Result<usize> {
     let ids: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM scratch_entries WHERE expires_at < ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT id FROM scratch_entries WHERE expires_at < ?1")?;
         let rows = stmt
             .query_map(params![now], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -927,7 +934,12 @@ fn chown_dir_entries(mut dir: nix::dir::Dir, uid: Uid, gid: Gid, depth: usize) {
             Some(gid),
             AtFlags::AT_SYMLINK_NOFOLLOW,
         );
-        if let Ok(sub) = Dir::openat(Some(fd), name.as_c_str(), nofollow_dir_flags(), Mode::empty()) {
+        if let Ok(sub) = Dir::openat(
+            Some(fd),
+            name.as_c_str(),
+            nofollow_dir_flags(),
+            Mode::empty(),
+        ) {
             chown_dir_entries(sub, uid, gid, depth + 1);
         }
     }
@@ -988,7 +1000,10 @@ mod tests {
         let receipt = store
             .store(&json!({"pad": random_pad(900)}), "agent-a", "t", None)
             .expect("store");
-        let id = receipt.scratch_ref.trim_start_matches("scratch:").to_string();
+        let id = receipt
+            .scratch_ref
+            .trim_start_matches("scratch:")
+            .to_string();
 
         // Tamper: point the row's payload_path at an innocent bystander and
         // force expiry in one UPDATE.
@@ -1154,7 +1169,10 @@ mod tests {
             .retrieve(&first_ref, "agent-a", RetrieveOpts::default())
             .unwrap();
         assert!(
-            env["error"].as_str().unwrap_or_default().contains("not found"),
+            env["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not found"),
             "oldest should be evicted: {env}"
         );
         let env = store
@@ -1176,17 +1194,25 @@ mod tests {
             .retrieve(&r.scratch_ref, "agent-a", RetrieveOpts::default())
             .unwrap();
         assert_eq!(env["status"], "error");
-        assert!(env["error"].as_str().unwrap_or_default().starts_with(&format!(
-            "scratch payload corrupted for '{}'",
-            r.scratch_ref
-        )));
+        assert!(env["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!(
+                "scratch payload corrupted for '{}'",
+                r.scratch_ref
+            )));
     }
 
     #[test]
     fn payload_files_are_0600_and_dir_is_0700() {
         let (_d, store) = test_store(cfg(24.0, 1024, 1024));
         let r = store
-            .store(&json!({"k": format!("pad-{}", "y".repeat(500))}), "agent-a", "t", None)
+            .store(
+                &json!({"k": format!("pad-{}", "y".repeat(500))}),
+                "agent-a",
+                "t",
+                None,
+            )
             .unwrap();
         let id = parse_ref(&r.scratch_ref).unwrap();
         let payload = store.data_dir.join(format!("{id}.json.gz"));
@@ -1202,7 +1228,12 @@ mod tests {
     fn tampered_payload_reports_corrupted() {
         let (_d, store) = test_store(cfg(24.0, 1024, 1024));
         let r = store
-            .store(&json!({"k": format!("pad-{}", "z".repeat(500))}), "agent-a", "t", None)
+            .store(
+                &json!({"k": format!("pad-{}", "z".repeat(500))}),
+                "agent-a",
+                "t",
+                None,
+            )
             .unwrap();
         let path = store
             .data_dir
@@ -1215,9 +1246,10 @@ mod tests {
             .retrieve(&r.scratch_ref, "agent-a", RetrieveOpts::default())
             .unwrap();
         assert_eq!(env["status"], "error");
-        assert!(
-            env["error"].as_str().unwrap_or_default().contains("corrupted")
-        );
+        assert!(env["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("corrupted"));
     }
 
     #[test]
@@ -1311,7 +1343,12 @@ mod tests {
         // too. Hand-craft one: valid member + appended empty member.
         let (_d, store) = test_store(cfg(24.0, 1024, 1024));
         let r = store
-            .store(&json!({"k": format!("pad-{}", "w".repeat(300))}), "agent-a", "t", None)
+            .store(
+                &json!({"k": format!("pad-{}", "w".repeat(300))}),
+                "agent-a",
+                "t",
+                None,
+            )
             .unwrap();
         let path = store
             .data_dir
@@ -1359,13 +1396,21 @@ mod tests {
     fn stats_shapes_match_python() {
         let (_d, store) = test_store(cfg(24.0, 1024, 1024));
         store
-            .store(&json!({"k": format!("p{}", "r".repeat(80))}), "agent-a", "t", None)
+            .store(
+                &json!({"k": format!("p{}", "r".repeat(80))}),
+                "agent-a",
+                "t",
+                None,
+            )
             .unwrap();
         let stats = store.stats(Some("agent-a")).unwrap();
         assert_eq!(stats["entries"], json!(1));
         assert!(stats["stored_bytes"].as_i64().unwrap() > 0);
         assert_eq!(stats["ttl_hours"], json!(24.0));
-        assert!(stats["data_dir"].as_str().unwrap().ends_with("scratch-data"));
+        assert!(stats["data_dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("scratch-data"));
         let global = store.stats(None).unwrap();
         assert_eq!(global["entries"], json!(1));
     }
@@ -1499,16 +1544,27 @@ mod tests {
         assert_eq!(mode, 0o755, "must not chmod through the link");
         // and the store still works through it
         let r = store.store(&json!({"k": "v"}), "a", "t", None).unwrap();
-        assert_eq!(store.retrieve(&r.scratch_ref, "a", RetrieveOpts::default()).unwrap()["status"], "ok");
+        assert_eq!(
+            store
+                .retrieve(&r.scratch_ref, "a", RetrieveOpts::default())
+                .unwrap()["status"],
+            "ok"
+        );
     }
 
     #[test]
     fn existing_world_readable_db_is_tightened_to_0600() {
         let d = tempfile::tempdir().unwrap();
         let db = d.path().join("scratch.db");
-        drop(ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024)).unwrap());
+        drop(
+            ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024)).unwrap(),
+        );
         fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
-        let store = ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024)).unwrap();
-        assert_eq!(fs::metadata(&store.db_path).unwrap().permissions().mode() & 0o777, 0o600);
+        let store =
+            ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024)).unwrap();
+        assert_eq!(
+            fs::metadata(&store.db_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

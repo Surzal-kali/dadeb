@@ -92,7 +92,9 @@ pub enum PcapFormatError {
     /// Not a libpcap container (pcapng / garbage).
     BadMagic(String),
     /// incl_len beyond MAX_SNAPLEN.
-    OversizedRecord { incl_len: u32 },
+    OversizedRecord {
+        incl_len: u32,
+    },
 }
 
 impl std::fmt::Display for PcapFormatError {
@@ -101,7 +103,10 @@ impl std::fmt::Display for PcapFormatError {
             Self::Io(e) => write!(f, "pcap io error: {e}"),
             Self::BadMagic(m) => write!(f, "not a pcap file: {m}"),
             Self::OversizedRecord { incl_len } => {
-                write!(f, "corrupt pcap record: incl_len {incl_len} exceeds {MAX_SNAPLEN}")
+                write!(
+                    f,
+                    "corrupt pcap record: incl_len {incl_len} exceeds {MAX_SNAPLEN}"
+                )
             }
         }
     }
@@ -217,7 +222,11 @@ impl<R: Read> PcapReader<R> {
         };
         let word = |start: usize, be: bool| -> u32 {
             let b: [u8; 4] = buf[start..start + 4].try_into().unwrap();
-            if be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+            if be {
+                u32::from_be_bytes(b)
+            } else {
+                u32::from_le_bytes(b)
+            }
         };
         // `buf` starts AFTER the 4-byte magic: [0..4) version major/minor,
         // [4..8) thiszone, [8..12) sigfigs, [12..16) snaplen, [16..20) network.
@@ -245,10 +254,10 @@ impl<R: Read> PcapReader<R> {
         &self.header
     }
 
-/// True once a clean stop happened on a truncated record header/payload.
-pub fn is_truncated(&self) -> bool {
-    self.truncated
-}
+    /// True once a clean stop happened on a truncated record header/payload.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
 
     /// Read as much of `buf` as the stream offers. Returns the byte count:
     /// full `buf.len()`, or fewer at stream EOF (the truncated-tail signal).
@@ -436,7 +445,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("r.pcap");
         let mut w = PcapWriter::create(&path).unwrap();
-        w.write_record(1700000000, 1234, &[0x01, 0x02, 0x03]).unwrap();
+        w.write_record(1700000000, 1234, &[0x01, 0x02, 0x03])
+            .unwrap();
         w.write_record(1700000001, 4321, &[0xff; 60]).unwrap();
         w.flush().unwrap();
         std::mem::drop(w);
@@ -569,18 +579,21 @@ mod tests {
         let mut r = PcapReader::open(&path).unwrap();
         assert!(r.header().nanosecond, "nano magic must set the nano flag");
         assert!(!r.header().big_endian);
-        assert_eq!(r.next_record().unwrap().map(|x| (x.ts_sec, x.ts_usec)),
-            Some((magic_ts, 123_456))); // truncates below the microsecond
         assert_eq!(
-            r.next_record().unwrap().map(|x| x.ts_usec),
-            Some(0)
-        );
+            r.next_record().unwrap().map(|x| (x.ts_sec, x.ts_usec)),
+            Some((magic_ts, 123_456))
+        ); // truncates below the microsecond
+        assert_eq!(r.next_record().unwrap().map(|x| x.ts_usec), Some(0));
         assert_eq!(
             r.next_record().unwrap().map(|x| x.ts_usec),
             Some(999_999) // 999_999_999 ns → 999_999 µs, not 1_000_000
         );
         assert!(r.next_record().unwrap().is_none());
-        assert_eq!(count_records(&path).unwrap(), 3, "seek-walk must accept nano magic");
+        assert_eq!(
+            count_records(&path).unwrap(),
+            3,
+            "seek-walk must accept nano magic"
+        );
     }
 
     #[test]

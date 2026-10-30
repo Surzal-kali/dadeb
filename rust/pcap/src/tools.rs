@@ -125,8 +125,7 @@ pub fn save_pcap(hexes: &[String], filename: &str, cfg: &PcapConfig) -> String {
 
         let mut packets = Vec::with_capacity(hexes.len());
         for (i, h) in hexes.iter().enumerate() {
-            let bytes =
-                hex_to_bytes(h).map_err(|e| format!("packet {}: {e}", i + 1))?;
+            let bytes = hex_to_bytes(h).map_err(|e| format!("packet {}: {e}", i + 1))?;
             if bytes.is_empty() {
                 return Err(format!("packet {}: empty packet", i + 1));
             }
@@ -136,7 +135,8 @@ pub fn save_pcap(hexes: &[String], filename: &str, cfg: &PcapConfig) -> String {
         let (ts, us) = now_epoch_us();
         let mut w = PcapWriter::create(&out_path).map_err(|e| e.to_string())?;
         for p in &packets {
-            w.write_record(ts as u32, us, p).map_err(|e| e.to_string())?;
+            w.write_record(ts as u32, us, p)
+                .map_err(|e| e.to_string())?;
         }
         w.flush().map_err(|e| e.to_string())?;
         std::mem::drop(w);
@@ -160,15 +160,25 @@ pub fn save_pcap(hexes: &[String], filename: &str, cfg: &PcapConfig) -> String {
 
 /// Unfiltered python-parity page: stream to `[offset, offset+limit)`, render
 /// the exact load_pcap text shape (en dash included).
-fn load_pcap_plain(fpath: &Path, file_size: u64, offset: usize, limit: usize) -> Result<String, String> {
-    let name = fpath.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+fn load_pcap_plain(
+    fpath: &Path,
+    file_size: u64,
+    offset: usize,
+    limit: usize,
+) -> Result<String, String> {
+    let name = fpath
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut reader = PcapReader::open(fpath).map_err(|e| format!("load_pcap error: {e}"))?;
     let linktype = reader.header().network;
     let mut total = 0usize;
     let mut skipped = 0usize;
     let mut page: Vec<(String, String)> = Vec::new();
     loop {
-        let rec = reader.next_record().map_err(|e| format!("load_pcap error: {e}"))?;
+        let rec = reader
+            .next_record()
+            .map_err(|e| format!("load_pcap error: {e}"))?;
         let Some(rec) = rec else { break };
         if total >= offset && skipped < limit {
             let view = dissect_frame_linktype(&rec.data, linktype);
@@ -188,9 +198,7 @@ fn load_pcap_plain(fpath: &Path, file_size: u64, offset: usize, limit: usize) ->
     // implies offset >= total); computed without usize underflow.
     let last = (offset + page.len()).saturating_sub(1);
     let mut lines = vec![
-        format!(
-            "Loaded {total} packet(s) from {name} (showing {offset}–{last} of {total}):"
-        ),
+        format!("Loaded {total} packet(s) from {name} (showing {offset}–{last} of {total}):"),
         format!("  size: {file_size} bytes"),
         String::new(),
     ];
@@ -221,7 +229,10 @@ fn load_pcap_filtered(
     if outcome.entries.is_empty() {
         return Ok(no_match_note(opts));
     }
-    let name = fpath.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = fpath
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let displayed = outcome.entries.len();
     let mut lines = vec![
         format!(
@@ -233,7 +244,12 @@ fn load_pcap_filtered(
     ];
     for entry in &outcome.entries {
         match entry {
-            crate::projection::OutcomeEntry::Frame { index, summary, hex, .. } => {
+            crate::projection::OutcomeEntry::Frame {
+                index,
+                summary,
+                hex,
+                ..
+            } => {
                 lines.push(format!("  [{}] {summary}  hex={hex}", index + 1));
             }
             crate::projection::OutcomeEntry::Gap => lines.push("  ...".to_string()),
@@ -289,7 +305,10 @@ pub fn load_pcap(
 ) -> String {
     let fpath = resolve_path(filename, cfg);
     if !fpath.exists() {
-        return format!("load_pcap: file not found: {}", abs_display(&fpath).display());
+        return format!(
+            "load_pcap: file not found: {}",
+            abs_display(&fpath).display()
+        );
     }
     let file_size = match fpath.metadata() {
         Ok(m) => m.len(),
@@ -391,7 +410,9 @@ pub fn list_pcaps(cfg: &PcapConfig) -> String {
             .unwrap_or_else(|| "              ".to_string());
         lines.push(format!(
             "  {}  {}  {} pkts  {}",
-            p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             size_str(md.len()),
             count,
             mtime
@@ -465,14 +486,16 @@ pub fn sniff_to_pcap(
             format!("  sha256: {sha:x}"),
             format!("  packets: {}", packets.len()),
             String::new(),
-            format!(
-                "Packet summaries (first {}):",
-                packets.len().min(20)
-            ),
+            format!("Packet summaries (first {}):", packets.len().min(20)),
         ];
         for (i, p) in packets.iter().enumerate().take(20) {
             let view = dissect_frame_linktype(&p.data, linktype);
-            lines.push(format!("  [{}] {}  hex={}", i + 1, view.summary, hex_string(&p.data)));
+            lines.push(format!(
+                "  [{}] {}  hex={}",
+                i + 1,
+                view.summary,
+                hex_string(&p.data)
+            ));
         }
         if packets.len() > 20 {
             lines.push(format!(
@@ -532,8 +555,14 @@ mod tests {
         assert!(out.contains("Saved 60 packet(s)"), "{out}");
 
         let loaded = load_pcap("big.pcap", 0, 0, None, None, 0, &c);
-        assert!(loaded.contains("[50]"), "frame 50 must be the page end: {loaded}");
-        assert!(!loaded.contains("[51]"), "frame 51 must NOT be shown: {loaded}");
+        assert!(
+            loaded.contains("[50]"),
+            "frame 50 must be the page end: {loaded}"
+        );
+        assert!(
+            !loaded.contains("[51]"),
+            "frame 51 must NOT be shown: {loaded}"
+        );
         assert!(
             loaded.contains("offset=50, limit=50"),
             "next-page hint must point at the following page: {loaded}"
@@ -552,8 +581,14 @@ mod tests {
         assert_eq!(safe_name("cap"), Ok("cap.pcap".to_string()));
         assert_eq!(safe_name("CAP.PCAP"), Ok("CAP.PCAP".to_string()));
         assert_eq!(safe_name("a/b/c"), Ok("c.pcap".to_string()));
-        assert_eq!(safe_name("a/b/"), Err("filename is empty after sanitizing".to_string()));
-        assert_eq!(safe_name("  "), Err("filename is empty after sanitizing".to_string()));
+        assert_eq!(
+            safe_name("a/b/"),
+            Err("filename is empty after sanitizing".to_string())
+        );
+        assert_eq!(
+            safe_name("  "),
+            Err("filename is empty after sanitizing".to_string())
+        );
         assert_eq!(safe_name("a\\b\\win"), Ok("win.pcap".to_string()));
     }
 
@@ -570,15 +605,27 @@ mod tests {
 
         let loaded = load_pcap("t.pcap", 0, 1, None, None, 0, &c);
         let lines: Vec<&str> = loaded.lines().collect();
-        assert_eq!(lines[0], "Loaded 2 packet(s) from t.pcap (showing 0–0 of 2):");
+        assert_eq!(
+            lines[0],
+            "Loaded 2 packet(s) from t.pcap (showing 0–0 of 2):"
+        );
         assert_eq!(lines[1].trim_start(), lines[1].trim_start(), "noop");
         assert!(lines[1].starts_with("  size: "));
-        assert_eq!(lines[3], format!("  [1] Ether / Raw  hex={}", frame(b"one")));
-        assert!(loaded.contains("... 1 more — load_pcap('t.pcap', offset=1, limit=1) for the next page."));
-        assert!(loaded.ends_with("Use dissect_packet with any hex above for a full field breakdown."));
+        assert_eq!(
+            lines[3],
+            format!("  [1] Ether / Raw  hex={}", frame(b"one"))
+        );
+        assert!(loaded
+            .contains("... 1 more — load_pcap('t.pcap', offset=1, limit=1) for the next page."));
+        assert!(
+            loaded.ends_with("Use dissect_packet with any hex above for a full field breakdown.")
+        );
 
         let end = load_pcap("t.pcap", 1, 50, None, None, 0, &c);
-        assert!(end.contains("\n  End of capture (2 packets total)."), "{end}");
+        assert!(
+            end.contains("\n  End of capture (2 packets total)."),
+            "{end}"
+        );
     }
 
     #[test]
@@ -588,7 +635,10 @@ mod tests {
         let c = cfg(dir.path());
         PcapWriter::create(dir.path().join("empty.pcap")).unwrap();
         let out = load_pcap("empty.pcap", 0, 50, None, None, 0, &c);
-        assert!(out.starts_with("No packets in ") && out.ends_with("empty.pcap."), "{out}");
+        assert!(
+            out.starts_with("No packets in ") && out.ends_with("empty.pcap."),
+            "{out}"
+        );
     }
 
     #[test]
@@ -597,7 +647,10 @@ mod tests {
         let c = cfg(dir.path());
         let _ = save_pcap(&[frame(b"a"), frame(b"b")], "p.pcap", &c);
         let out = load_pcap("p.pcap", 5, 50, None, None, 0, &c);
-        assert!(out.starts_with("Loaded 2 packet(s) from p.pcap (showing 5–4 of 2):"), "{out}");
+        assert!(
+            out.starts_with("Loaded 2 packet(s) from p.pcap (showing 5–4 of 2):"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -605,14 +658,21 @@ mod tests {
         // An `any`-interface (LINUX_SLL) capture must dissect as SLL.
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path());
-        let mut f = vec![0, 0, 0, 1, 0, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0, 0x08, 0x00];
-        f.extend_from_slice(&[0x45, 0, 0, 28, 0, 1, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2]);
+        let mut f = vec![
+            0, 0, 0, 1, 0, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0, 0x08, 0x00,
+        ];
+        f.extend_from_slice(&[
+            0x45, 0, 0, 28, 0, 1, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ]);
         f.extend_from_slice(&[8, 0, 0, 0, 0, 1, 0, 1]);
         let mut w = PcapWriter::create_with_linktype(dir.path().join("any.pcap"), 113).unwrap();
         w.write_record(1, 0, &f).unwrap();
         drop(w);
         let out = load_pcap("any.pcap", 0, 50, None, None, 0, &c);
-        assert!(out.contains("[1] SLL / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"), "{out}");
+        assert!(
+            out.contains("[1] SLL / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"),
+            "{out}"
+        );
         let hit = load_pcap("any.pcap", 0, 50, Some("echo-request"), None, 0, &c);
         assert!(hit.starts_with("Loaded 1 matched packet(s)"), "{hit}");
     }
@@ -646,7 +706,9 @@ mod tests {
         let out = load_pcap("big.pcap", 0, 50, None, None, 0, &c);
         assert!(
             out.starts_with("load_pcap: big.pcap is 0.0 MiB (cap is 0 MiB). Use tcpdump/tshark")
-                || out.contains("(cap is 0 MiB). Use tcpdump/tshark directly or raise PCAP_MAX_FILE_MB."),
+                || out.contains(
+                    "(cap is 0 MiB). Use tcpdump/tshark directly or raise PCAP_MAX_FILE_MB."
+                ),
             "{out}"
         );
     }
@@ -656,16 +718,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path());
         let mut hexes = Vec::new();
-        for tag in ["quiet", "needle-here", "quiet2", "needle-again", "quiet3", "quiet4"] {
+        for tag in [
+            "quiet",
+            "needle-here",
+            "quiet2",
+            "needle-again",
+            "quiet3",
+            "quiet4",
+        ] {
             hexes.push(frame(tag.as_bytes()));
         }
         let _ = save_pcap(&hexes, "f.pcap", &c);
 
         let out = load_pcap("f.pcap", 0, 50, Some("needle"), None, 0, &c);
-        assert!(out.starts_with("Loaded 2 matched packet(s) from f.pcap (filtered from 6):"), "{out}");
+        assert!(
+            out.starts_with("Loaded 2 matched packet(s) from f.pcap (filtered from 6):"),
+            "{out}"
+        );
         assert!(out.contains("  [2] Ether / Raw  hex="), "{out}");
-        assert!(out.contains("  ..."), "{out}\n-- gap marker expected: frames 2 and 4 are non-contiguous");
-        assert!(out.contains("\n  End of matches (2 matched of 6 packets total)."), "{out}");
+        assert!(
+            out.contains("  ..."),
+            "{out}\n-- gap marker expected: frames 2 and 4 are non-contiguous"
+        );
+        assert!(
+            out.contains("\n  End of matches (2 matched of 6 packets total)."),
+            "{out}"
+        );
 
         let none = load_pcap("f.pcap", 0, 50, Some("absent-marker"), None, 0, &c);
         assert_eq!(none, "[no packets matched filter: 'absent-marker']");
@@ -714,14 +792,26 @@ mod tests {
         let c = cfg(dir.path());
         let out = save_pcap(&[frame(b"z")], "", &c);
         // cap_YYYYmmdd_HHMMSS.pcap
-        let name_start = out.find("Saved 1 packet(s) to ").unwrap()
-            + "Saved 1 packet(s) to ".len();
+        let name_start = out.find("Saved 1 packet(s) to ").unwrap() + "Saved 1 packet(s) to ".len();
         let path = &out[name_start..out.find('\n').unwrap()];
-        let fname = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+        let fname = Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(fname.len(), 4 + 8 + 1 + 6 + 5, "{fname}");
-        assert!(fname.starts_with("cap_") && fname.ends_with(".pcap"), "{fname}");
-        assert!(fname.chars().skip(4).take(8).all(|ch| ch.is_ascii_digit()), "{fname}");
+        assert!(
+            fname.starts_with("cap_") && fname.ends_with(".pcap"),
+            "{fname}"
+        );
+        assert!(
+            fname.chars().skip(4).take(8).all(|ch| ch.is_ascii_digit()),
+            "{fname}"
+        );
         assert!(fname.chars().nth(12) == Some('_'), "{fname}");
-        assert!(fname.chars().skip(13).take(6).all(|ch| ch.is_ascii_digit()), "{fname}");
+        assert!(
+            fname.chars().skip(13).take(6).all(|ch| ch.is_ascii_digit()),
+            "{fname}"
+        );
     }
 }

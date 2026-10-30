@@ -152,8 +152,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ts.pcap");
         let packets = vec![
-            CapturedPacket { ts_sec: 1_700_000_000, ts_usec: 111, data: vec![0x01, 0x02] },
-            CapturedPacket { ts_sec: 1_700_000_005, ts_usec: 999_999, data: vec![0x33] },
+            CapturedPacket {
+                ts_sec: 1_700_000_000,
+                ts_usec: 111,
+                data: vec![0x01, 0x02],
+            },
+            CapturedPacket {
+                ts_sec: 1_700_000_005,
+                ts_usec: 999_999,
+                data: vec![0x33],
+            },
         ];
         let n = write_capture_records(&path, 1, &packets).unwrap();
         assert_eq!(n, 2);
@@ -169,7 +177,13 @@ mod tests {
     fn bogus_device_errors() {
         // a nonsense device name must surface as an Open error with text,
         // never panic — the honest shape sniff_to_pcap renders.
-        let err = sniff("definitely-not-an-iface-0000", "tcp", 1, Duration::from_secs(2)).unwrap_err();
+        let err = sniff(
+            "definitely-not-an-iface-0000",
+            "tcp",
+            1,
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
         let text = sniff_error_text(&err);
         assert!(
             text.starts_with("sniff_to_pcap error:") || text.starts_with("sniff_to_pcap requires"),
@@ -227,7 +241,11 @@ mod tests {
         let t = Instant::now();
         let got = sniff("lo", "udp port 1", 5, Duration::from_secs(2)).expect("capture");
         assert!(got.packets.is_empty());
-        assert!(t.elapsed() < Duration::from_secs(3), "overran: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "overran: {:?}",
+            t.elapsed()
+        );
     }
 
     // Real-wire test — needs root + a live interface; run by hand:

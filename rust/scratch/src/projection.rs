@@ -111,11 +111,9 @@ pub fn apply_projection(
                 }
             }
             Some(Value::String(s))
-                if (pattern_lower.is_some() || regex.is_some())
-                    && s.len() >= grep_min_chars =>
+                if (pattern_lower.is_some() || regex.is_some()) && s.len() >= grep_min_chars =>
             {
-                let grepped =
-                    grep_string(&s, pattern_lower.as_deref(), regex, context_lines);
+                let grepped = grep_string(&s, pattern_lower.as_deref(), regex, context_lines);
                 result.insert(key.clone(), Value::String(grepped));
                 meta.grepped_keys.push(key);
             }
@@ -131,13 +129,11 @@ pub fn apply_projection(
             m.insert("limit".into(), json!(limit));
         }
         if !meta.grepped_keys.is_empty() {
-            m.insert(
-                "grepped_keys".into(),
-                json!(meta.grepped_keys),
-            );
+            m.insert("grepped_keys".into(), json!(meta.grepped_keys));
             m.insert(
                 "filter".into(),
-                json!(filter_pattern.map(str::to_string)
+                json!(filter_pattern
+                    .map(str::to_string)
                     .or_else(|| regex.map(|re| re.as_str().to_string()))),
             );
             m.insert("context_lines".into(), json!(context_lines));
@@ -296,14 +292,7 @@ mod tests {
         // Filter-only list shaping adds no meta (python: paged needs offset or
         // a limit that truncated; no string was grepped).
         assert!(meta.is_empty());
-        let (_, meta) = project(
-            json!({"rows": ["a"]}),
-            0,
-            2,
-            Some("a"),
-            None,
-            0,
-        );
+        let (_, meta) = project(json!({"rows": ["a"]}), 0, 2, Some("a"), None, 0);
         // total(1) <= limit(2): filtered, but not marked paged.
         assert!(meta.is_empty());
     }
@@ -373,10 +362,7 @@ mod tests {
     fn no_matches_returns_the_note_string() {
         let text = "alpha\nbeta\n".repeat(100);
         let (out, _) = project(json!({"body": text}), 0, 0, Some("zzznope"), None, 0);
-        assert_eq!(
-            out["body"],
-            json!("[no lines matched filter: 'zzznope']")
-        );
+        assert_eq!(out["body"], json!("[no lines matched filter: 'zzznope']"));
     }
 
     #[test]

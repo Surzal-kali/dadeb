@@ -105,11 +105,19 @@ fn read(rest: &[String], structured: bool) {
         match pcap::pcap_search(&path, &opts, &PcapConfig::with_dir(".")) {
             Ok(out) => {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&json_outcome(&out)).unwrap());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json_outcome(&out)).unwrap()
+                    );
                 } else {
                     for e in &out.entries {
                         match e {
-                            pcap::OutcomeEntry::Frame { index, summary, ascii, .. } => {
+                            pcap::OutcomeEntry::Frame {
+                                index,
+                                summary,
+                                ascii,
+                                ..
+                            } => {
                                 println!("[{}] {}", index + 1, summary);
                                 if !ascii.is_empty() {
                                     println!("     ascii: {}", ascii.replace('\n', " | "));
@@ -256,7 +264,9 @@ fn bpf_compile(f: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .open()
         .map_err(|e| format!("open lo for bpf compile: {e}"))?;
-    cap.filter(f, true).map(|_| ()).map_err(|e| format!("invalid BPF: {e}"))
+    cap.filter(f, true)
+        .map(|_| ())
+        .map_err(|e| format!("invalid BPF: {e}"))
 }
 
 fn die(msg: &str) -> ! {

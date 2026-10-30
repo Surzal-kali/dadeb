@@ -38,12 +38,7 @@ fn main() {
             )
             .expect("open store");
             let receipt = store
-                .store(
-                    &value,
-                    &args[4],
-                    &args[5],
-                    args.get(6).map(String::as_str),
-                )
+                .store(&value, &args[4], &args[5], args.get(6).map(String::as_str))
                 .expect("store");
             println!("{}", receipt.to_envelope());
         }
@@ -66,10 +61,7 @@ fn main() {
                 scratch::ScratchConfig::from_env(),
             )
             .expect("open store");
-            let limit: usize = args
-                .get(5)
-                .and_then(|l| l.parse().ok())
-                .unwrap_or(20);
+            let limit: usize = args.get(5).and_then(|l| l.parse().ok()).unwrap_or(20);
             let rows = store.list_entries(&args[4], limit).expect("list");
             println!("{}", serde_json::Value::Array(rows));
         }

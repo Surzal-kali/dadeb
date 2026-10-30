@@ -53,7 +53,10 @@ fn u16be(b: &[u8], off: usize) -> Option<u16> {
 }
 
 fn mac(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
+    b.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn ipv4(b: &[u8]) -> String {
@@ -369,7 +372,11 @@ fn parse_ipv6(b: &mut Builder, off: usize) {
     // A snapped capture (or a lying header) can claim more payload than was
     // captured — clamp to what we actually have, like the IPv4 total_len path.
     // plen == 0 is a jumbogram / TSO artifact: take the rest of the frame.
-    let l4_end = if plen == 0 { f.len() } else { (off + 40 + plen).min(f.len()) };
+    let l4_end = if plen == 0 {
+        f.len()
+    } else {
+        (off + 40 + plen).min(f.len())
+    };
     match nxt {
         6 => parse_tcp(b, l4, l4_end, &src.to_string(), &dst.to_string()),
         17 => parse_udp(b, l4, l4_end, &src.to_string(), &dst.to_string()),
@@ -407,8 +414,14 @@ fn parse_arp(b: &mut Builder, off: usize) {
 fn flag_letters(flags: u8) -> String {
     // scapy bit order: F S R P A U E C
     const L: [(u8, char); 8] = [
-        (0x01, 'F'), (0x02, 'S'), (0x04, 'R'), (0x08, 'P'),
-        (0x10, 'A'), (0x20, 'U'), (0x40, 'E'), (0x80, 'C'),
+        (0x01, 'F'),
+        (0x02, 'S'),
+        (0x04, 'R'),
+        (0x08, 'P'),
+        (0x10, 'A'),
+        (0x20, 'U'),
+        (0x40, 'E'),
+        (0x80, 'C'),
     ];
     let mut s = String::new();
     for (bit, c) in L {
@@ -442,7 +455,9 @@ fn parse_tcp(b: &mut Builder, off: usize, end: usize, src: &str, dst: &str) {
     let payload = &f[hstart..end];
     // DNS over TCP: 2-byte length prefix covering exactly the message.
     if payload.len() >= 14
-        && u16be(payload, 0).map(|n| (n as usize + 2) == payload.len()).unwrap_or(false)
+        && u16be(payload, 0)
+            .map(|n| (n as usize + 2) == payload.len())
+            .unwrap_or(false)
     {
         parse_dns(b, &payload[2..]);
         return;
@@ -476,8 +491,17 @@ fn parse_udp(b: &mut Builder, off: usize, end: usize, src: &str, dst: &str) {
 }
 
 const DNS_QTYPES: &[(u16, &str)] = &[
-    (1, "A"), (2, "NS"), (5, "CNAME"), (6, "SOA"), (12, "PTR"), (15, "MX"),
-    (16, "TXT"), (28, "AAAA"), (33, "SRV"), (65, "HTTPS"), (255, "ANY"),
+    (1, "A"),
+    (2, "NS"),
+    (5, "CNAME"),
+    (6, "SOA"),
+    (12, "PTR"),
+    (15, "MX"),
+    (16, "TXT"),
+    (28, "AAAA"),
+    (33, "SRV"),
+    (65, "HTTPS"),
+    (255, "ANY"),
 ];
 
 /// Parse the first question of a DNS message (compression pointers followed
@@ -535,18 +559,34 @@ fn parse_dns(b: &mut Builder, msg: &[u8]) {
 }
 
 const ICMP4: &[(u8, &str)] = &[
-    (0, "echo-reply"), (3, "dest-unreach"), (4, "source-quench"),
-    (5, "redirect"), (8, "echo-request"), (9, "router-advertisement"),
-    (10, "router-solicitation"), (11, "time-exceeded"), (12, "parameter-problem"),
-    (13, "timestamp"), (14, "timestamp-reply"), (15, "info-request"),
-    (16, "info-reply"), (17, "address-mask"), (18, "address-mask-reply"),
+    (0, "echo-reply"),
+    (3, "dest-unreach"),
+    (4, "source-quench"),
+    (5, "redirect"),
+    (8, "echo-request"),
+    (9, "router-advertisement"),
+    (10, "router-solicitation"),
+    (11, "time-exceeded"),
+    (12, "parameter-problem"),
+    (13, "timestamp"),
+    (14, "timestamp-reply"),
+    (15, "info-request"),
+    (16, "info-reply"),
+    (17, "address-mask"),
+    (18, "address-mask-reply"),
 ];
 
 const ICMP6: &[(u8, &str)] = &[
-    (1, "dest-unreach"), (2, "packet-too-big"), (3, "time-exceeded"),
-    (4, "parameter-problem"), (128, "echo-request"), (129, "echo-reply"),
-    (133, "router-solicitation"), (134, "router-advertisement"),
-    (135, "neighbor-solicitation"), (136, "neighbor-advertisement"),
+    (1, "dest-unreach"),
+    (2, "packet-too-big"),
+    (3, "time-exceeded"),
+    (4, "parameter-problem"),
+    (128, "echo-request"),
+    (129, "echo-reply"),
+    (133, "router-solicitation"),
+    (134, "router-advertisement"),
+    (135, "neighbor-solicitation"),
+    (136, "neighbor-advertisement"),
 ];
 
 fn parse_icmp(b: &mut Builder, off: usize, end: usize, src: &str, dst: &str, v6: bool) {
@@ -613,7 +653,9 @@ fn parse_http(b: &mut Builder, payload: &[u8]) {
         .unwrap_or(payload.len());
     let method = &payload[..first_word_end];
     let ok = HTTP_METHODS.iter().any(|m| m.as_bytes() == method)
-        && payload.windows(9).any(|w| w == b" HTTP/1.1" || w == b" HTTP/1.0");
+        && payload
+            .windows(9)
+            .any(|w| w == b" HTTP/1.1" || w == b" HTTP/1.0");
     if !ok {
         return;
     }
@@ -707,7 +749,9 @@ mod tests {
             v.summary,
             "Ether / IP / UDP 10.0.0.1.50000 > 10.0.0.2.53 DNS Qry \"example.com.\""
         );
-        assert!(v.fields.contains(&("dns.qname".into(), "example.com.".into())));
+        assert!(v
+            .fields
+            .contains(&("dns.qname".into(), "example.com.".into())));
         assert!(v.fields.contains(&("dns.qtype".into(), "A".into())));
     }
 
@@ -715,7 +759,10 @@ mod tests {
     fn icmp_echo_request() {
         let icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
         let v = dissect_frame(&eth_ip_proto(1, &icmp));
-        assert_eq!(v.summary, "Ether / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0");
+        assert_eq!(
+            v.summary,
+            "Ether / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"
+        );
         assert!(v.fields.contains(&("icmp.type".into(), "8".into())));
     }
 
@@ -728,7 +775,10 @@ mod tests {
         arp.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // tha
         arp.extend_from_slice(&[192, 168, 56, 102]); // tpa
         let v = dissect_frame(&eth(0x0806, &arp));
-        assert_eq!(v.summary, "Ether / ARP who has 192.168.56.102 says 192.168.56.101");
+        assert_eq!(
+            v.summary,
+            "Ether / ARP who has 192.168.56.102 says 192.168.56.101"
+        );
         assert!(v.fields.contains(&("arp.op".into(), "1".into())));
     }
 
@@ -740,7 +790,9 @@ mod tests {
         arp.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
         arp.extend_from_slice(&[192, 168, 56, 101]);
         let v = dissect_frame(&eth(0x0806, &arp));
-        assert!(v.summary.starts_with("Ether / ARP is at 66:77:88:99:aa:bb says 192.168.56.102"));
+        assert!(v
+            .summary
+            .starts_with("Ether / ARP is at 66:77:88:99:aa:bb says 192.168.56.102"));
     }
 
     #[test]
@@ -748,8 +800,7 @@ mod tests {
         let mut body = vec![0x00, 0x0a, 0x08, 0x00]; // vid 10, inner ethertype IP
         body.extend_from_slice(&eth_ip_proto(1, &[8, 0, 0, 0, 0, 0, 0, 1])[14..]);
         let mut tagged = vec![
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
-            0x81, 0x00,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x81, 0x00,
         ];
         tagged.extend_from_slice(&body);
         let v = dissect_frame(&tagged);
@@ -796,26 +847,47 @@ mod tests {
 
     #[test]
     fn http_request_detected() {
-        let mut tcp = vec![0xc3, 0x50, 0x00, 0x50, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0x71, 0x10, 0, 0, 0, 0];
-        tcp.extend_from_slice(b"GET /admin HTTP/1.1\r\nHost: target.local\r\nUser-Agent: curl/8.0\r\n\r\n");
+        let mut tcp = vec![
+            0xc3, 0x50, 0x00, 0x50, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0x71, 0x10, 0, 0, 0, 0,
+        ];
+        tcp.extend_from_slice(
+            b"GET /admin HTTP/1.1\r\nHost: target.local\r\nUser-Agent: curl/8.0\r\n\r\n",
+        );
         let v = dissect_frame(&eth_ip_proto(6, &tcp));
-        assert!(v.summary.starts_with("Ether / IP / TCP 10.0.0.1.50000 > 10.0.0.2.80 PA"), "{}", v.summary);
+        assert!(
+            v.summary
+                .starts_with("Ether / IP / TCP 10.0.0.1.50000 > 10.0.0.2.80 PA"),
+            "{}",
+            v.summary
+        );
         assert!(v.fields.contains(&("http.method".into(), "GET".into())));
-        assert!(v.fields.contains(&("http.host".into(), "target.local".into())));
-        assert!(v.fields.contains(&("http.user_agent".into(), "curl/8.0".into())));
+        assert!(v
+            .fields
+            .contains(&("http.host".into(), "target.local".into())));
+        assert!(v
+            .fields
+            .contains(&("http.user_agent".into(), "curl/8.0".into())));
     }
 
     #[test]
     fn http_response_detected() {
-        let mut tcp = vec![0x00, 0x50, 0xc3, 0x50, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0x71, 0x10, 0, 0, 0, 0];
+        let mut tcp = vec![
+            0x00, 0x50, 0xc3, 0x50, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0x71, 0x10, 0, 0, 0, 0,
+        ];
         tcp.extend_from_slice(b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\n\r\n");
         // response traffic rides the reversed direction (server -> client)
         let v = dissect_frame(&eth_ip4([10, 0, 0, 2], [10, 0, 0, 1], 6, &tcp));
-        assert!(v.summary.starts_with("Ether / IP / TCP 10.0.0.2.80 > 10.0.0.1.50000 PA"));
+        assert!(v
+            .summary
+            .starts_with("Ether / IP / TCP 10.0.0.2.80 > 10.0.0.1.50000 PA"));
         assert!(v.summary.contains("HTTPResponse"));
         assert!(v.fields.contains(&("http.status".into(), "403".into())));
-        assert!(v.fields.contains(&("http.reason".into(), "Forbidden".into())));
-        assert!(v.fields.contains(&("http.content_type".into(), "text/html".into())));
+        assert!(v
+            .fields
+            .contains(&("http.reason".into(), "Forbidden".into())));
+        assert!(v
+            .fields
+            .contains(&("http.content_type".into(), "text/html".into())));
     }
 
     #[test]
@@ -833,11 +905,20 @@ mod tests {
 
     /// Every fixture frame the suite builds, for the sweep below.
     fn fixtures() -> Vec<Vec<u8>> {
-        let mut tcp = vec![0xd2, 0xf0, 0x00, 0x16, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0x71, 0x10, 0, 0, 0, 0];
+        let mut tcp = vec![
+            0xd2, 0xf0, 0x00, 0x16, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0x71, 0x10, 0, 0, 0, 0,
+        ];
         tcp.extend_from_slice(b"GET /admin HTTP/1.1\r\nHost: target.local\r\n\r\n");
-        let mut dns = vec![0xc3, 0x50, 0x00, 0x35, 0x00, 0x1e, 0x00, 0x00, 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-        dns.extend_from_slice(&[7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1]);
-        let mut tcp_dns = vec![0, 53, 0, 53, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0, 0, 0, 0, 0, 0, 0, 17];
+        let mut dns = vec![
+            0xc3, 0x50, 0x00, 0x35, 0x00, 0x1e, 0x00, 0x00, 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0,
+            0, 0, 0, 0, 0,
+        ];
+        dns.extend_from_slice(&[
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1,
+        ]);
+        let mut tcp_dns = vec![
+            0, 53, 0, 53, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 0x18, 0, 0, 0, 0, 0, 0, 0, 17,
+        ];
         tcp_dns.extend_from_slice(&dns[8..]);
         let mut ip6 = vec![0x60, 0, 0, 0, 0x00, 0x08, 58, 0x40];
         ip6.extend_from_slice(&[0u8; 32]);
@@ -846,8 +927,14 @@ mod tests {
         ip6tcp.extend_from_slice(&[0u8; 32]);
         ip6tcp.extend_from_slice(&tcp[..34]);
         let mut arp = vec![0x00, 0x01, 0x08, 0x00, 6, 4, 0x00, 0x01];
-        arp.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 192, 168, 56, 101, 0, 0, 0, 0, 0, 0, 192, 168, 56, 102]);
-        let icmp = eth_ip_proto(1, &[8, 0, 0, 0, 0x12, 0x34, 0x00, 0x01, b'p', b'i', b'n', b'g']);
+        arp.extend_from_slice(&[
+            0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 192, 168, 56, 101, 0, 0, 0, 0, 0, 0, 192, 168, 56,
+            102,
+        ]);
+        let icmp = eth_ip_proto(
+            1,
+            &[8, 0, 0, 0, 0x12, 0x34, 0x00, 0x01, b'p', b'i', b'n', b'g'],
+        );
         let mut vlan = vec![0u8; 12];
         vlan.extend_from_slice(&[0x81, 0x00, 0x00, 0x0a, 0x88, 0xa8, 0x00, 0x0b, 0x08, 0x00]);
         vlan.extend_from_slice(&icmp[14..]);
@@ -870,8 +957,15 @@ mod tests {
     #[test]
     fn prefix_sweep_never_panics() {
         let linktypes = [
-            LINKTYPE_ETHERNET, LINKTYPE_RAW, LINKTYPE_IPV4, LINKTYPE_IPV6,
-            LINKTYPE_LINUX_SLL, LINKTYPE_LINUX_SLL2, LINKTYPE_NULL, LINKTYPE_LOOP, 9999,
+            LINKTYPE_ETHERNET,
+            LINKTYPE_RAW,
+            LINKTYPE_IPV4,
+            LINKTYPE_IPV6,
+            LINKTYPE_LINUX_SLL,
+            LINKTYPE_LINUX_SLL2,
+            LINKTYPE_NULL,
+            LINKTYPE_LOOP,
+            9999,
         ];
         for f in fixtures() {
             for n in 0..=f.len() {
@@ -922,7 +1016,9 @@ mod tests {
 
     #[test]
     fn regress_ipv6_tcp_plen_beyond_capture() {
-        let mut tcp = vec![0, 80, 0xc3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x18, 0, 0, 0, 0, 0, 0];
+        let mut tcp = vec![
+            0, 80, 0xc3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x18, 0, 0, 0, 0, 0, 0,
+        ];
         tcp.extend_from_slice(b"GET / HTTP/1.1\r\nHost: h\r\n");
         let v = dissect_frame(&ip6_snapped(6, &tcp));
         assert!(v.summary.starts_with("Ether / IPv6 / TCP"), "{}", v.summary);
@@ -937,7 +1033,9 @@ mod tests {
 
     #[test]
     fn regress_tcp_data_offset_past_capture() {
-        let tcp = [0, 80, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0xf0, 0x02, 0, 0, 0, 0, 0, 0];
+        let tcp = [
+            0, 80, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0xf0, 0x02, 0, 0, 0, 0, 0, 0,
+        ];
         let v = dissect_frame(&eth_ip_proto(6, &tcp));
         assert_eq!(v.summary, "Ether / IP / TCP 10.0.0.1.80 > 10.0.0.2.80 S");
         assert_eq!(v.ascii, "");
@@ -946,7 +1044,10 @@ mod tests {
     #[test]
     fn regress_icmp_echo_four_bytes() {
         let v = dissect_frame(&eth_ip_proto(1, &[8, 0, 0, 0]));
-        assert_eq!(v.summary, "Ether / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0");
+        assert_eq!(
+            v.summary,
+            "Ether / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"
+        );
     }
 
     // ------------------------------------------------------ linktypes ----
@@ -956,28 +1057,43 @@ mod tests {
         let ip = eth_ip_proto(1, &[8, 0, 0, 0, 0, 1, 0, 1])[14..].to_vec();
         let v = dissect_frame_linktype(&ip, LINKTYPE_RAW);
         assert_eq!(v.summary, "IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0");
-        assert_eq!(dissect_frame_linktype(&ip, LINKTYPE_IPV4).summary, v.summary);
+        assert_eq!(
+            dissect_frame_linktype(&ip, LINKTYPE_IPV4).summary,
+            v.summary
+        );
     }
 
     #[test]
     fn linktype_linux_sll() {
         // tcpdump -i any, v1 cooked header: pkttype 0 (to us), ARPHRD_ETHER,
         // halen 6, addr (8, padded), protocol IPv4.
-        let mut f = vec![0, 0, 0, 1, 0, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0, 0x08, 0x00];
+        let mut f = vec![
+            0, 0, 0, 1, 0, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0, 0x08, 0x00,
+        ];
         f.extend_from_slice(&eth_ip_proto(1, &[8, 0, 0, 0, 0, 1, 0, 1])[14..]);
         let v = dissect_frame_linktype(&f, LINKTYPE_LINUX_SLL);
-        assert_eq!(v.summary, "SLL / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0");
-        assert!(v.fields.contains(&("sll.src".into(), "66:77:88:99:aa:bb".into())));
+        assert_eq!(
+            v.summary,
+            "SLL / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"
+        );
+        assert!(v
+            .fields
+            .contains(&("sll.src".into(), "66:77:88:99:aa:bb".into())));
         // The bug this replaces: the same bytes read as Ethernet are garbage.
         assert!(!dissect_frame(&f).summary.contains("ICMP"));
     }
 
     #[test]
     fn linktype_linux_sll2() {
-        let mut f = vec![0x08, 0x00, 0, 0, 0, 0, 0, 3, 0, 1, 4, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0];
+        let mut f = vec![
+            0x08, 0x00, 0, 0, 0, 0, 0, 3, 0, 1, 4, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0,
+        ];
         f.extend_from_slice(&eth_ip_proto(1, &[8, 0, 0, 0, 0, 1, 0, 1])[14..]);
         let v = dissect_frame_linktype(&f, LINKTYPE_LINUX_SLL2);
-        assert_eq!(v.summary, "SLL2 / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0");
+        assert_eq!(
+            v.summary,
+            "SLL2 / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"
+        );
         assert!(v.fields.contains(&("sll.ifindex".into(), "3".into())));
     }
 
@@ -986,7 +1102,10 @@ mod tests {
         let mut f = 2u32.to_le_bytes().to_vec(); // AF_INET, host order
         f.extend_from_slice(&eth_ip_proto(1, &[8, 0, 0, 0, 0, 1, 0, 1])[14..]);
         let v = dissect_frame_linktype(&f, LINKTYPE_NULL);
-        assert_eq!(v.summary, "Loopback / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0");
+        assert_eq!(
+            v.summary,
+            "Loopback / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"
+        );
     }
 
     #[test]

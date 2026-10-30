@@ -47,10 +47,7 @@ impl PcapConfig {
             Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
             _ => match std::env::var("WORKSPACE_ROOT") {
                 Ok(root) if !root.trim().is_empty() => Path::new(&root).join("pcaps"),
-                _ => PathBuf::from(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../pcaps",
-                )),
+                _ => PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../pcaps",)),
             },
         };
         Self {
