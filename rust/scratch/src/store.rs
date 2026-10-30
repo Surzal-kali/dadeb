@@ -171,6 +171,7 @@ impl ScratchStore {
         // SQLITE_OPEN_NOFOLLOW: a symlinked scratch.db is refused outright
         // — following it as root would chmod (and write a schema into)
         // whatever the link points at. Divergence: the python store follows.
+        refuse_symlinked_sidecars(db_path)?;
         prepare_db_file(db_path)?;
         let mut conn = Connection::open_with_flags(
             db_path,
@@ -192,6 +193,8 @@ impl ScratchStore {
             [],
         )?;
         tx.commit()?;
+
+        harden_db_sidecars(db_path);
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -221,6 +224,18 @@ impl ScratchStore {
     /// returns to the model when `result_mode` is digest/page — it carries
     /// the opaque reference plus the retrieval instruction.
     pub fn store(
+        &self,
+        result: &Value,
+        agent_id: &str,
+        tool_id: &str,
+        chat_id: Option<&str>,
+    ) -> Result<StoreReceipt> {
+        let out = self.store_inner(result, agent_id, tool_id, chat_id);
+        harden_db_sidecars(&self.db_path);
+        out
+    }
+
+    fn store_inner(
         &self,
         result: &Value,
         agent_id: &str,
@@ -346,6 +361,17 @@ impl ScratchStore {
     /// infrastructure failures (`Result::Err`) raise. Unknown ref, wrong
     /// agent, and expired all yield distinct documented envelopes.
     pub fn retrieve(&self, scratch_ref: &str, agent_id: &str, opts: RetrieveOpts) -> Result<Value> {
+        let out = self.retrieve_inner(scratch_ref, agent_id, opts);
+        harden_db_sidecars(&self.db_path);
+        out
+    }
+
+    fn retrieve_inner(
+        &self,
+        scratch_ref: &str,
+        agent_id: &str,
+        opts: RetrieveOpts,
+    ) -> Result<Value> {
         let scratch_id = match parse_ref(scratch_ref) {
             Some(id) => id.to_string(),
             None => {
@@ -497,6 +523,7 @@ impl ScratchStore {
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        harden_db_sidecars(&self.db_path);
         Ok(rows
             .into_iter()
             .map(|(id, tool_id, created_at, expires_at, stored_bytes)| {
@@ -530,6 +557,7 @@ impl ScratchStore {
                 )?,
             }
         };
+        harden_db_sidecars(&self.db_path);
         Ok(json!({
             "entries": count,
             "stored_bytes": bytes,
@@ -541,17 +569,23 @@ impl ScratchStore {
     /// Public cleanup: delete expired entries. Returns count removed.
     pub fn cleanup_expired(&self) -> Result<usize> {
         let mut conn = lock(&self.conn);
-        cleanup_expired_locked(&mut conn, now_secs(), &self.data_dir)
+        let removed = cleanup_expired_locked(&mut conn, now_secs(), &self.data_dir)?;
+        harden_db_sidecars(&self.db_path);
+        Ok(removed)
     }
 }
 
 // ---------------------------------------------------------------- helpers --
 
 /// Open `path` itself (never a symlink's target): ELOOP when it is a link.
+/// The file case adds O_NONBLOCK so a planted FIFO can't hang open() waiting
+/// for a writer — regular files ignore it, and callers check `is_file()`.
 fn open_nofollow(path: &Path, dir: bool) -> std::io::Result<fs::File> {
     let mut flags = nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
     if dir {
         flags |= nix::libc::O_DIRECTORY;
+    } else {
+        flags |= nix::libc::O_NONBLOCK;
     }
     OpenOptions::new().read(true).custom_flags(flags).open(path)
 }
@@ -595,6 +629,76 @@ fn prepare_db_file(db_path: &Path) -> Result<()> {
     }
     if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
         eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
+    }
+    Ok(())
+}
+
+/// chmod the `-wal`/`-shm` sidecars 0600 through `O_NOFOLLOW` descriptors.
+/// sqlite mints them 0644 (+umask) and they hold the same row data as the
+/// db. Called after open()'s init transaction AND at the end of the
+/// store/retrieve/list/stats/cleanup hot paths: on a re-open of an
+/// existing WAL db the sidecars do not exist at open-completion — sqlite
+/// mints them at the first statement, so the hot paths re-harden the
+/// fresh files. Missing sidecars skip silently; symlinked sidecars are
+/// left alone (never chmod through a link — loud, like the data-dir
+/// case, since a planted link is a workspace problem an operator must
+/// fix); non-regular files (e.g. a planted FIFO, opened non-blocking by
+/// `open_nofollow`) are skipped as not ours.
+fn harden_db_sidecars(db_path: &Path) {
+    let name = db_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    for suffix in ["-wal", "-shm"] {
+        let side = db_path.with_file_name(format!("{name}{suffix}"));
+        let file = match open_nofollow(&side, false) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => {
+                eprintln!(
+                    "[scratch] sidecar {} is a symlink; leaving its target's permissions alone",
+                    side.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[scratch] sidecar chmod 0600 skipped: {e}");
+                continue;
+            }
+        };
+        let is_regular = file
+            .metadata()
+            .map(|m| m.file_type().is_file())
+            .unwrap_or(false);
+        if !is_regular {
+            continue;
+        }
+        if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+            eprintln!("[scratch] sidecar chmod 0600 skipped: {e}");
+        }
+    }
+}
+
+/// A planted `-wal`/`-shm` symlink would funnel sqlite's own sidecar
+/// writes at the link's target; refused like the db itself. Missing
+/// sidecars are normal (fresh db, or a clean close removed them).
+fn refuse_symlinked_sidecars(db_path: &Path) -> Result<()> {
+    let name = db_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    for suffix in ["-wal", "-shm"] {
+        let side = db_path.with_file_name(format!("{name}{suffix}"));
+        if fs::symlink_metadata(&side)
+            .map(|md| md.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(ScratchError::Io(std::io::Error::other(format!(
+                "refusing to open {}: sidecar {} is a symlink",
+                db_path.display(),
+                side.display()
+            ))));
+        }
     }
     Ok(())
 }
@@ -1566,5 +1670,68 @@ mod tests {
             fs::metadata(&store.db_path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn sidecars_are_hardened_to_0600() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("scratch.db");
+        let data = d.path().join("scratch-data");
+
+        // Fresh db: open()'s init transaction materializes the sidecars.
+        let store = ScratchStore::open(&db, &data, cfg(24.0, 1024, 1024)).unwrap();
+        store.store(&json!({"k": "v"}), "a", "t", None).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let side = d.path().join(format!("scratch.db{suffix}"));
+            let mode = fs::metadata(&side).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{suffix} sidecar");
+        }
+        drop(store);
+
+        // Re-open: the clean close removed the sidecars, so they are re-minted
+        // by the first statement AFTER open() — the hot path must re-harden.
+        let store = ScratchStore::open(&db, &data, cfg(24.0, 1024, 1024)).unwrap();
+        store.store(&json!({"k2": "v2"}), "a", "t2", None).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let side = d.path().join(format!("scratch.db{suffix}"));
+            let mode = fs::metadata(&side).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{suffix} sidecar after re-open");
+        }
+    }
+
+    #[test]
+    fn planted_fifo_db_is_refused_without_hanging() {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("scratch.db");
+        mkfifo(&db, Mode::from_bits(0o600).unwrap()).unwrap();
+
+        let err = ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024))
+            .err()
+            .expect("a FIFO named scratch.db must be refused");
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn symlinked_sidecar_is_refused_and_target_untouched() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim-file");
+        fs::write(&victim, b"victim\n").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, d.path().join("scratch.db-wal")).unwrap();
+
+        let err = ScratchStore::open(
+            &d.path().join("scratch.db"),
+            &d.path().join("scratch-data"),
+            cfg(24.0, 1024, 1024),
+        )
+        .err()
+        .expect("a symlinked -wal sidecar must be refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        let mode = fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the link target must keep its permissions");
+        assert_eq!(fs::read(&victim).unwrap(), b"victim\n");
     }
 }

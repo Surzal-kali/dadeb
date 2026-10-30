@@ -120,6 +120,29 @@ class ScratchStore:
         self.conn.execute("PRAGMA busy_timeout=10000")
         _set_wal(self.conn)
         self._init_table()
+        self._harden_db_files()
+
+    def _harden_db_files(self) -> None:
+        """chmod the db + ``-wal``/``-shm`` sidecars 0600 (mirrors the rust lane).
+
+        SQLite mints the sidecars 0644 (+umask) and they hold the same row
+        data as the db, so they need the same tightening.  Called after
+        init-table AND at the end of the store/retrieve/list/stats/cleanup
+        calls: on a re-opened WAL db the sidecars only re-materialize at the
+        first statement, so chmod-at-open alone is incomplete.  Symlinked
+        files are skipped — python has no ``lchmod``, and ``os.chmod`` would
+        follow the link onto someone else's file (the rust lane instead
+        refuses outright).  Best-effort: a failed chmod never blocks the
+        store lane.
+        """
+        db = Path(self.db_path)
+        for path in (db, Path(str(db) + "-wal"), Path(str(db) + "-shm")):
+            try:
+                if os.path.islink(path):
+                    continue  # never chmod through a link
+                os.chmod(path, 0o600)
+            except OSError:
+                continue  # non-POSIX or not owner — best-effort
 
     def _repair_ownership_if_needed(self) -> None:
         """Chown scratch DB + WAL + SHM + data dir back to the workspace owner.
@@ -332,6 +355,7 @@ class ScratchStore:
                 ),
             )
 
+        self._harden_db_files()
         return {
             "scratch_ref": ref,
             "stored_bytes": len(compressed),
@@ -384,6 +408,32 @@ class ScratchStore:
                 each grep match in string fields (``-A``/``-B`` combined,
                 like ``grep -C``).  Default 0 = matches only.
         """
+        result = self._retrieve(
+            scratch_ref,
+            agent_id=agent_id,
+            offset=offset,
+            limit=limit,
+            filter_pattern=filter_pattern,
+            regex_pattern=regex_pattern,
+            fields=fields,
+            context_lines=context_lines,
+        )
+        self._harden_db_files()
+        return result
+
+    def _retrieve(
+        self,
+        scratch_ref: str,
+        *,
+        agent_id: str,
+        offset: int = 0,
+        limit: int = 0,
+        filter_pattern: str | None = None,
+        regex_pattern: str | None = None,
+        fields: str | None = None,
+        context_lines: int = 0,
+    ) -> dict[str, Any]:
+        """retrieve() body — wrapped so every exit path re-hardens the db files."""
         scratch_id = self._parse_ref(scratch_ref)
         if scratch_id is None:
             return {
@@ -465,6 +515,7 @@ class ScratchStore:
             "ORDER BY created_at DESC LIMIT ?",
             (agent_id, limit),
         ).fetchall()
+        self._harden_db_files()
         return [
             {
                 "scratch_ref": f"scratch:{r['id']}",
@@ -489,6 +540,7 @@ class ScratchStore:
                 "SELECT COUNT(*) as count, COALESCE(SUM(byte_count),0) as bytes "
                 "FROM scratch_entries"
             ).fetchone()
+        self._harden_db_files()
         return {
             "entries": row["count"],
             "stored_bytes": row["bytes"],
@@ -511,6 +563,7 @@ class ScratchStore:
         ).fetchall()
         for row in rows:
             self._delete_entry(row)
+        self._harden_db_files()
         return len(rows)
 
     def _delete_entry(self, row: sqlite3.Row) -> None:

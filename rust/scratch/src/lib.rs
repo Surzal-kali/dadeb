@@ -9,7 +9,11 @@
 //!
 //! - **Storage**: `scratch.db` (SQLite metadata, WAL, chmodded 0600) +
 //!   `scratch-data/` (gzip-compressed JSON payloads, level 6; 0700 dir,
-//!   0600 files).
+//!   0600 files). The `-wal`/`-shm` sidecars are chmodded 0600 too —
+//!   re-hardened on every mutating/read hot path, because a re-opened WAL
+//!   db re-mints them at its first statement, not at open() itself.
+//!   Symlinked sidecars are refused at open (sqlite follows them); a
+//!   non-regular main db file (planted FIFO) is refused without hanging.
 //! - **IDs**: opaque random `scratch:<16-hex>`, never sequential — a guess
 //!   from another chat cannot leak data.
 //! - **Ownership**: every entry is scoped to `agent_id`; a valid-looking ref

@@ -381,7 +381,7 @@ Durable, ownership-scoped storage for raw tool results. NOT vector memory
 Deterministic, reference-keyed store the model retrieves from via
 `scratch_search` when it needs the full or filtered output of a prior tool call.
 
-- **Storage:** `scratch.db` (SQLite metadata) + `scratch-data/` (compressed JSON payloads, 0700/0600).
+- **Storage:** `scratch.db` (SQLite metadata) + `scratch-data/` (compressed JSON payloads, 0700/0600). The db and its `-wal`/`-shm` sidecars are chmodded 0600 on init and re-hardened on every store/retrieve/list/stats/cleanup call (SQLite re-mints absent sidecars at its first statement on a re-opened WAL db). Rust refuses symlinked sidecars and planted FIFO db files at open; python (no `lchmod`) skips symlinked files and never chmods through a link.
 - **IDs:** opaque random values (`scratch:<16-hex>`), never sequential — a guess from another chat cannot leak data.
 - **Ownership:** every entry is scoped to `agent_id`; a valid-looking ref from the wrong agent returns "not found".
 - **Persistence:** entries survive a framework restart (on-disk).

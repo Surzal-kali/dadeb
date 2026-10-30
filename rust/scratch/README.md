@@ -16,6 +16,7 @@ cross-compatible over the **same** `scratch.db` + `scratch-data/` workspace
 |---|---|---|
 | env knobs (`SCRATCH_TTL_HOURS`, `SCRATCH_MAX_PAYLOAD_MB`, `SCRATCH_MAX_AGENT_MB`, `SCRATCH_GREP_MIN_CHARS`) | `ScratchConfig::from_env()` | captured once at `open()`; malformed values warn + default (python raises at import — a typo must not kill the store lane) |
 | `__init__` (dir 0700, WAL dance, busy_timeout 10s, `_init_table`) | `ScratchStore::open()` | byte-identical DDL + indexes; whoever creates a db first, the other side uses it untouched |
+| sidecar + db hardening: `scratch.db` + `-wal`/`-shm` chmod 0600 on init and on every store/retrieve/list/stats/cleanup call | `harden_db_sidecars` at the same call sites | a re-opened WAL db re-mints sidecars at its first statement, so open-time chmod alone is not enough; rust-only: symlinked sidecars are refused at open (sqlite sidecar opens FOLLOW links) and a planted FIFO named `scratch.db` is refused without hanging — python has no `lchmod`/NOFOLLOW via `sqlite3.connect`, so it skips symlinked files instead |
 | `_set_wal` (3-retry + readback acceptance) | `set_wal` | first WAL conversion can hit SQLITE_BUSY outside busy-handler coverage |
 | `_repair_ownership_if_needed` (root guard) | `repair_ownership_if_needed` | native `chown(2)` via nix instead of shelling out; never raises; non-root + root-owned files → the same loud warning |
 | `store()` | `ScratchStore::store()` → `StoreReceipt` (`to_envelope()`) | gzip level 6, sha256 of compressed bytes, `application/json+gzip`, `schema_version=1` |
