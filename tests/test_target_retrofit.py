@@ -188,3 +188,34 @@ def test_ffuf_verbatim_on_duplicate(fleet_env, monkeypatch):
     res = ffuf_mod.run_ffuf("http://192.168.56.106/FUZZ")
     # post-launch decoration (note/wordlist keys) must NOT land on it
     assert res == dup_env
+
+
+def test_hydra_passes_target_kwarg(fleet_env, monkeypatch):
+    from payloads import hydra as hydra_mod
+
+    seen = {}
+
+    def fake_launch(*args, **kwargs):
+        seen.update(kwargs)
+        return {"job_id": "h1", "status": "running", "log_file": "/tmp/x"}
+
+    monkeypatch.setattr(hydra_mod, "launch_job", fake_launch)
+    res = hydra_mod.run_hydra("ssh://192.168.56.106", options="-l admin -p secret")
+    assert seen["tool_name"] == "hydra"
+    assert seen["target"] == "ssh://192.168.56.106"
+    assert res["status"] == "running"
+
+
+def test_hydra_verbatim_on_duplicate(fleet_env, monkeypatch):
+    from payloads import hydra as hydra_mod
+
+    dup_env = {
+        "status": "duplicate",
+        "job_id": "h-live",
+        "unit_key": "hydra:192.168.56.106:/:<hash>",
+        "message": "unit already running",
+    }
+    monkeypatch.setattr(hydra_mod, "launch_job", lambda *a, **k: dict(dup_env))
+    res = hydra_mod.run_hydra("ssh://192.168.56.106", options="-l admin -p secret")
+    # default-cred-injection metadata must NOT land on a no-launch envelope
+    assert res == dup_env

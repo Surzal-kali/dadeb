@@ -221,8 +221,15 @@ def run_hydra(target: str, options: str = "") -> dict[str, Any]:
         command,
         tool_name="hydra",
         timeout=float(__import__("os").getenv("HYDRA_TIMEOUT", "1800")),
+        target=target,
         verdict_parser=_parse_hydra_verdict,
     )
+    # launch_job(target=...) routes through the fleet scheduler; a
+    # duplicate/refused decision envelope carries NO launched job — return
+    # it verbatim instead of stamping cred-source metadata over it (that
+    # metadata describes an injection into THIS call, not a running unit).
+    if job.get("status") in ("duplicate", "refused"):
+        return job
     # Surface whether default cred lists were injected so the secretary
     # model knows to swap in targeted lists for a real run.
     job.update(creds_meta)
