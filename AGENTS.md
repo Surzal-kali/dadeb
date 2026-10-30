@@ -493,6 +493,16 @@ agent-attributed and cross-actor visible (dedupe is the point);
 `fleet_host_status` is the observability lens (`@framework_tool`,
 infra tag — `utils/` runs in-process, cookie-jar lane).
 
+**Courtesy contract is single-target (2026-10-30):** every
+traffic-sending launcher passes `target=` on its `launch_job` call
+(sqlmap, nmap, ffuf, hydra, masscan, amass ×both launchers) — single-
+target runs ARE fleet units, so any lane's duplicate launch gets the
+running job's id instead of a second process. Release is generic:
+`poll_job` frees bound units at the first done observation
+(`release_units_for_job` — no-ops when no fleet store exists, so a
+never-fleety lane never conjures `fleet.db`); sqlmap's twins keep
+their own releases, which are idempotent.
+
 ### sqlmap fleet adapter — Phase 2 (`payloads/sqlmap.py`, scale-doctrine Annex D)
 
 Annex A over the Phase 0/1 substrate. The scheduler rides the **launch

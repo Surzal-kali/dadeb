@@ -457,7 +457,13 @@ def run_amass(target, options="", scope_platform=None, scope_handle=None):
         command,
         tool_name="amass",
         timeout=amass_cap,
+        target=target,
     )
+    # launch_job(target=...) routes through the fleet scheduler; a
+    # duplicate/refused decision envelope carries NO launched job — return
+    # it verbatim instead of stashing meta against it.
+    if job.get("status") in ("duplicate", "refused"):
+        return job
     job_id = job["job_id"]
     _store_amass_meta(job_id, target, options, composite=False,
                       scope_platform=scope_platform, scope_handle=scope_handle)
@@ -877,7 +883,13 @@ def subdomain_enum(target, options="", scope_platform=None, scope_handle=None):
         command,
         tool_name="amass",
         timeout=amass_cap,
+        target=target,
     )
+    # launch_job(target=...) routes through the fleet scheduler; a
+    # duplicate/refused decision envelope carries NO launched job — return
+    # it verbatim instead of stashing meta against it.
+    if job.get("status") in ("duplicate", "refused"):
+        return job
     job_id = job["job_id"]
     _store_amass_meta(job_id, target, options, composite=True,
                       scope_platform=scope_platform, scope_handle=scope_handle)

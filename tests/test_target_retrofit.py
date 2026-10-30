@@ -254,3 +254,71 @@ def test_masscan_verbatim_on_duplicate(fleet_env, monkeypatch):
     res = masscan_mod.run_masscan("192.168.56.0/24", ports="80")
     # resolved-config decoration (ports/rate/adapter keys) must NOT land on it
     assert res == dup_env
+
+
+def test_amass_passes_target_kwarg(fleet_env, monkeypatch):
+    from auxiliaries import amass as amass_mod
+
+    seen = {}
+    stored = []
+
+    def fake_launch(*args, **kwargs):
+        seen.update(kwargs)
+        return {"job_id": "a1", "status": "running", "log_file": "/tmp/x"}
+
+    monkeypatch.setattr(amass_mod, "launch_job", fake_launch)
+    monkeypatch.setattr(
+        amass_mod, "_store_amass_meta", lambda jid, d, o, **kw: stored.append((jid, d))
+    )
+
+    res = amass_mod.run_amass("staging.example-lab.test")
+    assert seen["tool_name"] == "amass"
+    assert seen["target"] == "staging.example-lab.test"
+    assert res["status"] == "running"
+    assert stored == [("a1", "staging.example-lab.test")]
+
+
+def test_amass_enum_passes_target_kwarg(fleet_env, monkeypatch):
+    from auxiliaries import amass as amass_mod
+
+    seen = {}
+    stored = []
+
+    def fake_launch(*args, **kwargs):
+        seen.update(kwargs)
+        return {"job_id": "a2", "status": "running", "log_file": "/tmp/x"}
+
+    monkeypatch.setattr(amass_mod, "launch_job", fake_launch)
+    monkeypatch.setattr(
+        amass_mod, "_store_amass_meta", lambda jid, d, o, **kw: stored.append((jid, d))
+    )
+
+    res = amass_mod.subdomain_enum("staging.example-lab.test")
+    assert seen["target"] == "staging.example-lab.test"
+    assert res["job_id"] == "a2"  # resp built from the launched envelope
+    assert stored == [("a2", "staging.example-lab.test")]
+
+
+def test_amass_verbatim_on_duplicate(fleet_env, monkeypatch):
+    """Both amass launch sites share ONE tool_id — the duplicate envelope
+    returns verbatim and NO meta is stashed against another actor's job."""
+    from auxiliaries import amass as amass_mod
+
+    dup_env = {
+        "status": "duplicate",
+        "job_id": "a-live",
+        "unit_key": "amass:staging.example-lab.test:/:<hash>",
+        "message": "unit already running",
+    }
+    stored = []
+    monkeypatch.setattr(
+        amass_mod, "launch_job", lambda *a, **k: dict(dup_env)
+    )
+    monkeypatch.setattr(
+        amass_mod, "_store_amass_meta", lambda jid, d, o, **kw: stored.append(jid)
+    )
+
+    for launcher in (amass_mod.run_amass, amass_mod.subdomain_enum):
+        res = launcher("staging.example-lab.test")
+        assert res == dup_env
+    assert stored == []  # nothing stashed against a job we did not launch
