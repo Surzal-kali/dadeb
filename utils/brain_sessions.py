@@ -59,6 +59,28 @@ _DEFAULT_DB = _DEFAULT_ROOT / "run" / "brain_sessions.db"
 _FALLBACK_BAND_BASE = 100_000_000
 
 
+def _set_wal(c: sqlite3.Connection) -> None:
+    """Tolerate the first-converter WAL race (see fleet_scheduler._set_wal).
+
+    The delete→WAL conversion can return SQLITE_BUSY immediately — the
+    busy handler does not cover journal-mode conversion — and losing the
+    race means the winner already converted, so a mode readback is the
+    acceptance test. Only surface the error if the db is truly not WAL.
+    """
+    for attempt in range(3):
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            row = c.execute("PRAGMA journal_mode").fetchone()
+            if row is not None and (row[0] or "").lower() == "wal":
+                return
+            time.sleep(0.05 * (attempt + 1))
+    row = c.execute("PRAGMA journal_mode").fetchone()
+    if row is None or (row[0] or "").lower() != "wal":
+        c.execute("PRAGMA journal_mode=WAL")  # surface the real error
+
+
 class BrainSessionMap:
     """SQLite-backed (agent_id, workspace) -> stable Brain session int.
 
@@ -90,7 +112,7 @@ class BrainSessionMap:
             self.conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout=10000")
-            self.conn.execute("PRAGMA journal_mode=WAL")
+            _set_wal(self.conn)
             self._init_table()
             self.degraded = False
         except (sqlite3.Error, OSError) as exc:

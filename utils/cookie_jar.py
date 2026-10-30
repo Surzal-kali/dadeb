@@ -255,6 +255,28 @@ CREATE TABLE IF NOT EXISTS tokens (
 """
 
 
+def _set_wal(c: sqlite3.Connection) -> None:
+    """Tolerate the first-converter WAL race (see fleet_scheduler._set_wal).
+
+    The delete→WAL conversion can return SQLITE_BUSY immediately — the
+    busy handler does not cover journal-mode conversion — and losing the
+    race means the winner already converted, so a mode readback is the
+    acceptance test. Only surface the error if the db is truly not WAL.
+    """
+    for attempt in range(3):
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            row = c.execute("PRAGMA journal_mode").fetchone()
+            if row is not None and (row[0] or "").lower() == "wal":
+                return
+            time.sleep(0.05 * (attempt + 1))
+    row = c.execute("PRAGMA journal_mode").fetchone()
+    if row is None or (row[0] or "").lower() != "wal":
+        c.execute("PRAGMA journal_mode=WAL")  # surface the real error
+
+
 class CookieJarStore:
     """Thread-safe SQLite-backed cookie jar + token vault.
 
@@ -282,7 +304,7 @@ class CookieJarStore:
         # "database is locked" instead of a clean permission error.
         self._repair_ownership_if_needed()
         self._conn = sqlite3.connect(str(self.db_path), timeout=10.0, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        _set_wal(self._conn)  # conversion not covered by connect()'s busy handler
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 

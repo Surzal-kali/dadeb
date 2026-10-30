@@ -173,6 +173,60 @@ def test_executor_envelope_carries_identity(state_root, monkeypatch):
     assert ident["agent_id"].startswith(ANON_PREFIX)
 
 
+def test_normalize_adopts_own_mint():
+    """Echoing THIS process's minted id back resolves to the SAME id —
+    the gateway mints once and the executor's re-resolve no longer mints
+    a second identity the client never saw (2026-10-30 code review)."""
+    aid = mint_agent_id()
+    assert normalize_agent_id(aid) == aid
+
+
+def test_resolve_roundtrips_minted_id_to_declared():
+    resolved, prov = resolve_agent_id(None)
+    assert prov == "minted"
+    again, prov2 = resolve_agent_id(resolved)
+    assert again == resolved  # no fresh mint on the echo
+    assert prov2 == "declared"
+
+
+def test_executor_passes_agent_identity_through(state_root, monkeypatch):
+    """The gateway resolves ONE identity and passes it through: a supplied
+    ``agent_identity`` tuple must reach the envelope verbatim, and the
+    raw ``session_id`` (intentionally unusable here) must NOT re-resolve."""
+    from daharness.models import ToolManifest
+    from constants import TransportType
+    from daharness.executor import ExecutorMixin
+
+    mixin = ExecutorMixin.__new__(ExecutorMixin)
+
+    async def _fake_dispatch(self, manifest, arguments, session_id):
+        return {"status": "Success", "result": {"ok": True}}
+
+    monkeypatch.setattr(ExecutorMixin, "_dispatch_by_transport", _fake_dispatch)
+    monkeypatch.setattr(
+        ExecutorMixin, "_ensure_valid_manifest", lambda self, m: m, raising=False
+    )
+    monkeypatch.setattr(ExecutorMixin, "_journal_dispatch", lambda *a, **k: None)
+
+    manifest = ToolManifest(
+        module_id="test.tool",
+        internal_semantic_capability="test capability",
+        external_sanitized_description="test tool",
+        internal_semantics="test",
+        implementation_path="/nonexistent/test_tool.py",
+        transport=TransportType.BRAIN_DISPATCH,
+    )
+
+    # '' would mint a fresh anon- id if it were re-resolved; the tuple
+    # short-circuits resolution entirely.
+    result = _run(mixin.execute_tool(
+        manifest, {}, session_id="",
+        agent_identity=("kai9000", "declared"),
+    ))
+    ident = result.get("identity")
+    assert ident == {"agent_id": "kai9000", "provenance": "declared"}
+
+
 # --- lane fixes -----------------------------------------------------------------
 
 

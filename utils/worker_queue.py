@@ -40,16 +40,24 @@ Design constraints, evidence-backed (2026-10-30):
   advance_queue's release loop), and a finished unit's measured worst
   footprint is recorded into a small evidence table (one row per
   content key, MAX-of-runs, 30d TTL — deliberately outliving the
-  weekly ledger rows). Future admissions of the SAME content bytes use
-  ``max(budget, recorded_peak)`` as their claim: the operator's guess
-  that undershot reality is overruled by the measurement, stamped
-  additively on the envelope (``claim_mib``/``evidence_peak_mib`` — a
-  plain-budget envelope stays byte-identical). The ``-Xmx`` heap PIN
-  stays the operator's declared budget — evidence is accounting, not
-  JVM config; the envelope suggests raising it. An evidence-backed
-  claim above total-minus-floor refuses like any other permanent
-  impossibility (a box that cannot back these bytes' MEASURED appetite
-  will not admit them with a token claim and queue-wedge instead).
+  weekly ledger rows). Future admissions of the SAME content bytes add
+  the measured NATIVE OVERHEAD of the recording run
+  (``recorded_peak - recorded_pin``, the pair kept from the same run)
+  to this run's declared budget: a JVM's RSS is its -Xmx pin plus a
+  roughly-fixed native overhead (metaspace, code cache, GC structures,
+  thread stacks), so the claim tracks the heap the way real memory
+  scales — "lower the budget" stays an honest remedy and only a pin
+  above ``capacity - measured_overhead`` refuses permanently. Legacy
+  evidence rows without a recorded pin fall back to the old
+  ``max(budget, recorded_peak)`` absolute model. The claim is stamped
+  additively on the envelope
+  (``claim_mib``/``evidence_peak_mib`` — a plain-budget envelope stays
+  byte-identical). The ``-Xmx`` heap PIN stays the operator's declared
+  budget — evidence is accounting, not JVM config; the envelope
+  suggests raising it. An evidence-backed claim above
+  total-minus-floor refuses like any other permanent impossibility (a
+  box that cannot back these bytes' MEASURED appetite will not admit
+  them with a token claim and queue-wedge instead).
 - **Hard caps keep the queue honest** (2026-10-30 review): a budget
   above total RAM minus the floor is a PERMANENT impossibility — free
   RAM is bounded by total, so queueing it would wedge the FIFO forever;
@@ -107,9 +115,13 @@ from constants import resolve_workspace_root
 _DEFAULT_ROOT = resolve_workspace_root()
 
 # Decision statuses (queue rows): 'queued' -> 'launching' -> (job store
-# owns running/done from here); terminals: 'cancelled' (operator stop /
-# crash reclaim) and 'finished' (ran, exited, slot freed — success).
-_QUEUE_STATUS = ("queued", "launching", "launched", "cancelled", "finished")
+# owns running/done/failed from here); terminals: 'cancelled' (operator
+# stop / crash reclaim), 'finished' (ran, exited, slot freed — SUCCESS)
+# and 'failed' (job died: crash, OOM, timeout — a failed unit is a
+# tombstone that never dedupes; re-request re-admits it fresh, 2026-10-30
+# code review).
+_QUEUE_STATUS = ("queued", "launching", "launched", "cancelled", "finished",
+                 "failed")
 
 _WORKER_SLOTS_DEFAULT = 2
 _WORKER_QUEUE_MAX_DEFAULT = 16
@@ -264,11 +276,55 @@ def heap_pin_env(memory_budget: int, extra: dict[str, str] | None = None) -> dic
 # --- canonical key (content-keyed; the snapshot-cache precedent) ----------
 
 
-def content_key(tool: str, path: str) -> str:
-    """Canonical worker-queue key: ``<tool>:c<sha256[:12]>`` of the BYTES.
+# Argv tokens naming an OUTPUT LOCATION are not work semantics (where the
+# results live, not what the work IS): their flag + following value are
+# stripped before the argv digest so a rerun pointed at another out-dir
+# dedupes instead of double-launching the same bytes.
+_KEY_LOCATION_FLAGS = ("-d", "--output-dir", "-o", "--output")
+
+
+def _argv_for_key(argv: list[str] | None, path: str) -> list[str]:
+    """Work-semantics residue of an argv, for content-key forking.
+
+    Stripped: argv[0] (the program — the key's tool name owns that axis),
+    any item exactly equal to the target path (the bytes digest owns the
+    target), and a location flag plus its value (output destinations are
+    incidental). What survives — mode/tuning flags like ``--deobf`` — IS
+    the work: two units on identical bytes with different flags are
+    different work (2026-10-30 code review: the old byte-only key deduped
+    a flag-differing rerun that silently skipped that work).
+    """
+    residue: list[str] = []
+    drop_next = False
+    path_s = str(path)
+    items = [str(a) for a in (argv or [])]
+    for item in items[1:]:
+        if drop_next:
+            drop_next = False
+            continue
+        if item in _KEY_LOCATION_FLAGS:
+            drop_next = True
+            continue
+        if item == path_s:
+            continue
+        residue.append(item)
+    return residue
+
+
+def content_key(tool: str, path: str, *, argv: list[str] | None = None) -> str:
+    """Canonical worker-queue key: ``<tool>:c<sha256[:12]>`` of the BYTES
+    plus ``:a<sha256[:12]>`` of the argv's work-semantics residue.
 
     Content, not path: identical APK bytes at a different filename are the
-    same unit (re-drop with a new name must dedupe, not double-launch).
+    same unit (re-drop with a new name must dedupe, not double-launch) —
+    so the target path and output locations are stripped from the argv
+    before digesting (``_argv_for_key``), and an argv with NO work
+    residue digests to the exact bare key. A flag difference (the same
+    bytes with/without ``--deobf``) forks the key: different work must
+    not be deduped away (2026-10-30 code review). Accounting knobs stay
+    out of the key by principle — ``memory_budget`` is the queue's claim,
+    not the work's meaning, and forking on it would double-launch the
+    same bytes.
     Unreadable/missing files fall back to a path+size key so the request
     still resolves (the launch will fail honestly on the missing input —
     an unhashable blob must not break the request pipeline).
@@ -278,6 +334,14 @@ def content_key(tool: str, path: str) -> str:
     safe_tool = "".join(
         c if c.isalnum() or c in "_.-" else "-" for c in (tool or "unit").lower()
     )
+    argv_digest = ""
+    residue = _argv_for_key(argv, path)
+    if residue:
+        ah = hashlib.sha256()
+        for item in residue:
+            ah.update(item.encode("utf-8", "replace"))
+            ah.update(b"\x00")
+        argv_digest = f":a{ah.hexdigest()[:12]}"
     digest = None
     try:
         h = hashlib.sha256()
@@ -288,16 +352,32 @@ def content_key(tool: str, path: str) -> str:
     except OSError:
         pass
     if digest:
-        return f"{safe_tool}:c{digest}"
+        return f"{safe_tool}:c{digest}{argv_digest}"
     try:
         st = os.stat(path)
         path_fallback = f"{os.path.basename(path)}:{st.st_size}"
     except OSError:
         path_fallback = secrets.token_hex(6)
-    return f"{safe_tool}:p{hashlib.sha1(path_fallback.encode('utf-8', 'replace')).hexdigest()[:12]}"
+    return f"{safe_tool}:p{hashlib.sha1(path_fallback.encode('utf-8', 'replace')).hexdigest()[:12]}{argv_digest}"
 
 
 # --- store ------------------------------------------------------------------
+
+
+def _set_wal(c: sqlite3.Connection) -> None:
+    """Tolerate the first-converter WAL race (see fleet_scheduler._set_wal)."""
+    for attempt in range(3):
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            row = c.execute("PRAGMA journal_mode").fetchone()
+            if row is not None and (row[0] or "").lower() == "wal":
+                return
+            time.sleep(0.05 * (attempt + 1))
+    row = c.execute("PRAGMA journal_mode").fetchone()
+    if row is None or (row[0] or "").lower() != "wal":
+        c.execute("PRAGMA journal_mode=WAL")  # surface the real error
 
 
 class WorkerQueue:
@@ -327,7 +407,7 @@ class WorkerQueue:
         )
         self._bootstrap.row_factory = sqlite3.Row
         self._bootstrap.execute("PRAGMA busy_timeout=30000")
-        self._bootstrap.execute("PRAGMA journal_mode=WAL")
+        _set_wal(self._bootstrap)
         self._init_table()
 
     @property
@@ -342,7 +422,7 @@ class WorkerQueue:
             )
             c.row_factory = self._sqlite3.Row
             c.execute("PRAGMA busy_timeout=30000")
-            c.execute("PRAGMA journal_mode=WAL")
+            _set_wal(c)
             self._local.conn = c
         return c
 
@@ -354,6 +434,16 @@ class WorkerQueue:
 
     def _rollback(self) -> None:
         self.conn.execute("ROLLBACK")
+
+    def _add_column(self, c: Any, ddl: str, table: str = "worker_units") -> None:
+        """Race-tolerant schema migration: run ``ALTER TABLE ADD COLUMN``
+        and tolerate ONLY the duplicate-column error another concurrent
+        migration may have already fixed. Any other failure re-raises."""
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     def _init_table(self) -> None:
         c = self._bootstrap
@@ -379,13 +469,18 @@ class WorkerQueue:
             )
             """
         )
-        # Legacy-store migration: launching_at postdates the first schema.
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(worker_units)").fetchall()}
-        if "launching_at" not in cols:
-            c.execute("ALTER TABLE worker_units ADD COLUMN launching_at REAL")
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(worker_units)").fetchall()}
-        if "peak_rss_mib" not in cols:
-            c.execute("ALTER TABLE worker_units ADD COLUMN peak_rss_mib REAL")
+        # Legacy-store migration: launching_at and peak_rss_mib postdate the
+        # first schema. Race-tolerant ALTERs — check-then-ALTER has a TOCTOU
+        # window (two instances starting together both pass the check and one
+        # ALTER crashes on the duplicate), so just ALTER and tolerate the
+        # winner's duplicate-column error (2026-10-30 code review).
+        self._add_column(c, "launching_at REAL")
+        self._add_column(c, "peak_rss_mib REAL")
+        # The operator's REQUESTED budget (the heap pin), kept beside the
+        # accounting claim: the RSS-feedback delta model needs the pin of
+        # the recording run, since memory_budget alone holds the
+        # (already-escalated) claim and would compound on re-reads.
+        self._add_column(c, "budget_requested REAL")
         # Peak-RSS evidence (the RSS-feedback ledger): one row per content
         # key, MAX-of-runs — the WORST measured peak is what future
         # admissions must defend against. Deliberately separate from the
@@ -398,12 +493,14 @@ class WorkerQueue:
                 tool          TEXT NOT NULL,
                 peak_rss_mib  REAL NOT NULL,
                 memory_budget REAL NOT NULL,   -- the claim the finishing unit ran under
+                budget_requested REAL,         -- the requested budget (heap pin) of that run; NULL = legacy row
                 runs          INTEGER NOT NULL DEFAULT 1,
                 finished_at   REAL NOT NULL,
                 updated_at    REAL NOT NULL
             )
             """
         )
+        self._add_column(c, "budget_requested REAL", table="worker_rss")
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_wq_status_req "
             "ON worker_units(status, requested)"
@@ -490,8 +587,9 @@ class WorkerQueue:
         """Recorded peak-RSS evidence for a content key (None when this
         content's bytes never ran here, or their evidence aged out)."""
         r = self.conn.execute(
-            "SELECT unit_key, tool, peak_rss_mib, memory_budget, runs, "
-            "finished_at, updated_at FROM worker_rss WHERE unit_key = ?",
+            "SELECT unit_key, tool, peak_rss_mib, memory_budget, "
+            "budget_requested, runs, finished_at, updated_at "
+            "FROM worker_rss WHERE unit_key = ?",
             (unit_key,),
         ).fetchone()
         return dict(r) if r is not None else None
@@ -500,8 +598,9 @@ class WorkerQueue:
         """The whole evidence table, newest first (small — one row per
         content key ever measured)."""
         rows = self.conn.execute(
-            "SELECT unit_key, tool, peak_rss_mib, memory_budget, runs, "
-            "finished_at, updated_at FROM worker_rss ORDER BY updated_at DESC"
+            "SELECT unit_key, tool, peak_rss_mib, memory_budget, "
+            "budget_requested, runs, finished_at, updated_at "
+            "FROM worker_rss ORDER BY updated_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -523,14 +622,18 @@ class WorkerQueue:
 
     def _record_evidence(self, unit_key: str) -> None:
         """Upsert one content key's evidence at finish: the unit's sampled
-        peak next to the claim it ran under. MAX-of-runs — future
-        admissions must defend against the worst measured peak of these
-        bytes, not the most recent one. A unit that finished without a
-        single live sample (too fast even for one reaper pass) has no
-        evidence to give — no row is written."""
+        peak next to the requested budget (heap pin) it ran under.
+        MAX-of-runs — future admissions must defend against the worst
+        measured peak of these bytes, not the most recent one. The
+        (peak, pin) pair is kept FROM THE SAME RUN: a higher peak bumps
+        both sides together, because the delta claim model reads the
+        overhead as ``peak - pin`` and mixing pins between runs would
+        invent overhead. A unit that finished without a single live
+        sample (too fast even for one reaper pass) has no evidence to
+        give — no row is written."""
         row = self.conn.execute(
-            "SELECT tool, memory_budget, peak_rss_mib FROM worker_units "
-            "WHERE unit_key = ?",
+            "SELECT tool, memory_budget, budget_requested, peak_rss_mib "
+            "FROM worker_units WHERE unit_key = ?",
             (unit_key,),
         ).fetchone()
         if row is None or row["peak_rss_mib"] is None:
@@ -538,32 +641,52 @@ class WorkerQueue:
         now = time.time()
         self.conn.execute(
             "INSERT INTO worker_rss (unit_key, tool, peak_rss_mib, "
-            "memory_budget, runs, finished_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 1, ?, ?) "
+            "memory_budget, budget_requested, runs, finished_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?) "
             "ON CONFLICT(unit_key) DO UPDATE SET "
-            "peak_rss_mib = MAX(COALESCE(worker_rss.peak_rss_mib, 0), "
-            "excluded.peak_rss_mib), "
             "memory_budget = excluded.memory_budget, "
-            "runs = worker_rss.runs + 1, updated_at = excluded.updated_at",
+            "runs = worker_rss.runs + 1, updated_at = excluded.updated_at, "
+            "budget_requested = CASE "
+            "WHEN COALESCE(excluded.peak_rss_mib, 0) > "
+            "COALESCE(worker_rss.peak_rss_mib, 0) "
+            "THEN excluded.budget_requested "
+            "ELSE COALESCE(worker_rss.budget_requested, "
+            "excluded.budget_requested) END, "
+            "peak_rss_mib = MAX(COALESCE(worker_rss.peak_rss_mib, 0), "
+            "excluded.peak_rss_mib)",
             (unit_key, row["tool"], row["peak_rss_mib"],
-             row["memory_budget"], now, now),
+             row["memory_budget"], row["budget_requested"], now, now),
         )
 
     def _effective_claim(
         self, unit_key: str, memory_budget: int
     ) -> tuple[int, float | None]:
-        """Evidence-backed admission claim: the operator's budget, raised
-        to the RECORDED peak of the same content bytes when evidence
-        exceeds it (the guess is overruled by the measurement). Returns
-        ``(claim_mib, evidence_peak_mib)``; evidence_peak is None when
-        no evidence exists. The -Xmx heap PIN deliberately stays the
-        operator's declared budget — evidence is ACCOUNTING, not a
-        config override (raising the pin is the operator's decision,
-        which the envelope suggests)."""
+        """Evidence-backed admission claim, DELTA MODEL: a JVM's resident
+        footprint is its heap pin (-Xmx) plus a roughly-fixed native
+        overhead (metaspace, code cache, GC structures, thread stacks),
+        so the measured overhead of a past run
+        ``recorded_peak - recorded_pin`` is added to THIS run's pin —
+        the claim tracks the heap pin the way real memory scales, and
+        "lower the budget" is an honest remedy again (only a pin above
+        ``capacity - measured_overhead`` refuses). Legacy evidence rows
+        that predate ``budget_requested`` fall back to the old
+        absolute-peak model (claim = max(budget, recorded_peak)). Returns
+        ``(claim_mib, evidence_peak_mib)``; evidence_peak is None when no
+        evidence exists or the measurement did not overrule the guess.
+        The -Xmx heap PIN deliberately stays the operator's declared
+        budget — evidence is ACCOUNTING, not a config override."""
         evidence = self.rss_evidence_for(unit_key)
         peak = evidence["peak_rss_mib"] if evidence else None
-        if peak is not None and peak > memory_budget:
-            return int(round(peak)), float(peak)
+        if peak is None:
+            return memory_budget, None
+        pin = evidence.get("budget_requested") if evidence else None
+        if pin is not None and pin > 0:
+            claim = memory_budget + max(0.0, float(peak) - float(pin))
+            if claim > memory_budget:
+                return int(round(claim)), float(peak)
+            return memory_budget, None
+        if float(peak) > memory_budget:
+            return int(round(float(peak))), float(peak)
         return memory_budget, None
 
     def account(self) -> dict[str, Any]:
@@ -636,7 +759,7 @@ class WorkerQueue:
             raise ValueError("worker queue requires a resolved agent_id")
         if memory_budget <= 0:
             raise ValueError("memory_budget must be a positive MiB integer")
-        unit_key = content_key(tool, target)
+        unit_key = content_key(tool, target, argv=command)
         now = time.time()
         # Heap pin decided HERE (centrally): the row's env carries it, the
         # launcher never overrides a budget at launch time. The PIN stays
@@ -656,9 +779,11 @@ class WorkerQueue:
                 existing = self.conn.execute(
                     "SELECT * FROM worker_units WHERE unit_key = ?", (unit_key,)
                 ).fetchone()
-                # --- dedupe: an existing non-terminal unit owns the key ---
-                if existing is not None and existing["status"] not in (
-                    "cancelled", "finished"
+                # --- dedupe: an existing LIVE unit owns the key ---
+                # (launching/launched/queued — a finished/cancelled/failed
+                # row is terminal and falls through below.)
+                if existing is not None and existing["status"] in (
+                    "launching", "launched", "queued"
                 ):
                     out = self._existing_envelope(existing)
                     self._commit()
@@ -674,13 +799,20 @@ class WorkerQueue:
                     self._commit()
                     return out
                 # A cancelled row retracts the prior decision — a
-                # re-request is a fresh one. Drop the terminal row so the
-                # fresh INSERT can reuse the key (release_unit's fresh-row
-                # promise).
-                if existing is not None and existing["status"] == "cancelled":
+                # re-request is a fresh one. A FAILED row is the same
+                # retraction with a stronger reason: failures must not
+                # dedupe (2026-10-30 code review) — every job the job
+                # store marked done/failed used to leave a tombstone that
+                # deduped, and release/cancel then refused to clear it, so
+                # a crashed run was permanently un-retryable. Drop the
+                # terminal row so the fresh INSERT can reuse the key
+                # (release_unit's fresh-row promise).
+                if existing is not None and existing["status"] in (
+                    "cancelled", "failed"
+                ):
                     self.conn.execute(
                         "DELETE FROM worker_units WHERE unit_key = ? AND "
-                        "status = 'cancelled'",
+                        "status IN ('cancelled','failed')",
                         (unit_key,),
                     )
 
@@ -696,11 +828,17 @@ class WorkerQueue:
                         f"{acct['ram_floor_mib']} MiB pool floor = {cap} MiB)"
                     )
                     if evidence_peak is not None:
+                        overhead = claim_mib - memory_budget
                         msg += (
                             f" — the requested budget was {memory_budget} MiB "
-                            f"but a past run of these bytes peaked at "
-                            f"{evidence_peak:.0f} MiB, so the claim tracks "
-                            "the measurement"
+                            f"but a past run of these bytes measured "
+                            f"{overhead:.0f} MiB above its heap pin "
+                            f"(VmHWM {evidence_peak:.0f} MiB) and the claim "
+                            "tracks that overhead"
+                        )
+                        msg += (
+                            f"; a budget at or below {cap - overhead:.0f} MiB "
+                            "would admit"
                         )
                     msg += (
                         ". Free RAM can never exceed total, so no amount of "
@@ -774,11 +912,12 @@ class WorkerQueue:
                     self.conn.execute(
                         "INSERT INTO worker_units "
                         "(unit_key, tool, target, agent_id, status, "
-                        " memory_budget, command, env, queued_at, requested, "
-                        " launching_at, note) "
-                        "VALUES (?, ?, ?, ?, 'launching', ?, ?, ?, ?, ?, ?, ?)",
+                        " memory_budget, budget_requested, command, env, "
+                        " queued_at, requested, launching_at, note) "
+                        "VALUES (?, ?, ?, ?, 'launching', ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             unit_key, tool, target, agent_id, claim_mib,
+                            memory_budget,
                             json.dumps(command), json.dumps(launch_env),
                             now, now, now, note or "",
                         ),
@@ -789,10 +928,12 @@ class WorkerQueue:
                     self.conn.execute(
                         "INSERT INTO worker_units "
                         "(unit_key, tool, target, agent_id, status, "
-                        " memory_budget, command, env, queued_at, requested, note) "
-                        "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
+                        " memory_budget, budget_requested, command, env, "
+                        " queued_at, requested, note) "
+                        "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
                         (
                             unit_key, tool, target, agent_id, claim_mib,
+                            memory_budget,
                             json.dumps(command), json.dumps(launch_env),
                             now, now, note or "",
                         ),
@@ -866,10 +1007,12 @@ class WorkerQueue:
             return
         out["claim_mib"] = claim_mib
         out["evidence_peak_mib"] = evidence_peak
+        overhead = claim_mib - memory_budget
         out["message"] += (
             f" (claim raised from {memory_budget} to {claim_mib} MiB — a past "
-            f"run of this content peaked at {evidence_peak:.0f} MiB; raise "
-            "memory_budget if the heap pin should follow)"
+            f"run of this content measured {overhead:.0f} MiB above its heap "
+            f"pin (VmHWM {evidence_peak:.0f} MiB); raise memory_budget if the "
+            "heap pin should follow)"
         )
 
     def _queue_position(self, requested: float, unit_key: str) -> int:
@@ -974,9 +1117,24 @@ class WorkerQueue:
             return {"status": "no such claim", "unit_key": unit_key}
         return {"status": "ok", "unit_key": unit_key, "job_id": job_id}
 
+    def _terminal_job_tail(self, row: sqlite3.Row, tail: int) -> list[str] | None:
+        """Log tail of a terminal unit's job, so finished/failed envelopes
+        keep the output their status text points at (the release sweep can
+        settle a unit before any live poll observed the log)."""
+        if not row["job_id"]:
+            return None
+        try:
+            from utils.job_store import get_store
+
+            return get_store().poll(row["job_id"], tail=tail).get("recent_lines")
+        except Exception:
+            return None
+
     def poll_unit(self, unit_key: str, *, tail: int = 10) -> dict[str, Any]:
         """Poll one unit across its whole lifecycle:
-        queued (position) → running/done (via the job store) → released."""
+        queued (position) → running/done (via the job store) → released.
+        Terminal envelopes (finished/failed) still carry their job's log
+        tail — adapters read results off the status lane after release."""
         row = self.conn.execute(
             "SELECT * FROM worker_units WHERE unit_key = ?", (unit_key,)
         ).fetchone()
@@ -1008,6 +1166,21 @@ class WorkerQueue:
         if row["status"] == "cancelled":
             out.update({"status": "cancelled", "message": "unit was cancelled"})
             return out
+        if row["status"] == "failed":
+            out.update({
+                "status": "failed",
+                "job_id": row["job_id"],
+                "peak_rss_mib": row["peak_rss_mib"],
+                "message": (
+                    "unit's job died (crash, OOM kill, or timeout) — its log "
+                    "tail follows; a failed unit never dedupes, so "
+                    "re-request runs a fresh attempt"
+                ),
+            })
+            recent = self._terminal_job_tail(row, tail)
+            if recent is not None:
+                out["recent_lines"] = recent
+            return out
         if row["status"] == "finished":
             out.update({
                 "status": "finished",
@@ -1020,8 +1193,11 @@ class WorkerQueue:
             if row["peak_rss_mib"] is not None:
                 out["message"] += (
                     f" Measured peak RSS: {row['peak_rss_mib']:.0f} MiB "
-                    f"(recorded as admission evidence for this content key)."
+                    "(recorded as admission evidence for this content key)."
                 )
+            recent = self._terminal_job_tail(row, tail)
+            if recent is not None:
+                out["recent_lines"] = recent
             return out
         if row["status"] == "launching" and row["job_id"] is None:
             out.update({
@@ -1087,6 +1263,18 @@ class WorkerQueue:
                             f"{agent_id!r}); cross-agent release needs force=True"
                         ),
                     }
+                # A FAILED row is a dead tombstone (job already exited):
+                # clearing it is deletion, not status churn — release_unit
+                # must not return "already_released" for a failed row or a
+                # caller could never clear it (2026-10-30 code review).
+                if row["status"] == "failed":
+                    self.conn.execute(
+                        "DELETE FROM worker_units WHERE unit_key = ? AND "
+                        "status = 'failed'",
+                        (unit_key,),
+                    )
+                    self._commit()
+                    return {"status": "released", "unit_key": unit_key}
                 cur = self.conn.execute(
                     "UPDATE worker_units SET status = 'cancelled' "
                     "WHERE unit_key = ? AND status IN ('launching','launched',"
@@ -1127,6 +1315,18 @@ class WorkerQueue:
                             f"{agent_id!r}); cross-agent cancel needs force=True"
                         ),
                     }
+                # A FAILED row is a dead tombstone: its job is already gone,
+                # so the launched-job refusal below must not trap it — the
+                # release sweep already marked the row and nothing else can
+                # clear it (2026-10-30 code review). DELETE instead.
+                if row["status"] == "failed":
+                    self.conn.execute(
+                        "DELETE FROM worker_units WHERE unit_key = ? AND "
+                        "status = 'failed'",
+                        (unit_key,),
+                    )
+                    self._commit()
+                    return {"status": "cancelled", "unit_key": unit_key}
                 if row["job_id"]:
                     self._commit()
                     return {
@@ -1199,17 +1399,21 @@ class WorkerQueue:
             ).fetchall()
             for r in rows:
                 poll = jobs.poll(r["job_id"])
-                if poll.get("status") == "done":
+                poll_status = poll.get("status")
+                if poll_status in ("done", "failed"):
                     # Sample one last time (harmless when the pid is
                     # already gone — the last live sample stands), then
                     # record the unit's measured peak as evidence for
-                    # future admissions of the same content bytes.
+                    # future admissions of the same content bytes. A
+                    # FAILED unit's peak is the OOM data the pool exists
+                    # to learn from — record it before release too.
                     self._sample_unit_peak(r["unit_key"], poll.get("pid"))
                     self._record_evidence(r["unit_key"])
+                    terminal = "finished" if poll_status == "done" else "failed"
                     cur = self.conn.execute(
-                        "UPDATE worker_units SET status = 'finished' "
+                        "UPDATE worker_units SET status = ? "
                         "WHERE unit_key = ? AND status = 'launched'",
-                        (r["unit_key"],),
+                        (terminal, r["unit_key"]),
                     )
                     out["freed"] += cur.rowcount
                 else:
@@ -1230,14 +1434,19 @@ class WorkerQueue:
                 (cutoff,),
             )
             out["ttl_swept"] = cur.rowcount
-            # Terminal rows (cancelled + finished) age out too — history
-            # lives in the journal; this table is a live ledger, not an
-            # archive.
+            # Terminal rows (cancelled + finished + failed) age out too —
+            # history lives in the journal; this table is a live ledger,
+            # not an archive. Failed rows need the same aging (they're
+            # tombstones once the model saw them; re-requests delete them
+            # earlier). Ageing window = 7d past the queue-entry cutoff
+            # (cutoff already encodes the queue TTL), i.e. terminal rows
+            # live ~7d + 24h from queued_at — the "weekly ledger row" the
+            # docs promise.
             self.conn.execute(
-                "DELETE FROM worker_units WHERE status IN ('cancelled'," 
-                "'finished') "
+                "DELETE FROM worker_units WHERE status IN ('cancelled',"
+                "'finished','failed') "
                 "AND queued_at < ?",
-                (cutoff - 7 * 3600,),
+                (cutoff - 7 * 86400,),
             )
             # Peak-RSS evidence ages out too (30d default) — long enough
             # that finished rows always age out FIRST and the evidence
@@ -1251,66 +1460,95 @@ class WorkerQueue:
             pass
 
         # 2. Launch-promote head-of-queue while admission fits (FIFO).
+
+        # Promotion is the queue's over-commit danger point, so the whole
+        # read → check → claim sequence runs under ONE ``BEGIN IMMEDIATE``
+        # transaction under ``db_lock`` (the same discipline as
+        # ``request_unit``'s admission tx — 2026-10-30 code review): two
+        # lanes reading claims/slots in separate autocommit statements
+        # could BOTH pass stale arithmetic and each launch a head,
+        # committing two claims over the pool's memory cap together — the
+        # exact OOM the queue exists to prevent. The write lock serializes
+        # the arithmetic WITH the claim: the second lane re-runs its math
+        # against a ledger that already includes the first lane's claim.
+        # The launch itself stays OUTSIDE the tx — the job store's own
+        # IMMEDIATE sections must never nest inside ours.
         try:
             self.sweep_stale()  # crashed-launcher claims first
             while True:
-                acct = self.account()
-                head = self.conn.execute(
-                    "SELECT * FROM worker_units WHERE status = 'queued' "
-                    "ORDER BY requested, unit_key LIMIT 1"
-                ).fetchone()
-                if head is None:
-                    break
-                # A head whose claim exceeds the box's admission capacity
-                # (total - floor) can NEVER fit — strict FIFO would wedge
-                # the whole queue behind it forever. Cancel it and keep
-                # walking (transient shortfalls below still stop the FIFO).
-                # The claim is evidence-backed (RSS feedback): a head whose
-                # recorded peak outruns capacity is cancelled the same way.
-                cap = acct["budget_capacity_mib"]
-                head_effective, _evidence_peak = self._effective_claim(
-                    head["unit_key"], head["memory_budget"]
-                )
-                if cap is not None and head_effective > cap:
-                    cur = self.conn.execute(
-                        "UPDATE worker_units SET status = 'cancelled' "
-                        "WHERE unit_key = ? AND status = 'queued'",
-                        (head["unit_key"],),
-                    )
-                    if cur.rowcount:
-                        out["impossible"] += 1
-                    continue
-                running = self.conn.execute(
-                    "SELECT unit_key FROM worker_units "
-                    "WHERE status IN ('launching','launched')"
-                ).fetchall()
-                claims = self.conn.execute(
-                    "SELECT COALESCE(SUM(memory_budget), 0) AS c "
-                    "FROM worker_units WHERE status IN ('launching','launched')"
-                ).fetchone()["c"]
-                usable = max(0, acct["free_ram_mib"] - acct["ram_floor_mib"])
-                if len(running) >= acct["slots"]:
-                    out["blocked"] += 1
-                    break  # FIFO: head blocks, so no further promotion
-                if claims + head_effective > usable:
-                    out["blocked"] += 1
-                    break  # head's claim doesn't fit — strict FIFO stop
-                # Claim (conditional): exactly one lane wins this update.
-                # launching_at stamps the CLAIM clock — sweep_stale reads
-                # it, never the queue-entry time, or a long-queued unit
-                # would be killed at the instant it finally launches.
-                cur = self.conn.execute(
-                    "UPDATE worker_units SET status = 'launching', "
-                    "launching_at = ? "
-                    "WHERE unit_key = ? AND status = 'queued'",
-                    (time.time(), head["unit_key"]),
-                )
-                if cur.rowcount == 0:
-                    continue  # another lane claimed it — re-read the head
-                fresh = self.conn.execute(
-                    "SELECT * FROM worker_units WHERE unit_key = ?",
-                    (head["unit_key"],),
-                ).fetchone()
+                with self.db_lock:
+                    self._immediate()
+                    try:
+                        acct = self.account()
+                        head = self.conn.execute(
+                            "SELECT * FROM worker_units WHERE status = 'queued' "
+                            "ORDER BY requested, unit_key LIMIT 1"
+                        ).fetchone()
+                        if head is None:
+                            self._commit()
+                            break
+                        # A head whose claim exceeds the box's admission
+                        # capacity (total - floor) can NEVER fit — strict
+                        # FIFO would wedge the whole queue behind it
+                        # forever. Cancel it and keep walking (transient
+                        # shortfalls below still stop the FIFO). The claim
+                        # is evidence-backed (RSS feedback): a head whose
+                        # recorded peak outruns capacity is cancelled the
+                        # same way.
+                        cap = acct["budget_capacity_mib"]
+                        head_effective, _evidence_peak = self._effective_claim(
+                            head["unit_key"], head["memory_budget"]
+                        )
+                        if cap is not None and head_effective > cap:
+                            cur = self.conn.execute(
+                                "UPDATE worker_units SET status = 'cancelled' "
+                                "WHERE unit_key = ? AND status = 'queued'",
+                                (head["unit_key"],),
+                            )
+                            if cur.rowcount:
+                                out["impossible"] += 1
+                            self._commit()
+                            continue
+                        running = self.conn.execute(
+                            "SELECT unit_key FROM worker_units "
+                            "WHERE status IN ('launching','launched')"
+                        ).fetchall()
+                        claims = self.conn.execute(
+                            "SELECT COALESCE(SUM(memory_budget), 0) AS c "
+                            "FROM worker_units WHERE status IN ('launching','launched')"
+                        ).fetchone()["c"]
+                        usable = max(0, acct["free_ram_mib"] - acct["ram_floor_mib"])
+                        if (len(running) >= acct["slots"]
+                                or claims + head_effective > usable):
+                            out["blocked"] += 1
+                            self._commit()
+                            break  # FIFO stop: head blocks, so nothing behind it
+                        # Claim (conditional): exactly one lane wins this
+                        # update. launching_at stamps the CLAIM clock —
+                        # sweep_stale reads it, never the queue-entry
+                        # time, or a long-queued unit would be killed at
+                        # the instant it finally launches.
+                        cur = self.conn.execute(
+                            "UPDATE worker_units SET status = 'launching', "
+                            "launching_at = ? "
+                            "WHERE unit_key = ? AND status = 'queued'",
+                            (time.time(), head["unit_key"]),
+                        )
+                        if cur.rowcount == 0:
+                            self._commit()
+                            continue  # lane lost a race inside its own tx — re-read
+                        fresh = self.conn.execute(
+                            "SELECT * FROM worker_units WHERE unit_key = ?",
+                            (head["unit_key"],),
+                        ).fetchone()
+                        self._commit()
+                    except BaseException:
+                        try:
+                            self._rollback()
+                        except Exception:
+                            pass
+                        raise
+                # TX committed and the claim is durable: launch outside it.
                 result = self._launch_claim(fresh)
                 if result is None:
                     out["launch_failed"] += 1

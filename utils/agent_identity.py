@@ -33,7 +33,18 @@ Reserved prefixes — normalization is adversarial at 30 actors:
 
   - ``anon-`` is gateway-reserved: a client *announcing* ``anon-x`` is
     re-minted (treated as untrusted-minted-equivalent, not an identity),
-    so a spoofable namespace never becomes a durable owner tag.
+    so a spoofable namespace never becomes a durable owner tag. THE
+    exception is adoption: an ``anon-`` id that THIS process minted
+    (``is_minted`` — process-local registry) is accepted verbatim as
+    declared. Adoption is the continuity hinge — the gateway mints,
+    the client echoes the id back, and the resolver returns the SAME
+    id instead of minting a fresh one every call for a cycle (2026-10-30
+    code review: the executor re-resolved the gateway's already-minted
+    id, which re-minted, so the executor ALWAYS ran as a different
+    identity than the gateway reported). The same-process check keeps
+    a foreign ``anon-*`` spoof unusable; an adopted id refreshes its
+    registry entry so live adoption outlives the bounded registry's
+    eviction.
   - ``0`` is the shared-session escape hatch and is accepted only as the
     exact string ``"0"``.
 
@@ -142,16 +153,24 @@ def normalize_agent_id(raw: str | None) -> str | None:
     """Normalize an announced id, or ``None`` when unusable.
 
     Charset ``[a-z0-9_.:-]{3,64}``, lowercased and stripped. Anything else
-    (empty, oversized, odd charset, the reserved mint prefix) is unusable
-    and the resolver mints instead.
+    (empty, oversized, odd charset) is unusable and the resolver mints
+    instead. The reserved mint prefix is unusable too — UNLESS this
+    process minted it (adopt-on-echo: the gateway's own minted id comes
+    back and resolves to itself, not to a fresh mint).
     """
     if raw is None:
         return None
     candidate = str(raw).strip().lower()
     if not candidate:
         return None
-    # The mint prefix is gateway-reserved even as an announcement.
+    # The mint prefix is gateway-reserved even as an announcement —
+    # except this process's own mints, which the adopter echoes back.
     if candidate.startswith(ANON_PREFIX):
+        if is_minted(candidate):
+            # Refresh the registry entry: an adopted id is a live
+            # identity, not an aging one — outlive mint-registry eviction.
+            _register_mint(candidate)
+            return candidate
         return None
     if not _AGENT_ID_RE.fullmatch(candidate):
         return None
@@ -170,8 +189,11 @@ def resolve_agent_id(raw: str | None) -> tuple[str, str]:
 
     - usable announcement -> ``(normalized, "declared")``
     - exact ``"0"``       -> ``("0", "shared")``
-    - anything else (None, empty, bad charset, spoofed ``anon-`` prefix)
-                          -> freshly minted (``"minted"``)
+    - an ``anon-`` id this process minted -> ``(itself, "declared")``
+      (adopt-on-echo — the continuity hinge: echoing a minted id back
+      resolves to the SAME id, never a fresh mint)
+    - anything else (None, empty, bad charset, a foreign ``anon-``
+      prefix) -> freshly minted (``"minted"``)
 
     This is the ONLY place minting happens; stores downstream must never
     carry a default (``NOT NULL`` columns, resolved callers only).

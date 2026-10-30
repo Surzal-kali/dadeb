@@ -237,10 +237,11 @@ def test_fleet_stop_terminates_running(fleet_env, monkeypatch):
         stop = sm.sqlmap_fleet_stop(out["fleet_id"])
     assert stop["status"] == "ok"
     assert job_id in stop["stopped"]
-    # Row observed done (killed) and slot freed is enforced by release.
+    # Row observed terminal (killed exit lands as 'failed' now — a kill is
+    # not success) and slot freed is enforced by release.
     from utils.background_job import poll_job
 
-    assert poll_job(job_id)["status"] in ("done", "running")  # killed exit lands
+    assert poll_job(job_id)["status"] in ("done", "failed", "running")
     monkeypatch.setenv("STUB_SLEEP", "0.2")
 
 

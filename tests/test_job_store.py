@@ -168,7 +168,31 @@ def test_reaper_enforces_cap(store, tmp_path):
             break
         time.sleep(0.2)
     assert poll["timed_out"] is True
-    assert poll["status"] == "done"
+    # A cap kill is a FAILURE, not "done" (2026-10-30 code review: success-
+    # only terminal status made dedupe refuse retries of dead runs).
+    assert poll["status"] == "failed"
+
+
+def test_nonzero_exit_polls_failed(store, tmp_path):
+    """A nonzero exit is its own FAILED terminal, never 'done' — and
+    failed polls still carry the full output tail (the crash log is the
+    evidence the model needs)."""
+    import sys
+
+    j = store.launch(
+        [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"],
+        tool_name="boom", agent_id="boom-a", timeout=60,
+    )
+    deadline = time.time() + 10
+    poll = {}
+    while time.time() < deadline:
+        poll = store.poll(j["job_id"])
+        if poll["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert poll["status"] == "failed"
+    assert poll["exit_code"] == 3
+    assert "boom" in (poll.get("full_output") or "")
 
 
 # --- cross-lane poll (second store instance over the same dir) --------------------
@@ -499,3 +523,178 @@ def test_second_instance_poll_observes_exit(store, tmp_path):
     dead = subprocess.run(["ps", "-o", "stat=", "-p", str(poll["pid"])],
                           capture_output=True, text=True)
     assert not dead.stdout.strip().startswith("Z"), "child left unreaped"
+
+
+# --- PID-reuse fence (start-ticks verification) --------------------------------
+
+
+def _spawn_outsider(seconds=60):
+    import subprocess
+
+    return subprocess.Popen(
+        ["sleep", str(seconds)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _outsider_cleanup(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def test_pid_start_recorded_at_launch(store, tmp_path):
+    from utils.job_store import _pid_matches
+
+    r = store.launch(
+        _quick_cmd(tmp_path, 30), tool_name="t", agent_id="kai9000", timeout=60
+    )
+    row = store.get(r["job_id"])
+    assert row["pid_start"] is not None and row["pid_start"] > 0
+    assert _pid_matches(row["pid"], row["pid_start"]) is True
+
+
+def test_stop_refuses_reused_pid(store, tmp_path):
+    """A row whose stored pid now names a DIFFERENT live process (start
+    mismatch) must NOT be signalled — stop reports the reuse, marks the
+    row finished, and the innocent process survives."""
+    from utils.job_store import _proc_start_ticks
+
+    r = store.launch(
+        _quick_cmd(tmp_path, 60), tool_name="t", agent_id="kai9000", timeout=600
+    )
+    outsider = _spawn_outsider()
+    try:
+        with store.db_lock:
+            store.conn.execute(
+                "UPDATE jobs SET pid = ?, pid_start = ? WHERE job_id = ?",
+                (
+                    outsider.pid,
+                    _proc_start_ticks(outsider.pid) + 1.0,
+                    r["job_id"],
+                ),
+            )
+        out = store.stop(r["job_id"], force=True)
+        assert out["status"] == "ok"
+        assert out["pid_reused"] is True
+        import os as _os
+
+        _os.kill(outsider.pid, 0)  # still alive — nothing was signalled
+        poll = store.poll(r["job_id"])
+        assert poll["status"] == "failed"
+        assert poll["exit_code"] == -1
+        assert poll["timed_out"] is False
+    finally:
+        _outsider_cleanup(outsider)
+
+
+def test_poll_stamps_reused_row_finished(store, tmp_path):
+    """Cross-lane trust problem: a stale 'running' row whose pid got
+    recycled must not be trusted forever — the observe path stamps it
+    finished (exit unknown) instead of reporting running. Simulates a
+    poll from a lane with no live Popen handle (post-restart)."""
+    from utils.job_store import _LIVE_CHILD_PROCS, _LIVE_CHILDREN_LOCK
+    from utils.job_store import _proc_start_ticks
+
+    r = store.launch(
+        _quick_cmd(tmp_path, 60), tool_name="t", agent_id="kai9000", timeout=600
+    )
+    with _LIVE_CHILDREN_LOCK:
+        _LIVE_CHILD_PROCS.pop(r["job_id"], None)  # post-restart: handle lost
+    outsider = _spawn_outsider()
+    try:
+        with store.db_lock:
+            store.conn.execute(
+                "UPDATE jobs SET pid = ?, pid_start = ? WHERE job_id = ?",
+                (
+                    outsider.pid,
+                    _proc_start_ticks(outsider.pid) + 1.0,
+                    r["job_id"],
+                ),
+            )
+        poll = store.poll(r["job_id"])
+        import os as _os
+
+        _os.kill(outsider.pid, 0)
+        assert poll["status"] == "failed"
+        assert poll["exit_code"] == -1
+    finally:
+        _outsider_cleanup(outsider)
+
+
+def test_reaper_pass_never_kills_reused_pid(store, tmp_path):
+    """Over-cap + pid reused: the reaper claims the finish WITHOUT the
+    timeout flag (no kill it performed) and without signalling."""
+    from utils.job_store import _proc_start_ticks
+
+    r = store.launch(
+        _quick_cmd(tmp_path, 60), tool_name="t", agent_id="kai9000", timeout=600
+    )
+    outsider = _spawn_outsider()
+    try:
+        # Swap pid AND make the row over-cap atomically, so only the
+        # explicit pass below sees the over-cap state (the background
+        # reaper thread must not race a real kill first).
+        with store.db_lock:
+            store.conn.execute(
+                "UPDATE jobs SET pid = ?, pid_start = ?, cap = 0.2, "
+                "started = ? WHERE job_id = ?",
+                (
+                    outsider.pid,
+                    _proc_start_ticks(outsider.pid) + 1.0,
+                    time.time() - 10,
+                    r["job_id"],
+                ),
+            )
+        store._reaper_pass()
+        import os as _os
+
+        _os.kill(outsider.pid, 0)  # innocent process untouched
+        poll = store.poll(r["job_id"])
+        assert poll["status"] == "failed"
+        assert poll["exit_code"] == -1
+        assert poll["timed_out"] is False
+        log = Path(poll["log_file"]).read_text()
+        assert "pid reused" in log
+    finally:
+        _outsider_cleanup(outsider)
+
+
+def test_legacy_row_without_ticks_still_stops(store, tmp_path):
+    """Legacy rows (no pid_start) fall back to the started-epoch estimate:
+    a genuine match signals normally — the estimate never blocks a real
+    stop, only refuses a definite mismatch."""
+    from utils.job_store import _pid_matches
+
+    r = store.launch(
+        _quick_cmd(tmp_path, 60), tool_name="t", agent_id="kai9000", timeout=60
+    )
+    row = store.get(r["job_id"])
+    assert row["pid_start"] is not None  # sanity: new row has ticks
+    with store.db_lock:
+        store.conn.execute(
+            "UPDATE jobs SET pid_start = NULL WHERE job_id = ?",
+            (r["job_id"],),
+        )
+    row = store.get(r["job_id"])
+    assert _pid_matches(row["pid"], None, row["started"]) is True
+    out = store.stop(r["job_id"], force=True)
+    assert out["status"] == "ok"
+    assert "pid_reused" not in out
+    poll = store.poll(r["job_id"])
+    assert poll["status"] == "failed"
+    # Stopped: the legacy KILL-shape -9 for handle-less lanes, or the real
+    # TERM death code (-15) when this process reaped the observed child.
+    assert poll["exit_code"] in (-9, -15)
+
+
+def test_pid_matches_none_when_unverifiable():
+    from utils.job_store import _pid_matches
+
+    # No such pid: /proc unreadable -> cannot verify, not a mismatch.
+    assert _pid_matches(99999999) is None
+    assert _pid_matches(None) is None

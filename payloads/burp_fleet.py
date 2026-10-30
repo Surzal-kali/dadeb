@@ -26,7 +26,12 @@ on the manifest BYTES (content_key("burp", manifest)) — identical
 request + same target + same retries is one unit wherever the file
 lives; changing anything re-keys honestly. Re-running a finished unit
 returns the finished-duplicate envelope (same bytes ran already); copy
-or edit the request file for a genuinely new unit.
+or edit the request file for a genuinely new unit. Manifests embed the
+RAW request (its Cookie/Authorization headers included), so they are
+written 0600 under a 0700 dir and age out on an mtime TTL window
+(``BURP_FLEET_UNIT_TTL_HOURS``, default 48h, 0 disables) — GC runs
+anchored at the manifest-write path; a re-request deterministically
+rewrites an aged-out manifest.
 
 Scope gate: per unit, BEFORE admission — the request's Host header is
 checked with the operator-armed gate (same as the interactive lane).
@@ -41,6 +46,8 @@ import os
 import re
 import secrets
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +60,70 @@ _BURP_FLEET_BUDGET_DEFAULT = 128
 _BURP_FLEET_BUDGET_CAP = 1024
 
 _UNIT_DIR = "run/burp_fleet/units"
+
+# Manifest GC (2026-10-31): unit manifests embed the RAW captured request
+# (Cookie/Authorization headers included) — sensitive material sitting in
+# world-readable 0644 files under run/, never deleted. Two fixes, both
+# anchored at the manifest-write path:
+# - restrictive perms: dir 0700, files 0600 (scratch-store convention);
+#   pre-existing legacy 0644 files are chmod'd on their next idempotent
+#   rewrite of the same content.
+# - mtime-based GC on a BURP_FLEET_UNIT_TTL_HOURS window (default 48h,
+#   0 disables; BG_LOG_GC precedent) — manifests are byte-deterministic,
+#   so a re-request deterministically rewrites the aged-out file. The GC
+#   pass is throttled by BURP_FLEET_UNIT_GC_INTERVAL_S (default 30 min)
+#   at module level like the job store's log GC.
+_BURP_UNIT_TTL_HOURS_DEFAULT = 48.0
+_BURP_UNIT_GC_INTERVAL_DEFAULT = 1800.0
+_MANIFEST_GC_LAST = 0.0
+_MANIFEST_GC_LOCK = threading.Lock()
+
+
+def _unit_dir() -> Path:
+    override = os.getenv("BURP_FLEET_UNIT_DIR", "").strip()
+    if override:
+        return Path(override)
+    return resolve_workspace_root() / _UNIT_DIR
+
+
+def _unit_ttl_hours() -> float:
+    raw = os.getenv("BURP_FLEET_UNIT_TTL_HOURS", "").strip()
+    return float(raw) if raw else _BURP_UNIT_TTL_HOURS_DEFAULT
+
+
+def _unit_gc_interval() -> float:
+    raw = os.getenv("BURP_FLEET_UNIT_GC_INTERVAL_S", "").strip()
+    return float(raw) if raw else _BURP_UNIT_GC_INTERVAL_DEFAULT
+
+
+def _gc_manifests(base: Path, force: bool = False) -> int:
+    """Delete unit manifests older than the TTL window (mtime-based).
+    Throttled at module level; errors never break the write path.
+    Returns the number of files removed (0 when the window or the
+    throttle suppresses the pass)."""
+    global _MANIFEST_GC_LAST
+    window = _unit_ttl_hours()
+    if window <= 0:
+        return 0
+    now = time.time()
+    if not force:
+        with _MANIFEST_GC_LOCK:
+            if now - _MANIFEST_GC_LAST < _unit_gc_interval():
+                return 0
+            _MANIFEST_GC_LAST = now
+    cutoff = now - window * 3600
+    removed = 0
+    try:
+        for candidate in base.glob("*.json"):
+            try:
+                if candidate.stat().st_mtime < cutoff:
+                    candidate.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
 
 
 def _worker_path() -> Path:
@@ -108,7 +179,12 @@ def _make_manifest(request_path: Path, host: str, port: int, https: bool,
     by path, so identical request bytes at different filenames produce
     byte-identical manifests — the content-key doctrine holds), plus the
     target + retries that define unit meaning. Deterministically named
-    from its own sha256, so a re-request idempotently rewrites it."""
+    from its own sha256, so a re-request idempotently rewrites it.
+
+    Sensitive by construction (the raw request carries its headers —
+    Cookies, Authorization) — the dir is 0700 and the file 0600 (scratch-
+    store convention; legacy 0644 files are chmod'd here too), and old
+    manifests age out on a TTL window (see _gc_manifests)."""
     raw = request_path.read_text(encoding="utf-8", errors="replace")
     manifest = {
         "v": 1,
@@ -119,12 +195,22 @@ def _make_manifest(request_path: Path, host: str, port: int, https: bool,
         "retries": int(retries),
     }
     blob = json.dumps(manifest, sort_keys=True).encode("utf-8")
-    override = os.getenv("BURP_FLEET_UNIT_DIR", "").strip()
-    base = Path(override) if override else (resolve_workspace_root() / _UNIT_DIR)
+    base = _unit_dir()
     base.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(base, 0o700)
+    except OSError:
+        pass
     path = base / f"{hashlib.sha256(blob).hexdigest()[:12]}.json"
     if not path.exists():
         path.write_bytes(blob)
+    try:
+        # Normalize perms even for the idempotent skip (legacy 0644 files
+        # heal here without a re-index or a purge).
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    _gc_manifests(base)
     return path
 
 
@@ -447,8 +533,11 @@ def burp_replay_status(fleet_id: str) -> dict[str, Any]:
             )
         if state == "queued":
             entry["position"] = poll.get("position")
-        if state == "done" and r["target"].endswith(".json"):
-            # Display the unit's meaning (the manifest is on disk until swept).
+        if state in ("done", "finished") and r["target"].endswith(".json"):
+            # Display the unit's meaning (the manifest is on disk until
+            # swept). finished rows arrive here because the release sweep
+            # settles a done unit before this status read — the manifest
+            # decoration must not vanish on the terminal transition.
             try:
                 man = json.loads(Path(r["target"]).read_text(encoding="utf-8"))
                 entry["host"] = man.get("host")

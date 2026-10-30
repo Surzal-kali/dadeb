@@ -155,4 +155,18 @@ GRANT USAGE ON SEQUENCE
 GRANT SELECT ON journal.entries, evidence.entries, evidence.attempts,
     engagement.engagements TO harness_operator;
 
+-- -- Post-v1 column retrofit (2026-10-30 code review) ---------------------
+-- ``daharness-pg init`` re-runs this whole bundle on existing clusters,
+-- but ``CREATE TABLE IF NOT EXISTS`` never retrofits columns onto tables
+-- the first boot already created — the identity columns (post-v1
+-- additions, Phase 0) never reached pre-existing engagements. Idempotent
+-- ALTERs bridge the gap; every fresh cluster gets a no-op.
+
+ALTER TABLE journal.entries
+    ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '0';
+ALTER TABLE journal.entries
+    ADD COLUMN IF NOT EXISTS agent_provenance TEXT;
+ALTER TABLE evidence.entries
+    ADD COLUMN IF NOT EXISTS agent_provenance TEXT;
+
 COMMIT;

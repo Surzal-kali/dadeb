@@ -62,18 +62,30 @@ class ExecutorMixin:
     focused on discovery/embedding while all the "run a tool" paths live here.
     """
 
-    async def execute_tool(self, manifest: ToolManifest, arguments: dict, *, session_id: str = "0"):
+    async def execute_tool(
+        self, manifest: ToolManifest, arguments: dict, *, session_id: str = "0",
+        agent_identity: "tuple[str, str] | None" = None,
+    ):
         manifest = self._ensure_valid_manifest(manifest)
 
         # --- Identity resolution (Phase 0, announce-or-mint). ``session_id``
         # is the caller's announced identity; an unusable announcement (None,
-        # empty, bad charset, spoofed anon- prefix) is MINTED here -- the
+        # empty, bad charset, foreign anon- prefix) is MINTED here -- the
         # single minting point. The resolved id + provenance ride the result
         # envelope so the model sees what it ran as; the ambient contextvar
         # makes identity-bearing tool writes (jobs, evidence) tag the row
         # without every tool signature changing.
+        #
+        # ``agent_identity`` lets the caller resolve ONCE and pass the
+        # result through (the gateway/MCP lanes do): re-resolving an
+        # already-minted id here minted a SECOND anon id — the executor
+        # ran as a different identity than the gateway reported, splitting
+        # rows from the id the client adopted (2026-10-30 code review).
         from utils.agent_identity import resolve_agent_id
-        resolved_agent_id, agent_provenance = resolve_agent_id(session_id)
+        if agent_identity is not None:
+            resolved_agent_id, agent_provenance = agent_identity
+        else:
+            resolved_agent_id, agent_provenance = resolve_agent_id(session_id)
         _agent_token = set_current_agent_id(resolved_agent_id)
         try:
             result = await self._execute_tool_inner(

@@ -197,8 +197,10 @@ def sqlmap_status(job_id: str) -> dict[str, Any]:
     result = poll_job(job_id)
     if result.get("status") == "unknown":
         return result
-    # Fleet release: a finished job must free its scheduler slot.
-    if result["status"] == "done":
+    # Fleet release: a finished or FAILED job must free its scheduler slot
+    # (a crashed run holding its host slot until grace-sweep would wedge
+    # the host's courtesy contract).
+    if result["status"] in ("done", "failed"):
         _release_unit_for_job(job_id)
     return result
 
@@ -478,6 +480,7 @@ def sqlmap_fleet_status(fleet_id: str) -> dict[str, Any]:
     out: dict[str, Any] = {**batch, "unit_status": {}}
     done = 0
     running = 0
+    failed = 0
     for u in batch["units"]:
         if u["decision"] != "acquired" or not u["job_id"]:
             out["unit_status"][str(u["seq"])] = {"decision": u["decision"]}
@@ -492,12 +495,20 @@ def sqlmap_fleet_status(fleet_id: str) -> dict[str, Any]:
             "dbms": poll.get("dbms"),
             "timed_out": poll.get("timed_out"),
         }
-        if st == "done":
-            done += 1
+        if st in ("done", "failed"):
+            # Both terminal states release the unit; failed units surface
+            # separately so the batch readout distinguishes a dead scan
+            # from a completed one.
+            if st == "done":
+                done += 1
+            else:
+                failed += 1
             _release_unit_for_job(u["job_id"])
         elif st == "running":
             running += 1
     out["running"] = running
+    out["done"] = done
+    out["failed"] = failed
     out["done"] = done
     if running == 0 and batch["status"] == "running":
         from utils.fleet_scheduler import get_scheduler as _gs

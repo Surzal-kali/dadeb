@@ -26,6 +26,16 @@ Design facts:
   timeouts; a poll-side cap check remains as defense-in-depth. A running
   subprocess's liveness is one ``os.kill(pid, 0)`` — cross-process,
   restart-safe.
+- **PID-reuse fence**: rows record the child's ``/proc/<pid>/stat``
+  starttime ticks (field 22) at launch; every signalling path (``stop``,
+  poll/reaper cap kills, launch roll-down) verifies the pid still names
+  THAT process before signalling — a recycled pid is refused outright
+  (killing the innocent new occupant is the unrecoverable outcome), and
+  cross-lane polls treat a definitively reused pid as "process gone"
+  (exit -1) instead of trusting the stale "running" row forever. Legacy
+  rows without recorded ticks fall back to a ``started``-epoch estimate
+  honoured ONLY in the safe direction (refuse to signal; never stamp a
+  possibly-still-running row finished off an estimate).
 - **Cross-lane**: any lane (gateway, Brain, REPL, kernel) can launch and
   any other can poll — state is on disk, like the cookie jar.
 - **Compat**: ``utils/background_job.py`` keeps its exact public surface
@@ -129,10 +139,18 @@ def _log_gc_interval() -> float:
     return float(raw) if raw else _JOBS_LOG_GC_INTERVAL_DEFAULT
 
 
-def _terminate_proc_tree(pid: int) -> None:
+def _terminate_proc_tree(
+    pid: int, *, pid_start: float | None = None, started: float | None = None
+) -> bool:
     """SIGTERM the process group (jobs spawn with start_new_session=True,
     so the pgid == pid), grace-wait, then SIGKILL stragglers. Surgical:
     never a global sweep, matching scale-doctrine rule 3.
+
+    PID-fence: when the stored pid now belongs to a DIFFERENT process
+    (start mismatch against the row's recorded /proc starttime ticks —
+    legacy rows fall back to the ``started`` epoch estimate), nothing is
+    signalled and False is returned — killing an innocent process that
+    recycled the pid is the one unrecoverable outcome here.
 
     Grace detection has a zombie trap: a dead-but-unreaped child answers
     ``os.kill(pid, 0)`` successfully (the pid entry stays until waitpid).
@@ -140,13 +158,15 @@ def _terminate_proc_tree(pid: int) -> None:
     children that reaps the zombie instantly and ends the wait; for
     foreign pids the EINVAL/ChildError is ignored and kill(pid,0) decides.
     """
+    if _pid_matches(pid, pid_start, started) is False:
+        return False  # pid was recycled — refuse to signal the new occupant
     try:
         os.killpg(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         try:
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
-            return
+            return True
     import errno
 
     deadline = time.monotonic() + _TERMINATE_GRACE_S
@@ -155,7 +175,7 @@ def _terminate_proc_tree(pid: int) -> None:
         try:
             wpid, _status = os.waitpid(pid, os.WNOHANG)
             if wpid == pid:
-                return  # reaped — fully dead, no zombie trap
+                return True  # reaped — fully dead, no zombie trap
         except (ChildProcessError, OSError) as exc:
             if getattr(exc, "errno", None) == errno.ECHILD:
                 pass  # not our child — fall through to the pid probe
@@ -164,9 +184,9 @@ def _terminate_proc_tree(pid: int) -> None:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return  # exited (and someone else reaped it)
+            return True  # exited (and someone else reaped it)
         except (PermissionError, OSError):
-            return  # alive but not signalable further
+            return True  # alive but not signalable further
         time.sleep(0.2)
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -175,6 +195,7 @@ def _terminate_proc_tree(pid: int) -> None:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+    return True
 
 
 def _pid_alive(pid: int | None) -> bool | None:
@@ -190,6 +211,96 @@ def _pid_alive(pid: int | None) -> bool | None:
         return True  # exists but not signalable — treat as alive
 
 
+def _clock_ticks_per_second() -> float:
+    try:
+        return float(os.sysconf(os.sysconf_names["SC_CLK_TCK"]))
+    except (KeyError, ValueError, OSError, AttributeError):
+        return 100.0  # Linux default
+
+
+def _proc_boot_epoch() -> float | None:
+    """Boot time (epoch seconds) from the btime line of /proc/stat."""
+    try:
+        with open("/proc/stat", "r") as fh:
+            for line in fh:
+                if line.startswith("btime "):
+                    return float(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _proc_start_ticks(pid: int | None) -> float | None:
+    """Field 22 of /proc/<pid>/stat — the process's starttime in clock
+    ticks since boot. Comm (field 2) may contain spaces and parens, so
+    parse after the LAST ')'. Raw ticks are deliberately preferred over
+    a btime-derived epoch (jiffies freeze across suspend while the wall
+    clock advances, so ONLY the raw-tick compare is suspension-immune)."""
+    if not pid:
+        return None
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as fh:
+            data = fh.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+    rparen = data.rfind(")")
+    if rparen < 0:
+        return None
+    fields = data[rparen + 1 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return float(fields[19])
+    except ValueError:
+        return None
+
+
+def _epoch_from_ticks(
+    ticks: float, btime: float | None = None
+) -> float | None:
+    """Epoch estimate for a starttime-ticks value (legacy rows only)."""
+    if btime is None:
+        btime = _proc_boot_epoch()
+    if btime is None:
+        return None
+    return btime + ticks / _clock_ticks_per_second()
+
+
+_PID_START_LEGACY_TOL_S = 3.0
+
+
+def _pid_matches(
+    pid: int | None,
+    pid_start: float | None = None,
+    started: float | None = None,
+) -> bool | None:
+    """Does the pid recorded on a row still name the SAME process?
+
+    - New rows store raw ``/proc`` starttime ticks (``pid_start``): the
+      compare is exact and definitive — False means the pid was reused
+      by a different process.
+    - Legacy rows (``pid_start`` NULL) fall back to an epoch estimate
+      from the ticks against the row's ``started`` timestamp with a
+      small tolerance (wall-clock skew between Popen and the row write).
+      Suspend in the window can skew the estimate, so a legacy mismatch
+      is trusted only in the SAFE direction (refusing to signal), never
+      for stamping a live row finished.
+    - ``None`` (no pid, /proc missing, /proc/stat unreadable) — cannot
+      verify; callers keep today's behavior.
+    """
+    ticks = _proc_start_ticks(pid)
+    if ticks is None:
+        return None
+    if pid_start is not None:
+        return abs(ticks - float(pid_start)) < 0.5
+    if started is not None:
+        est = _epoch_from_ticks(ticks)
+        if est is None:
+            return None
+        return abs(est - float(started)) <= _PID_START_LEGACY_TOL_S
+    return None
+
+
 # Verdict parsers are PROCESS-WIDE registrations (tool modules register at
 # import time; any store instance in this process applies them by tool
 # name) — deliberately NOT per-instance state: the env-override singleton
@@ -199,6 +310,29 @@ def _pid_alive(pid: int | None) -> bool | None:
 # nothing).
 _PARSERS: dict[str, Callable[[str], dict[str, Any]]] = {}
 _PARSERS_LOCK = threading.Lock()
+
+
+def _set_wal(sqlite3_mod, c) -> None:
+    """Tolerate the first-converter WAL race (see fleet_scheduler._set_wal).
+
+    ``PRAGMA journal_mode=WAL`` on a fresh db can hit SQLITE_BUSY without
+    parking on busy_timeout (conversion needs an exclusive lock). Losing
+    the race is harmless — the winner already converted — so retry with a
+    short backoff and accept the mode once any contender's readback says
+    ``wal``. Only surface the original error if the db is truly not WAL.
+    """
+    for attempt in range(3):
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3_mod.OperationalError:
+            row = c.execute("PRAGMA journal_mode").fetchone()
+            if row is not None and (row[0] or "").lower() == "wal":
+                return
+            time.sleep(0.05 * (attempt + 1))
+    row = c.execute("PRAGMA journal_mode").fetchone()
+    if row is None or (row[0] or "").lower() != "wal":
+        c.execute("PRAGMA journal_mode=WAL")  # surface the real error
 
 
 class JobStore:
@@ -240,7 +374,7 @@ class JobStore:
         )
         self._bootstrap.row_factory = sqlite3.Row
         self._bootstrap.execute("PRAGMA busy_timeout=30000")
-        self._bootstrap.execute("PRAGMA journal_mode=WAL")
+        _set_wal(self._sqlite3, self._bootstrap)
         # Live-handle note: the Popen + log fh are process-scoped module
         # registries (_LIVE_CHILD_PROCS / _LIVE_LOG_FHS, module level), NOT
         # per-instance — see their comment there. This instance holds only
@@ -285,7 +419,7 @@ class JobStore:
             )
             c.row_factory = self._sqlite3.Row
             c.execute("PRAGMA busy_timeout=30000")
-            c.execute("PRAGMA journal_mode=WAL")
+            _set_wal(self._sqlite3, c)
             self._local.conn = c
         return c
 
@@ -316,6 +450,7 @@ class JobStore:
                 log_file    TEXT NOT NULL,
                 jobs_dir    TEXT NOT NULL,
                 pid         INTEGER,
+                pid_start   REAL,          -- /proc/<pid>/stat field 22 (starttime ticks): PID-reuse fence
                 started     REAL NOT NULL,
                 cap         REAL NOT NULL DEFAULT 0,
                 timed_out   INTEGER NOT NULL DEFAULT 0,
@@ -325,6 +460,7 @@ class JobStore:
             )
             """
         )
+        self._add_column(self._sqlite3, c, "pid_start REAL")
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_agent_started "
             "ON jobs(agent_id, started DESC)"
@@ -333,6 +469,16 @@ class JobStore:
             "CREATE INDEX IF NOT EXISTS idx_jobs_running "
             "ON jobs(agent_id) WHERE exit_code IS NULL"
         )
+
+    def _add_column(self, sqlite3_mod: Any, c: Any, ddl: str) -> None:
+        """Race-tolerant schema migration (worker_queue precedent): ALTER
+        and tolerate ONLY the duplicate-column error a concurrent opener
+        may already have fixed."""
+        try:
+            c.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
+        except sqlite3_mod.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     # -- registration ----------------------------------------------------------
 
@@ -395,6 +541,10 @@ class JobStore:
             except OSError:
                 pass
             raise
+        # PID-reuse fence: record the child's /proc starttime ticks at
+        # birth. Kill paths later verify the pid still names THIS process
+        # before signalling anything.
+        pid_start = _proc_start_ticks(proc.pid)
         # Register the live handles BEFORE the row INSERT (the reaper
         # consults them from the moment the row appears). On an INSERT
         # failure the launch is rolled DOWN: kill the spawned tree first
@@ -404,19 +554,24 @@ class JobStore:
             _LIVE_CHILD_PROCS[job_id] = proc
             _LIVE_LOG_FHS[job_id] = log_fh
         with self.db_lock:
-            self._immediate()
+            # Roll-down covers INSERT failure AND lock acquisition: the
+            # spawned tree must never outlive a missing row (a pid without
+            # a row is a job_id every poll answers "unknown" and a slot no
+            # scheduler can ever free). BEGIN IMMEDIATE failing here is
+            # the same "no row will ever exist" outcome as a failed INSERT.
             try:
+                self._immediate()
                 self.conn.execute(
                     """
                     INSERT INTO jobs
                         (job_id, agent_id, tool, command, log_file, jobs_dir,
-                         pid, started, cap)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         pid, pid_start, started, cap)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job_id, agent_id, tool_name, json.dumps(command),
                         str(log_path), str(base),
-                        proc.pid, started, cap,
+                        proc.pid, pid_start, started, cap,
                     ),
                 )
                 self._commit()
@@ -425,7 +580,9 @@ class JobStore:
                     self._rollback()
                 except Exception:
                     pass
-                _terminate_proc_tree(proc.pid)
+                _terminate_proc_tree(
+                    proc.pid, pid_start=pid_start, started=started
+                )
                 try:
                     proc.wait(timeout=5)  # reap — no zombie, no ghost pid
                 except Exception:
@@ -499,6 +656,18 @@ class JobStore:
         if row["exit_code"] is None and alive is False:
             self._mark_finished(job_id, exit_code=-1, timed_out=False)
             return self._row(job_id) or row
+        if (
+            row["exit_code"] is None
+            and alive
+            and row["pid_start"] is not None
+            and _pid_matches(pid, row["pid_start"]) is False
+        ):
+            # PID reuse, definitively (raw-tick compare): the recorded
+            # process is gone and something else owns that pid — the
+            # "running" row must stop being trusted (old rows survived
+            # restarts forever because the pid probe lied).
+            self._mark_finished(job_id, exit_code=-1, timed_out=False)
+            return self._row(job_id) or row
         return row
 
     def _mark_finished(self, job_id: str, *, exit_code: int, timed_out: bool) -> None:
@@ -536,7 +705,7 @@ class JobStore:
                 pass
 
     def poll(self, job_id: str, *, tail: int = 20) -> dict[str, Any]:
-        """Status poll: running/done/unknown, log tail, parsed verdict."""
+        """Status poll: running/done/failed/unknown, log tail, parsed verdict."""
         row = self._row(job_id)
         if row is None:
             return {
@@ -558,29 +727,61 @@ class JobStore:
         # wins, so a racing reaper's authoritative stamp is never
         # downgraded), then kill the tree.
         if exit_code is None and not timed_out and cap > 0 and elapsed > cap:
-            self._mark_finished(job_id, exit_code=-9, timed_out=True)
-            _terminate_proc_tree(int(row["pid"]))
-            row = self._row(job_id) or row
-            exit_code = row["exit_code"]
-            timed_out = bool(row["timed_out"]) or True
-            try:
-                with open(row["log_file"], "a") as fh:
-                    fh.write(
-                        f"\n[{row['tool']} poll-reaper] exceeded {cap:.0f}s "
-                        "wall-clock; terminated\n"
-                    )
-            except OSError:
-                pass
+            if _pid_matches(row["pid"], row["pid_start"], started) is False:
+                # PID reused: the original process is gone. Claim the
+                # finish honestly — no cap kill we performed, so no
+                # timeout flag — and signal nothing (an innocent process
+                # owns that pid now).
+                self._mark_finished(job_id, exit_code=-1, timed_out=False)
+                row = self._row(job_id) or row
+                exit_code = row["exit_code"]
+                timed_out = bool(row["timed_out"]) or False
+                try:
+                    with open(row["log_file"], "a") as fh:
+                        fh.write(
+                            f"\n[{row['tool']} poll-reaper] exceeded {cap:.0f}s "
+                            "wall-clock; process gone (pid reused) — not terminated\n"
+                        )
+                except OSError:
+                    pass
+            else:
+                self._mark_finished(job_id, exit_code=-9, timed_out=True)
+                _terminate_proc_tree(
+                    int(row["pid"]),
+                    pid_start=row["pid_start"],
+                    started=started,
+                )
+                row = self._row(job_id) or row
+                exit_code = row["exit_code"]
+                timed_out = bool(row["timed_out"]) or True
+                try:
+                    with open(row["log_file"], "a") as fh:
+                        fh.write(
+                            f"\n[{row['tool']} poll-reaper] exceeded {cap:.0f}s "
+                            "wall-clock; terminated\n"
+                        )
+                except OSError:
+                    pass
 
         log_text = self._read_log(row["log_file"])
         recent = self._tail(log_text, tail)
-        status = "running" if (exit_code is None and not timed_out) else "done"
+        # Three-way terminal status (2026-10-30 code review): a nonzero
+        # exit, the vanished-pid sentinel, or a cap kill is "failed", not
+        # "done" — success-only "done" keeps fleet/queue dedupers and
+        # release paths honest, and gives the workload a retryable shape.
+        if exit_code is None and not timed_out:
+            status = "running"
+        elif exit_code == 0 and not timed_out:
+            status = "done"
+        else:
+            status = "failed"
 
-        # Finished-cap enforcement on the done transition: launch-time-only
-        # enforcement missed jobs that finished while the agent kept
+        # Finished-cap enforcement on ANY terminal transition: launch-time-
+        # only enforcement missed jobs that finished while the agent kept
         # launching (8 finished rows survived with cap=4 in the concurrency
-        # hammer). Observing done is the point where a slot actually frees.
-        if status == "done":
+        # hammer). Observing terminal is the point where a slot actually
+        # frees — failed rows free theirs too.
+        if status != "running":
             self._enforce_caps(row["agent_id"])
 
         result: dict[str, Any] = {
@@ -608,7 +809,9 @@ class JobStore:
             except Exception:
                 pass
 
-        if status == "done":
+        if status != "running":
+            # Failed jobs' logs are the evidence the model needs most —
+            # a crash tail is the diagnostic, not a courtesy.
             result["full_output"] = log_text[-8000:]
         return result
 
@@ -633,8 +836,59 @@ class JobStore:
                     "that is an operator-level action."
                 ),
             }
-        _terminate_proc_tree(int(row["pid"]))
-        self._mark_finished(job_id, exit_code=-9, timed_out=False)
+        sent = _terminate_proc_tree(
+            int(row["pid"]),
+            pid_start=row["pid_start"],
+            started=row["started"],
+        )
+        if sent is False:
+            # PID reused: the job's process is already gone; signal nothing
+            # and mark the row finished (exit unknown).
+            self._mark_finished(job_id, exit_code=-1, timed_out=False)
+            return {
+                "status": "ok",
+                "job_id": job_id,
+                "agent_id": row["agent_id"],
+                "pid_reused": True,
+                "message": (
+                    f"pid {row['pid']} now belongs to a different process "
+                    "(start-time mismatch); nothing was signalled and the "
+                    "row is marked finished"
+                ),
+            }
+        # Live-child stop: reap for the REAL termination code (TERM-first
+        # means a fast death exits -15, and stamping the legacy -9 guess
+        # would lie); cross-process stops keep -9 (code unobservable here).
+        # waitpid FIRST and never touch Popen when the kernel entry is
+        # already gone: Popen.wait() on an externally-reaped child (the
+        # grace loop's own waitpid) reports the CPython-fabricated return
+        # code 0 — a lie that would stamp a killed job "done".
+        with _LIVE_CHILDREN_LOCK:
+            proc = _LIVE_CHILD_PROCS.get(job_id)
+        exit_code = -9
+        if proc is not None:
+            reaped_elsewhere = False
+            try:
+                wpid, status = os.waitpid(proc.pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                wpid, status = 0, 0
+                reaped_elsewhere = True
+            rc = os.waitstatus_to_exitcode(status) if wpid == proc.pid else None
+            if wpid == proc.pid:
+                exit_code = int(rc)
+            elif not reaped_elsewhere:
+                # Still our unreaped child: settle, force-kill stragglers.
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                    except Exception:
+                        pass
+                if proc.poll() is not None:
+                    exit_code = int(proc.returncode)
+        self._mark_finished(job_id, exit_code=exit_code, timed_out=False)
         return {"status": "ok", "job_id": job_id, "agent_id": row["agent_id"]}
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -860,7 +1114,8 @@ class JobStore:
 
     def _reaper_pass(self) -> None:
         rows = self.conn.execute(
-            "SELECT job_id, pid, started, cap FROM jobs WHERE exit_code IS NULL"
+            "SELECT job_id, pid, pid_start, started, cap FROM jobs "
+            "WHERE exit_code IS NULL"
         ).fetchall()
         now = time.time()
         for r in rows:
@@ -868,6 +1123,24 @@ class JobStore:
             over = cap > 0 and now - r["started"] > cap
             if not over:
                 self._observe(r)
+                continue
+            if _pid_matches(r["pid"], r["pid_start"], r["started"]) is False:
+                # PID reused: the original process is gone. Claim the
+                # finish without a kill (an innocent process owns that
+                # pid now) and without the timeout flag — no cap kill we
+                # performed.
+                self._mark_finished(r["job_id"], exit_code=-1, timed_out=False)
+                try:
+                    row = self._row(r["job_id"])
+                    if row is not None:
+                        with open(row["log_file"], "a") as fh:
+                            fh.write(
+                                f"\n[{row['tool']} reaper] exceeded {cap:.0f}s "
+                                "wall-clock; process gone (pid reused) — "
+                                "not terminated\n"
+                            )
+                except OSError:
+                    pass
                 continue
             # Cap exceeded. Mark FIRST, kill SECOND: the guarded UPDATE
             # (exit_code IS NULL) claims the finish while it's still
@@ -877,7 +1150,11 @@ class JobStore:
             # closes the window where a wedged terminate-grace could
             # leave the row running-with-no-cap-owner.
             self._mark_finished(r["job_id"], exit_code=-9, timed_out=True)
-            _terminate_proc_tree(int(r["pid"]))
+            _terminate_proc_tree(
+                int(r["pid"]),
+                pid_start=r["pid_start"],
+                started=r["started"],
+            )
             try:
                 row = self._row(r["job_id"])
                 if row is not None:

@@ -601,11 +601,14 @@ class APIGateway:
                 }
 
             # agent_id doubles as the Brain session id, so each identified
-            # agent gets its own isolated tool state on the sidecar; the
-            # resolved value (never the raw announcement) is what the
-            # executor re-resolves — announcement already validated here.
+            # agent gets its own isolated tool state on the sidecar. The
+            # RESOLVED identity is passed through verbatim — the executor
+            # must not re-resolve (a minted id re-resolved by normalize re-
+            # minted into a DIFFERENT anon id, so the executor ran as an
+            # identity the client never saw; adoption then keyed nothing).
             execution_result = await self.tool_registry.execute_tool(
-                manifest, req.arguments or {}, session_id=resolved_agent_id
+                manifest, req.arguments or {}, session_id=resolved_agent_id,
+                agent_identity=(resolved_agent_id, agent_provenance),
             )
 
             # Result projection: ``large`` (default) caps field sizes so a single
@@ -1016,7 +1019,8 @@ class APIGateway:
                         # model to reason over, not a transient error.
                         return _mcp_text(budget_meta)
                     result = await self.tool_registry.execute_tool(
-                        manifest, tool_args, session_id=session_id
+                        manifest, tool_args, session_id=session_id,
+                        agent_identity=(session_id, identity_provenance),
                     )
                     # Result projection (same as REST path).  Default is
                     # ``large`` — capped passthrough, not unbounded ``full``.

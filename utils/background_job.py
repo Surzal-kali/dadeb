@@ -216,27 +216,51 @@ def launch_job(
                 },
             }
 
-    result = store.launch(
-        command,
-        tool_name=tool_name,
-        agent_id=owner,
-        timeout=timeout,
-        log_dir=log_dir,
-        env=env,
-    )
-    if target:
-        from utils.fleet_scheduler import get_scheduler
+    acquired_unit = decision["unit_key"] if target else None
+    result = None
+    try:
+        result = store.launch(
+            command,
+            tool_name=tool_name,
+            agent_id=owner,
+            timeout=timeout,
+            log_dir=log_dir,
+            env=env,
+        )
+        if target:
+            from utils.fleet_scheduler import get_scheduler
 
-        scheduler = get_scheduler()
-        scheduler.bind_job(decision["unit_key"], result["job_id"])
-        result["unit_key"] = decision["unit_key"]
-        if decision.get("warning"):
-            result["warning"] = decision["warning"]
-    return result
+            scheduler = get_scheduler()
+            scheduler.bind_job(acquired_unit, result["job_id"])
+            result["unit_key"] = acquired_unit
+            if decision.get("warning"):
+                result["warning"] = decision["warning"]
+        return result
+    except BaseException:
+        # Launch roll-down for the fleet lane (2026-10-30 code review): a
+        # spawn failure must not strand the acquired host slot — a held-but-
+        # never-bound unit blocks its host until bind-grace sweeps it. A
+        # bind failure additionally terminates the already-spawned job
+        # (an unbound job is invisible to the fleet contract, so keeping
+        # it running would be a slot the contract can neither see nor
+        # release — the worker-queue bind-fail precedent).
+        if acquired_unit:
+            if result is not None:
+                try:
+                    terminate_job(result["job_id"])
+                except Exception:
+                    pass
+            try:
+                from utils.fleet_scheduler import get_scheduler
+
+                get_scheduler().release_unit(acquired_unit, force=True)
+            except Exception:
+                pass
+        raise
 
 
 def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:
-    """Poll a background job: running/done, recent log lines, parsed verdict.
+    """Poll a background job: running/done/failed, recent lines, verdict.
 
     Parameters
     ----------
@@ -249,9 +273,11 @@ def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:
     """
     result = get_store().poll(job_id)
     # Poll-side fleet release (scale-doctrine rule: a finished job frees
-    # its slot at the FIRST done observation). Best-effort and idempotent
-    # — no-op when the job holds no fleet unit or the store doesn't exist.
-    if result.get("status") == "done" and result.get("job_id"):
+    # its slot at the FIRST terminal observation — done OR failed; with
+    # failures reporting "done" no longer, a crash-released slot must not
+    # stay held either). Best-effort and idempotent — no-op when the job
+    # holds no fleet unit or the store doesn't exist.
+    if result.get("status") in ("done", "failed") and result.get("job_id"):
         from utils.fleet_scheduler import release_units_for_job
 
         release_units_for_job(result["job_id"])

@@ -290,6 +290,38 @@ def _resolved_ips(host: str, timeout: float = 2.0) -> list[str]:
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
+def _range_endpoints(spec: str) -> tuple[Any, Any] | None:
+    """Parse a hyphen range into (low, high) IP addresses, or None.
+
+    Both endpoint spellings: full IPs ("10.0.0.5-10.0.0.30") and the
+    last-octet shorthand ("10.0.0.5-30" — the right side inherits the
+    left's first three octets).  Returns None for anything that is not a
+    clean numeric range (hyphenated hostnames, mixed v4/v6, reversed
+    bounds are normalized by min/max).
+    """
+    if "/" in spec or "-" not in spec:
+        return None
+    left, _, right = spec.strip().rpartition("-")
+    if not left or not right:
+        return None
+    left, right = left.strip(), right.strip()
+    anchor = ""
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", left):
+        anchor = ".".join(left.split(".")[:3]) + "."
+    if right.isdigit() and len(right) <= 3:
+        if not anchor:
+            return None
+        right = anchor + right  # last-octet shorthand
+    try:
+        lo = ipaddress.ip_address(left)
+        hi = ipaddress.ip_address(right)
+    except ValueError:
+        return None
+    if lo.version != hi.version:
+        return None
+    return (lo, hi) if int(lo) <= int(hi) else (hi, lo)
+
+
 def _check_one(checkable: str | None, state: dict[str, Any]) -> tuple[bool, str]:
     """Verdict for a single hostname or IP against the armed scope.
 
@@ -439,11 +471,14 @@ def _check_one(checkable: str | None, state: dict[str, Any]) -> tuple[bool, str]
 def _check_broad(spec: str, state: dict[str, Any]) -> tuple[bool, str]:
     """Verdict for a broad CIDR / hyphen-range target.
 
-    A broad range can't be attributed host-by-host (a /24 reverse-DNS is 256
-    lookups).  It is allowed ONLY when it is a subnet of an explicit in-scope
-    CIDR asset; otherwise refused under strict — broad subnet scanning is not
-    a bug-bounty pattern.  Disarm (``scope off``) for lab / internal-network
-    work where broad ranges are legitimate.
+    Order mirrors ``_check_one``: the operator's allowlist is tier 1 —
+    a blessed CIDR (``scope add-ip 10.0.0.0/24``) admits any broad spec
+    inside it (CIDR equal/subnet; hyphen range with BOTH endpoints in the
+    one blessed network, last-octet shorthand supported). THEN a program
+    manifest CIDR asset admits subnets. Everything else is refused under
+    strict — broad subnet scanning is not a bug-bounty pattern; disarm
+    (``scope off``) for lab / internal-network work where broad ranges
+    are legitimate.
     """
     handle = state.get("handle", "")
     platform = state.get("platform", "h1")
@@ -454,6 +489,25 @@ def _check_broad(spec: str, state: dict[str, Any]) -> tuple[bool, str]:
             net = ipaddress.ip_network(spec.strip(), strict=False)
         except ValueError:
             return _check_one(spec, state)  # not actually a CIDR; try as host
+        # Tier 1 first (mirrors _check_one's order): the operator's
+        # allowlist IS the authority — a one-call `scope add-ip <cidr>`
+        # blesses the whole range, no program manifest required.
+        allowlist: dict[str, str] = state.get("allowlist") or {}
+        for net_str, host in allowlist.items():
+            if "/" not in net_str:
+                continue
+            try:
+                blessed = ipaddress.ip_network(net_str)
+            except ValueError:
+                continue
+            try:
+                if net == blessed or net.subnet_of(blessed):
+                    return True, (
+                        f"{spec} within operator allowlist CIDR {net_str}"
+                        + (f" ({host})" if host else "")
+                    )
+            except TypeError:
+                continue  # mixed v4/v6
         manifest = _load_manifest(handle, platform)
         if manifest is not None:
             from auxiliaries.program_scope import _find_match
@@ -479,11 +533,50 @@ def _check_broad(spec: str, state: dict[str, Any]) -> tuple[bool, str]:
                 f"broad range {spec} not confirmable in-scope for {handle!r}; "
                 f"refused (strict). Broad subnet scanning is not a bug-bounty "
                 f"pattern — 'scope off' for lab/internal work, or scan specific "
-                f"in-scope hosts.",
+                f"in-scope hosts. If you own the whole range, bless it once: "
+                f"'scope add-ip {spec}'.",
             )
         return True, f"WARNING: broad range {spec} not confirmed in-scope (non-strict)"
 
-    # Hyphen range (not a CIDR): can't check containment reliably.
+    # Hyphen range (not a CIDR): both endpoint spellings (full IPs and the
+    # last-octet shorthand) checked against ONE blessed network — a range
+    # split across two blessings is not covered; bless the covering CIDR.
+    eps = _range_endpoints(spec)
+    if eps is not None:
+        lo, hi = eps
+        allowlist = state.get("allowlist") or {}
+        for net_str, host in allowlist.items():
+            if "/" not in net_str:
+                continue
+            try:
+                net = ipaddress.ip_network(net_str)
+            except ValueError:
+                continue
+            if (
+                int(lo) >= int(net.network_address)
+                and int(hi) <= int(net.broadcast_address)
+            ):
+                return True, (
+                    f"{spec} within operator allowlist CIDR {net_str}"
+                    + (f" ({host})" if host else "")
+                )
+        # A range that both endpoints of a blessed CIDR span: covered by the
+        # subnet rule whenever the range IS the network span.
+        if strict:
+            left0 = spec.split("-", 1)[0].strip()
+            hint_net = (
+                ".".join(left0.split(".")[:3]) + ".0/24"
+                if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", left0)
+                else "<cidr>"
+            )
+            return (
+                False,
+                f"hyphen-range {spec} not confirmable in-scope for {handle!r}; "
+                f"refused (strict). If the whole span is yours, bless it once: "
+                f"'scope add-ip {hint_net}' — or 'scope off' for lab work.",
+            )
+        return True, f"WARNING: range {spec} not confirmed in-scope (non-strict)"
+
     if strict:
         return (
             False,

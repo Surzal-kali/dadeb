@@ -11,7 +11,10 @@ process supervisor — jobs are launched by the adapters through
 
 Accounting axis = the TARGET HOST, not the agent (Phase 0's job store
 already tracks who-owns-what). 30 actors on 30 distinct hosts = zero
-contention; N units aimed at one host = the courtesy contract:
+contention; N units aimed at one host = the courtesy contract. Numeric
+targets (IP/CIDR/hyphen range) normalize to their ADDRESS SPAN and slots
+compare overlap, not just name equality — a 10.0.0.0/24 sweep and a
+single-host unit inside it contend on the same slots:
 
 - **Dedupe** (rule 4): the canonical unit key is the coherence primitive.
   A second `request` for a live unit returns its existing job_id to poll
@@ -50,6 +53,7 @@ as the cookie-jar management tools).
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -144,6 +148,98 @@ def is_auth_adjacent(target: str) -> bool:
     return bool(_auth_adjacent_re().search(target or ""))
 
 
+# --- Numeric-target identity (2026-10-31) --------------------------------------
+#
+# A CIDR sweep and the single host inside it are the same traffic: bare
+# IP/CIDR/hyphen-range targets normalize to their NUMERIC SPAN, which the
+# canonical key treats as the identity and slot accounting compares for
+# overlap (the old per-hostname axis counted a /24 sweep against
+# "10.0.0.0" and never saw it overlap the single-host unit on 10.0.0.7).
+
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _numeric_span(target: str) -> tuple[int, int] | None:
+    """First-last IPv4 address a numeric target covers (network ints),
+    or None when the target is not a numeric address expression:
+    bare IP ("10.0.0.7"), CIDR ("10.0.0.0/24" — host bits ignored, so
+    "10.0.0.7/24" names the same span), hyphen range ("10.0.0.2-30"
+    last-octet shorthand and "10.0.0.1-10.0.0.30" full form), "host:port"
+    without scheme, and a URL whose HOST is numeric (its path/query/creds
+    never widen the span). Hostnames → None: no DNS is done here."""
+    t = (target or "").strip()
+    if not t:
+        return None
+    if "://" in t:
+        try:
+            host = (urlparse(t).hostname or "").lower()
+        except ValueError:
+            return None
+        if not _IPV4_RE.match(host):
+            return None
+        n = int(ipaddress.IPv4Address(host))
+        return (n, n)
+    body = t.split("?", 1)[0].split("#", 1)[0]
+    if ":" in body:
+        head, _, tail = body.partition(":")
+        if tail.isdigit():
+            body = head
+    if _IPV4_RE.match(body):
+        n = int(ipaddress.IPv4Address(body))
+        return (n, n)
+    m = re.fullmatch(r"(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,3})", body)
+    if m:
+        try:
+            net = ipaddress.ip_network(f"{m.group(1)}/{m.group(2)}", strict=False)
+        except ValueError:
+            return None
+        if net.version != 4:
+            return None
+        return (int(net.network_address), int(net.broadcast_address))
+    m = re.fullmatch(
+        r"(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3}(?:\.\d{1,3}){3})", body
+    )
+    if m:
+        try:
+            a = int(ipaddress.IPv4Address(m.group(1)))
+            b = int(ipaddress.IPv4Address(m.group(2)))
+        except (ValueError, ipaddress.AddressValueError):
+            return None
+        return (min(a, b), max(a, b))
+    m = re.fullmatch(r"(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3})", body)
+    if m:
+        lo, hi = int(m.group(2)), None
+        try:
+            if int(m.group(2)) > 255:
+                return None
+        except ValueError:
+            return None
+        first = ipaddress.IPv4Address(m.group(1))
+        prefix = ".".join(str(first).split(".")[:3]) + "."
+        try:
+            b = int(ipaddress.IPv4Address(prefix + m.group(2)))
+        except (ValueError, ipaddress.AddressValueError):
+            return None
+        a = int(first)
+        return (min(a, b), max(a, b))
+    return None
+
+
+def _numeric_axis(target: str) -> str | None:
+    """Canonical identity string for a BARE numeric target (dedupe key
+    host part + pressure-axis label): a single address, or the full span
+    "lo-hi". Spellings that cover the same addresses collapse onto one
+    axis — "10.0.0.1/24", "10.0.0.0/24" and "10.0.0.0-10.0.0.255" are all
+    "10.0.0.0-10.0.0.255". URLs keep urlparse treatment (None)."""
+    span = _numeric_span(target)
+    if span is None or "://" in (target or "").strip():
+        return None
+    lo, hi = span
+    if lo == hi:
+        return str(ipaddress.IPv4Address(lo))
+    return f"{ipaddress.IPv4Address(lo)}-{ipaddress.IPv4Address(hi)}"
+
+
 # --- Canonical key (doctrine §4a) ---------------------------------------------
 
 
@@ -161,11 +257,21 @@ def canonical_unit_key(tool: str, target: str, *, body: str = "") -> str:
     Same shape → same key → dedupe. Different values (new CSRF token,
     different username) → SAME unit; genuinely different endpoints/params
     → different unit.
+
+    Bare numeric targets (IP/CIDR/hyphen range) collapse onto a canonical
+    span identity first — "10.0.0.1/24" and "10.0.1.0/24" covering the
+    same 256 addresses share one key regardless of spelling.
     """
     target = (target or "").strip()
-    parts = urlparse(target)
-    host = (parts.netloc or target.split("/")[0] or "unknown").lower()
-    path = re.sub(r"/+$", "", parts.path or "") or "/"
+    numeric_axis = _numeric_axis(target) if "://" not in target else None
+    if numeric_axis is not None:
+        host = numeric_axis
+        path = "/"
+        parts = urlparse("")  # bare numeric target: no query to parse
+    else:
+        parts = urlparse(target)
+        host = (parts.netloc or target.split("/")[0] or "unknown").lower()
+        path = re.sub(r"/+$", "", parts.path or "") or "/"
     try:
         q_names = sorted(name for name, _v in parse_qsl(parts.query, keep_blank_values=True))
     except ValueError:
@@ -204,13 +310,44 @@ def canonical_unit_key(tool: str, target: str, *, body: str = "") -> str:
 
 
 def _host_of(target: str) -> str:
-    """Slot-pressure axis: hostname WITHOUT port (ports share a box)."""
+    """Slot-pressure axis: hostname WITHOUT port (ports share a box),
+    or the canonical numeric span for bare IP/CIDR/range targets."""
+    axis = _numeric_axis(target)
+    if axis is not None:
+        return axis
     parts = urlparse(target if "//" in target else f"//{target}", scheme="http")
     host = (parts.hostname or "").lower()
     return host or "unknown"
 
 
 # --- Store ---------------------------------------------------------------------
+
+
+def _set_wal(c: sqlite3.Connection) -> None:
+    """Convert a SQLite db to WAL journal mode, tolerating the
+    first-converter race.
+
+    ``PRAGMA journal_mode=WAL`` on a fresh db needs an exclusive lock for
+    the delete→WAL conversion, and unlike ordinary lock waits that
+    conversion can return SQLITE_BUSY immediately (busy_timeout does not
+    cover it — found live in the 3-process boot race the multiprocess
+    fleet tests exercise). Losing that race is harmless: the winner
+    converted the db, so a retry finds the mode already ``wal`` (that
+    readback takes no lock). Only surface the error if the db genuinely
+    is not WAL after the attempts.
+    """
+    for attempt in range(3):
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            row = c.execute("PRAGMA journal_mode").fetchone()
+            if row is not None and (row[0] or "").lower() == "wal":
+                return
+            time.sleep(0.05 * (attempt + 1))
+    row = c.execute("PRAGMA journal_mode").fetchone()
+    if row is None or (row[0] or "").lower() != "wal":
+        c.execute("PRAGMA journal_mode=WAL")  # surface the real error
 
 
 class FleetScheduler:
@@ -254,7 +391,7 @@ class FleetScheduler:
         )
         self._bootstrap.row_factory = sqlite3.Row
         self._bootstrap.execute("PRAGMA busy_timeout=30000")
-        self._bootstrap.execute("PRAGMA journal_mode=WAL")
+        _set_wal(self._bootstrap)
         self._init_table()
 
     @property
@@ -275,7 +412,7 @@ class FleetScheduler:
             )
             c.row_factory = self._sqlite3.Row
             c.execute("PRAGMA busy_timeout=30000")
-            c.execute("PRAGMA journal_mode=WAL")
+            _set_wal(c)
             self._local.conn = c
         return c
 
@@ -418,14 +555,29 @@ class FleetScheduler:
                     self._commit()  # tx read-only; close it either way
                     return out
 
-                # --- Slot accounting on the HOST axis (re-read INSIDE the
-                # tx — values from before BEGIN are void).
+                # --- Slot accounting on the HOST axis + numeric-span
+                # overlap (re-read INSIDE the tx — values from before
+                # BEGIN are void). A /24 sweep and the single host inside
+                # it contend on the same slots: rows count as contending
+                # on canonical-axis equality OR numeric-span overlap
+                # (the old host=? SELECT only saw the sweep row keyed at
+                # "10.0.0.0" and never the member IP's overlap).
                 running_any = self.conn.execute(
-                    "SELECT unit_key, agent_id, auth_adjacent FROM fleet_units "
-                    "WHERE host = ? AND status = 'running'",
-                    (host,),
+                    "SELECT unit_key, agent_id, auth_adjacent, host, target "
+                    "FROM fleet_units WHERE status = 'running'"
                 ).fetchall()
-                n_running = len(running_any)
+                my_span = _numeric_span(target)
+
+                def _contends(row) -> bool:
+                    if row["host"] == host:
+                        return True
+                    rs = _numeric_span(row["target"])
+                    if my_span is not None and rs is not None:
+                        return rs[0] <= my_span[1] and my_span[0] <= rs[1]
+                    return False
+
+                contending = [r for r in running_any if _contends(r)]
+                n_running = len(contending)
 
                 # Rule 7: auth-adjacent units hold the host exclusively.
                 if auth_adj and n_running > 0:
@@ -434,7 +586,7 @@ class FleetScheduler:
                         "reason": "host_serialized_auth",
                         "unit_key": unit_key,
                         "host": host,
-                        "running_units": [r["unit_key"] for r in running_any],
+                        "running_units": [r["unit_key"] for r in contending],
                         "message": (
                             "session-bearing (auth-adjacent) unit requires the "
                             f"host exclusively; {n_running} unit(s) running — "
@@ -443,13 +595,13 @@ class FleetScheduler:
                     }
                     self._commit()
                     return out
-                if any(r["auth_adjacent"] for r in running_any):
+                if any(r["auth_adjacent"] for r in contending):
                     out = {
                         "decision": "refused",
                         "reason": "host_serialized_auth",
                         "unit_key": unit_key,
                         "host": host,
-                        "running_units": [r["unit_key"] for r in running_any],
+                        "running_units": [r["unit_key"] for r in contending],
                         "message": (
                             "an auth-adjacent unit holds this host exclusively "
                             "(same shared session); wait for it to finish"
@@ -498,7 +650,7 @@ class FleetScheduler:
                         "host": host,
                         "running": n_running,
                         "limit": limit,
-                        "running_units": [r["unit_key"] for r in running_any],
+                        "running_units": [r["unit_key"] for r in contending],
                         "message": (
                             f"{n_running}/{limit} slot(s) in use on {host}; wait "
                             "for a unit to finish or re-request later"

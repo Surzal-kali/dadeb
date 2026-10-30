@@ -224,3 +224,78 @@ def test_singleton_env_respects_reset(monkeypatch):
     c = get_scheduler()
     assert c is not a
     reset_scheduler()
+
+# --- numeric-span identity (2026-10-31): CIDR sweeps vs member hosts ---------------
+
+
+def test_cidr_key_spelling_normalized():
+    a = canonical_unit_key("sqlmap", "10.0.1.0/24")
+    b = canonical_unit_key("sqlmap", "10.0.1.5/24")
+    c = canonical_unit_key("sqlmap", "10.0.1.0-10.0.1.255")
+    assert a == b == c  # same 256 addresses, different spellings
+    assert a != canonical_unit_key("sqlmap", "10.0.0.0/24")  # different net
+
+
+def test_sweep_and_member_ip_contend_on_slots(sched, monkeypatch):
+    monkeypatch.setenv("FLEET_SLOTS_PER_HOST", "1")
+    sweep = sched.request_unit("t", "10.0.0.0/24", agent_id="a")
+    assert sweep["decision"] == "acquired"
+    inside = sched.request_unit("t", "10.0.0.7", agent_id="b")
+    assert inside["decision"] == "refused"
+    assert inside["reason"] == "slots_exhausted"
+
+
+def test_member_ip_first_blocks_sweep_too(sched, monkeypatch):
+    # Both directions: slot accounting must be symmetric.
+    monkeypatch.setenv("FLEET_SLOTS_PER_HOST", "1")
+    assert sched.request_unit("t", "10.0.0.7", agent_id="a")["decision"] == "acquired"
+    sweep = sched.request_unit("t", "10.0.0.0/24", agent_id="b")
+    assert sweep["decision"] == "refused"
+    assert sweep["reason"] == "slots_exhausted"
+    assert sweep["running_units"]  # the member unit is named
+
+
+def test_range_shorthand_overlaps_member_host(sched, monkeypatch):
+    monkeypatch.setenv("FLEET_SLOTS_PER_HOST", "1")
+    assert sched.request_unit("t", "10.0.0.5-30", agent_id="a")["decision"] == "acquired"
+    mid = sched.request_unit("t", "10.0.0.6", agent_id="b")
+    assert mid["decision"] == "refused"
+    # A host OUTSIDE the range is unaffected.
+    assert sched.request_unit("t", "10.0.0.31", agent_id="b")["decision"] == "acquired"
+
+
+def test_disjoint_cidrs_do_not_contend(sched, monkeypatch):
+    monkeypatch.setenv("FLEET_SLOTS_PER_HOST", "1")
+    assert sched.request_unit("t", "10.0.0.0/24", agent_id="a")["decision"] == "acquired"
+    assert sched.request_unit("t", "10.0.1.0/24", agent_id="b")["decision"] == "acquired"
+
+
+def test_hostname_targets_keep_name_axis(sched, monkeypatch):
+    # Numeric overlap accounting must not bleed into hostname targets.
+    monkeypatch.setenv("FLEET_SLOTS_PER_HOST", "1")
+    assert sched.request_unit("t", "10.0.0.0/24", agent_id="a")["decision"] == "acquired"
+    assert sched.request_unit("t", "http://h.example.com/x", agent_id="b")["decision"] == "acquired"
+
+
+def test_duplicate_numeric_spellings_dedupe(sched, tmp_path):
+    from utils.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    first = sched.request_unit("sqlmap", "10.0.0.7", agent_id="a1")
+    assert first["decision"] == "acquired"
+    j = jobs.launch(["sleep", "5"], tool_name="sqlmap", agent_id="a1", timeout=600)
+    sched.bind_job(first["unit_key"], j["job_id"])
+    again = sched.request_unit("sqlmap", "10.0.0.7/32", agent_id="a2")
+    assert again["decision"] == "duplicate"
+    assert again["job_id"] == j["job_id"]
+
+
+def test_auth_exclusivity_covers_overlapping_sweep(sched, monkeypatch):
+    # Rule 7 across the overlap axis: an auth unit on a member host blocks
+    # a sweep of the range that contains it (and vice versa).
+    monkeypatch.setenv("FLEET_SLOTS_PER_HOST", "2")
+    blocked = sched.request_unit("t", "http://10.0.0.7/login", agent_id="a")
+    assert blocked["decision"] == "acquired"  # auth-adjacent, holds its span
+    sweep = sched.request_unit("t", "10.0.0.0/24", agent_id="b")
+    assert sweep["decision"] == "refused"
+    assert sweep["reason"] == "host_serialized_auth"

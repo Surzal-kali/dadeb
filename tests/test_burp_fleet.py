@@ -117,7 +117,7 @@ def test_replay_fleet_launches_dedupe_and_verdict(env):
     verdict = None
     for _ in range(100):
         poll = queue.poll_unit(unit_key)
-        if poll["status"] == "done":
+        if poll["status"] in ("done", "finished"):
             recent = poll.get("recent_lines") or []
             verdict = bf._parse_burp_verdict("\n".join(recent))
             assert verdict["attempts"] == 1
@@ -213,3 +213,31 @@ def test_stop_running_units(env, monkeypatch):
     queue = get_worker_queue()
     for k in [u["unit_key"] for u in queue.units_by_note(fid)]:
         assert queue.poll_unit(k)["status"] == "cancelled"
+
+def test_manifest_perms_and_gc(env, monkeypatch):
+    """Manifests embed raw captured requests (auth headers included):
+    0600 files under a 0700 dir; legacy 0644 files heal on the idempotent
+    rewrite; aged manifests GC on the TTL window (0 disables)."""
+    a = _request_file(env, "p.txt")
+    m = bf._make_manifest(a, "labhost.example", 80, False, 1)
+    assert m.stat().st_mode & 0o777 == 0o600
+    assert m.parent.stat().st_mode & 0o777 == 0o700
+    # Idempotent rewrite of the same bytes normalizes a legacy 0644.
+    os.chmod(m, 0o644)
+    m2 = bf._make_manifest(a, "labhost.example", 80, False, 1)
+    assert m2.stat().st_mode & 0o777 == 0o600
+    # Forced GC pass: aged manifest removed, fresh one kept.
+    old = m2.parent / "deadbeefcafe.json"
+    old.write_text("{}")
+    aged = time.time() - 10_000
+    os.utime(old, (aged, aged))
+    monkeypatch.setenv("BURP_FLEET_UNIT_TTL_HOURS", "1")
+    removed = bf._gc_manifests(m2.parent, force=True)
+    assert removed == 1
+    assert not old.exists()
+    assert m2.exists()
+    # Window 0 disables the pass entirely.
+    monkeypatch.setenv("BURP_FLEET_UNIT_TTL_HOURS", "0")
+    new = bf._make_manifest(a, "other.example", 80, False, 1)
+    assert bf._gc_manifests(new.parent, force=True) == 0
+    assert new.exists()

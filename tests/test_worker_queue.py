@@ -714,8 +714,10 @@ def test_rss_evidence_recorded_on_finish(env, monkeypatch):
 
 def test_rss_evidence_informs_claim_envelope(env, monkeypatch):
     """A future request of the SAME bytes carries an additively-stamped,
-    evidence-backed claim (max of budget and recorded peak); a fresh
-    content key with no evidence keeps the plain-budget envelope shape."""
+    evidence-backed claim; legacy evidence rows (pre-delta, no recorded
+    pin) keep the absolute fallback (claim = max of budget and recorded
+    peak); a fresh content key with no evidence keeps the plain-budget
+    envelope shape."""
     q = get_worker_queue()
     jar2 = env["tmp"] / "two.jar"
     _make_jar(jar2, tag="two")
@@ -729,7 +731,7 @@ def test_rss_evidence_informs_claim_envelope(env, monkeypatch):
     assert r["decision"] in ("launched", "queued")
     assert r["claim_mib"] == 512
     assert r["evidence_peak_mib"] == 512.0
-    assert "peaked at 512 MiB" in r["message"]
+    assert "measured 448 MiB above its heap pin" in r["message"]
     fresh = env["tmp"] / "evidence_free.jar"
     _make_jar(fresh, tag="clean")
     r2 = q.request_unit(
@@ -784,7 +786,70 @@ def test_evidence_bump_refuses_permanent_impossibility(env, monkeypatch):
     assert r["reason"] == "budget_impossible"
     assert r["claim_mib"] == 8192
     assert r["evidence_peak_mib"] == 8192.0
-    assert "peaked at 8192 MiB" in r["message"]
+    assert "measured 8128 MiB above its heap pin" in r["message"]
+
+
+def test_delta_claim_adds_recorded_overhead(env, monkeypatch):
+    """Delta model (2026-10-30): a JVM's RSS is its heap pin plus a
+    roughly-fixed native overhead, so the claim is budget + (recorded
+    peak - recorded pin) — the claim tracks the heap pin the way real
+    memory scales instead of pinning to the absolute peak."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 2048)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
+    q = get_worker_queue()
+    jar2 = env["tmp"] / "delta.jar"
+    _make_jar(jar2, tag="delta")
+    now = time.time()
+    q.conn.execute(
+        "INSERT INTO worker_rss (unit_key, tool, peak_rss_mib, memory_budget, "
+        "budget_requested, runs, finished_at, updated_at) "
+        "VALUES (?, 'jadx', 3000.0, 2000.0, 2000.0, 1, ?, ?)",
+        (content_key("jadx", jar2), now, now),
+    )
+    r = q.request_unit(
+        "jadx", str(jar2), agent_id="a1", memory_budget=600,
+        command=["jadx", "-d", "/tmp/wsd", str(jar2)],
+    )
+    assert r["decision"] in ("launched", "queued")
+    assert r["claim_mib"] == 1600  # 600 + (3000 - 2000) measured overhead
+    assert r["evidence_peak_mib"] == 3000.0
+    assert "measured 1000 MiB above its heap pin" in r["message"]
+
+
+def test_low_budget_admits_after_near_capacity_run(env, monkeypatch):
+    """The user-reported trap: a near-capacity budget runs once, the
+    measured peak overshoots (-Xmx is not the whole RSS), and the old
+    absolute claim model refused EVERY subsequent budget as
+    budget_impossible. The delta model's remedy is real: lower the
+    budget, the claim drops with it."""
+    monkeypatch.setattr(wq, "free_ram_mib", lambda: 2048)
+    monkeypatch.setattr(wq, "_total_ram_mib", lambda: 8192)
+    q = get_worker_queue()
+    jar2 = env["tmp"] / "pin.jar"
+    _make_jar(jar2, tag="pin")
+    now = time.time()
+    q.conn.execute(
+        "INSERT INTO worker_rss (unit_key, tool, peak_rss_mib, memory_budget, "
+        "budget_requested, runs, finished_at, updated_at) "
+        "VALUES (?, 'jadx', 8600.0, 8000.0, 8000.0, 1, ?, ?)",
+        (content_key("jadx", jar2), now, now),
+    )
+    # Same budget as the recording run: claim 8600 > capacity 8128.
+    r1 = q.request_unit(
+        "jadx", str(jar2), agent_id="a1", memory_budget=8000,
+        command=["jadx", "-d", "/tmp/wsp", str(jar2)],
+    )
+    assert r1["decision"] == "refused"
+    assert r1["reason"] == "budget_impossible"
+    # The refusal names the exact admissible budget.
+    assert "a budget at or below 7528 MiB" in r1["message"]
+    # Lower the budget — the claim drops with it and admission returns.
+    r2 = q.request_unit(
+        "jadx", str(jar2), agent_id="a2", memory_budget=7000,
+        command=["jadx", "-d", "/tmp/wsp", str(jar2)],
+    )
+    assert r2["decision"] in ("launched", "queued")
+    assert r2["claim_mib"] == 7600  # 7000 + 600 measured overhead
 
 
 def test_rss_evidence_ttl_sweep(env, monkeypatch):
@@ -798,8 +863,132 @@ def test_rss_evidence_ttl_sweep(env, monkeypatch):
         (time.time() - 100, content_key("jadx", env["jar"])),
     )
     adv = q.advance_queue()
-    assert adv.get("evidence_swept", 0) >= 1
+    # The reaper thread's own advance pass (0.2s interval in the env
+    # fixture) may sweep the aged row before OUR explicit call — the
+    # contract is "aged evidence is gone", not which pass swept it.
+    assert adv.get("evidence_swept", 0) >= 1 or q.rss_evidence() == []
     assert q.rss_evidence() == []
+
+
+# --- argv-forked content keys + failed-unit lifecycle (2026-10-30) -------
+
+
+def test_content_key_forks_on_work_flags_not_locations(env):
+    """Same bytes: an out-dir change is the same work (dedupes); a mode
+    flag (--deobf) is DIFFERENT work (forked key) — the ticket-4 fix."""
+    jar = env["jar"]
+    bare = content_key("jadx", jar)
+    assert content_key("jadx", jar, argv=["jadx", "-d", "/tmp/x", jar]) == bare
+    assert content_key("jadx", jar, argv=["jadx", "-d", "/tmp/other", jar]) == bare
+    assert content_key(
+        "jadx", jar, argv=["jadx", "--deobf", "-d", "/tmp/x", jar]
+    ) != bare
+
+
+def test_failed_unit_rerequest_is_fresh_admission(env):
+    """A unit whose job DIES (nonzero exit) releases its slot as
+    'failed' — and a re-request re-admits it fresh instead of returning
+    the tombstone's finished-duplicate or refusing (2026-10-30: the
+    success-only dedupe made crashed runs permanently un-retryable)."""
+    import sys
+    from utils.background_job import poll_job
+
+    q = get_worker_queue()
+    argv = [sys.executable, "-c", "import sys; sys.exit(3)"]
+    r1 = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64, command=argv
+    )
+    assert r1["decision"] == "launched"
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if poll_job(r1["job_id"]).get("status") != "running":
+            break
+        time.sleep(0.05)
+    # Advance pass maps the dead job to the failed terminal + frees it.
+    # The reaper's own advance pass (0.2s in the env fixture) may settle
+    # the row first — the contract is the TERMINAL STATE, not which pass
+    # won the race.
+    key = r1["unit_key"]
+    deadline = time.time() + 15
+    row = None
+    while time.time() < deadline:
+        q.advance_queue()
+        row = q.conn.execute(
+            "SELECT status FROM worker_units WHERE unit_key = ?", (key,)
+        ).fetchone()
+        if row is None or row["status"] == "failed":
+            break
+        time.sleep(0.1)
+    assert row is not None and row["status"] == "failed"
+
+    # A re-request must NOT see a duplicate for a dead run.
+    r2 = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64, command=argv
+    )
+    assert r2["decision"] == "launched"
+    assert r2["job_id"] != r1["job_id"]
+
+
+def test_release_and_cancel_clear_failed_tombstone(env):
+    """release_unit/cancel_unit must not refuse to clear a FAILED row
+    (the job is already dead; refusal froze the key with no path back)."""
+    import sys
+    from utils.background_job import poll_job
+
+    q = get_worker_queue()
+    argv = [sys.executable, "-c", "import sys; sys.exit(3)"]
+    r1 = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64, command=argv
+    )
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if poll_job(r1["job_id"]).get("status") != "running":
+            break
+        time.sleep(0.05)
+    while time.time() < deadline:
+        q.advance_queue()
+        row = q.conn.execute(
+            "SELECT status FROM worker_units WHERE unit_key = ?",
+            (r1["unit_key"],),
+        ).fetchone()
+        if row is not None and row["status"] == "failed":
+            break
+        time.sleep(0.1)
+    row = q.conn.execute(
+        "SELECT status FROM worker_units WHERE unit_key = ?", (r1["unit_key"],)
+    ).fetchone()
+    assert row["status"] == "failed"
+
+    rel = q.release_unit(r1["unit_key"], agent_id="a1")
+    assert rel["status"] == "released"
+    assert q.conn.execute(
+        "SELECT 1 FROM worker_units WHERE unit_key = ?", (r1["unit_key"],)
+    ).fetchone() is None
+
+    # Same for cancel_unit: the failed row is a dead tombstone, not a
+    # launched unit that deserves the "terminate the JOB" refusal.
+    r2 = q.request_unit(
+        "jadx", env["jar"], agent_id="a1", memory_budget=64, command=argv
+    )
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if poll_job(r2["job_id"]).get("status") != "running":
+            break
+        time.sleep(0.05)
+    while time.time() < deadline:
+        q.advance_queue()
+        row = q.conn.execute(
+            "SELECT status FROM worker_units WHERE unit_key = ?",
+            (r2["unit_key"],),
+        ).fetchone()
+        if row is not None and row["status"] == "failed":
+            break
+        time.sleep(0.1)
+    canc = q.cancel_unit(r2["unit_key"], agent_id="a1")
+    assert canc["status"] == "cancelled"
+    assert q.conn.execute(
+        "SELECT 1 FROM worker_units WHERE unit_key = ?", (r2["unit_key"],)
+    ).fetchone() is None
 
 
 # --- terminal-row re-requests (2026-10-30 PK-conflict fix) --------------------------

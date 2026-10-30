@@ -161,3 +161,62 @@ class TestListDisabled:
         assert res["ok"]
         assert not res["armed"]
         assert res["disabled_tools"] == []
+
+# --- broad-range checks: operator-allowlist tier (2026-10-31) -----------------------
+
+
+class TestBroadRanges:
+    def test_blessed_cidr_admits_broad_targets(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.0/24", "lab net")["ok"]
+        for spec in ("10.0.0.0/24", "10.0.0.9/24", "10.0.0.0/25"):
+            ok, reason = scope_gate.check_scan(spec)
+            assert ok, f"{spec} should pass: {reason}"
+        # The attribution lives on the per-spec verdict (check_scan's
+        # aggregate summary stays flat).
+        ok, reason = scope_gate._check_broad(
+            "10.0.0.9/24", scope_gate._load_state()
+        )
+        assert ok and "operator allowlist CIDR 10.0.0.0/24" in reason
+
+    def test_blessed_cidr_admits_hyphen_ranges(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.0/24", "lab net")["ok"]
+        for spec in ("10.0.0.3-10.0.0.44", "10.0.0.5-30"):
+            ok, reason = scope_gate.check_scan(spec)
+            assert ok, f"{spec} should pass: {reason}"
+
+    def test_outside_blessed_cidr_stays_refused(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.0/24", "lab net")["ok"]
+        for spec in ("10.0.1.0/24", "10.0.1.5-30", "10.0.0.3-10.0.1.44"):
+            ok, reason = scope_gate.check_scan(spec)
+            assert not ok, f"{spec} should be refused"
+            assert "scope add-ip" in reason  # the remediation hint
+
+    def test_manifest_cidr_still_admits_without_blessing(self, armed_scope):
+        # armed_scope's lab manifest blesses 10.0.0.0/24 as an in-scope
+        # asset — no operator add-ip needed for that path.
+        ok, reason = scope_gate.check_scan("10.0.0.0/24")
+        assert ok, reason
+        ok, reason = scope_gate.check_scan("10.0.2.0/24")
+        assert not ok and "scope add-ip" in reason
+
+    def test_allowlist_beats_out_of_scope_manifest(self, state_root):
+        scope_dir = state_root / "scope"
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "handle": "local-oos",
+            "platform": "lab",
+            "in_scope": [{"asset_type": "CIDR", "asset_identifier": "10.0.0.0/24"}],
+            # Deliberately contradictory: the operator blessed the same
+            # range, and the allowlist tier outranks the manifest.
+            "out_of_scope_assets": ["10.0.0.0/24"],
+        }
+        (scope_dir / "lab_local-oos.json").write_text(json.dumps(manifest))
+        try:
+            scope_gate._CACHE.clear()
+            assert scope_gate.arm("local-oos", platform="lab")["ok"]
+            assert scope_gate.add_ip("10.0.0.0/24", "operator range")["ok"]
+            ok, reason = scope_gate.check_scan("10.0.0.0/24")
+            assert ok, f"allowlist should outrank OOS: {reason}"
+        finally:
+            scope_gate.disarm()
+            scope_gate._CACHE.clear()

@@ -459,13 +459,31 @@ launching store reaps via live `Popen.poll()`; pid-probe is the
 cross-lane fallback; terminate-grace uses `waitpid(WNOHANG)` so the
 kill path can't stall on our own zombies.
 
+**PID-reuse fence (2026-10-29):** the process start-time from
+`/proc/<pid>/stat` (field 22) is stored next to each pid, and every
+signal path (`stop()`, the reaper's timeout `killpg`) verifies it
+before signaling — a reused pid is refused (no signal, `pid_reused:
+True`, row settles at exit code -1) instead of killing an unrelated
+process. `stop()` reaps via raw `os.waitpid(WNOHANG)` FIRST so the
+real exit code is observable: CPython's `Popen.wait()` fabricates
+`returncode=0` for a child someone else already reaped (its internal
+`_try_wait` swallows ChildProcessError), and a TERM-fast death can be
+stamped `-15` — trust the waitpid result, fall back to the legacy -9
+only when the code is truly unobservable.
+
 ### Fleet scheduler — Phase 1 (`utils/fleet_scheduler.py`, scale-doctrine Annex C)
 
 Per-host concurrency regulator + dedupe ledger over the job store — the
 coherence primitive for fleet adapters (sqlmap fleet first, Phase 2).
 Accounting axis is the TARGET HOST, not the agent; NOT a process
 supervisor (adapters launch via `utils.job_store`; the scheduler decides
-may-this-start/dedupe/wait per unit).
+may-this-start/dedupe/wait per unit). The axis is NUMERIC-SPAN AWARE
+(2026-10-30): bare IP/CIDR/range targets collapse to canonical network
+spans (`10.0.0.7/24`, `10.0.0.0/24`, `10.0.0.0-10.0.0.255`, `10.0.0.5-30`
+all normalize to the same axis), and slot/auth accounting treats two
+targets as contending on host equality OR span overlap — a `/24` sweep
+now holds the same courtesy as scans of its member hosts. Hostnames take
+no part in numeric contention (no DNS).
 
 Adapter contract (each adapter contributes only these; scheduling logic
 is never copied between adapters):
@@ -592,7 +610,11 @@ with zero coordination. The queue exists because that arithmetic OOMs boxes.
   launching`), never `requested` (the queue-entry time, never rewritten on
   promotion — measuring from it would kill a long-queued unit at the
   instant it finally launches). Legacy rows without the stamp fall back
-  via `COALESCE(launching_at, requested)`.
+  via `COALESCE(launching_at, requested)`. Terminal envelopes keep their
+  output: `poll_unit` finished/failed branches attach the job's log tail
+  (`_terminal_job_tail`) so adapters (burp verdicts) read results off the
+  status lane even after the release sweep settled the unit before any
+  live poll observed the log.
 - **Popen(env=) is a REPLACEMENT, not a merge** — found live: queue-launched
   children got ONLY the pin env (no PATH → execvp fell back to the compiled-in
   default and silently ignored both test stubs and the operator's bin dir;
@@ -626,7 +648,15 @@ for the same content key claim `max(budget, recorded_peak)` via
 overruled the guess — a plain-budget envelope stays shape-identical to
 pre-evidence). Envelope budget caps (`budget_impossible`) now track the
 evidence-backed claim, so the honest message carries the measured
-justification. Same-day queue fixes found by the RSS suite-run flake
+justification. **Delta model (2026-10-30):** a JVM's resident footprint
+is its heap pin (-Xmx) plus roughly-fixed native overhead, so the claim
+tracks the PIN — `claim = budget + (recorded_peak − recorded_pin)`, the
+measured overhead of the recording run — instead of the absolute
+`max(budget, peak)` escalation that permanently refused near-capacity
+budgets after one real run (a JVM's RSS always exceeds -Xmx). Lowering
+the budget is an honest remedy again; only a pin above `capacity −
+measured_overhead` refuses. Legacy evidence rows predating the stored
+pin fall back to the old absolute model. Same-day queue fixes found by the RSS suite-run flake
 debug: the job store's live-proc registry is PROCESS-SCOPED
 (`_LIVE_CHILD_PROCS`, `utils/job_store.py`) — the env-keyed singleton
 rebuilds at fixture boundaries, and a poll through the second instance
@@ -675,7 +705,10 @@ launched rows release BEFORE the job-store stop — releasing after races
 the reaper's done-observation, which would stamp a killed unit
 `finished`; the stop failure stays reportable in `refused`). Test stubs
 ride `BURP_WORKER_PY`; the drop folder `burp/` relocates with
-`BURP_DROP_DIR`, unit manifests with `BURP_FLEET_UNIT_DIR`. Honest v1
+`BURP_DROP_DIR`, unit manifests with `BURP_FLEET_UNIT_DIR` — manifests
+are written 0600 inside a 0700 dir (they embed raw requests verbatim)
+and are swept TTL-style (`BURP_FLEET_UNIT_TTL_HOURS`, default 48h,
+0 disables) on every write. Honest v1
 limits: verbatim replay only (no mutation per attempt — change the file
 for a new unit); BApp session concurrency is unmeasured, slots default
 low is the guidance; no scan surface.
@@ -727,7 +760,11 @@ are just strings, so they live in SQLite, not in process memory:
 - The lane (`auxiliaries.web_session`): `session_get` / `session_post` /
   `session_request` apply jar state to a per-call `requests.Session` via
   `gated_request(session=...)` — **every redirect hop still passes the
-  operator-armed scope gate**; the jar never bypasses it. `session_post`
+  operator-armed scope gate**; the jar never bypasses it. The gate's
+  operator allowlist accepts broad ranges: blessing once with
+  `scope add-ip <cidr>` covers every narrow target inside it (CIDR specs
+  and hyphen ranges whose endpoints sit inside ONE blessed network span
+  pass without per-manifest assets). `session_post`
   auto-injects CSRF: form field into the body + `X-CSRFToken`-style header
   derived from the vault/cookie. A Django login is three plain calls:
   `session_get /login/` → `session_post` creds → `session_get /dashboard/`.
