@@ -234,8 +234,26 @@ class JobStore:
         self._live_proc: dict[str, subprocess.Popen] = {}
         self._live_log_fh: dict[str, Any] = {}
         self._live_lock = threading.Lock()
+        # Worker-queue instance bound to THIS store (Phase 3). Resolved lazily
+        # on the first launch that lands in this store, and cached for the
+        # store's lifetime: the reaper thread later reads it without ANY env
+        # dependency (the env-keyed singleton raced the teardown boundary).
+        self._worker_queue: Any = None
         self._init_tables()
         self._ensure_reaper()
+
+    def _advance_worker_queue(self) -> None:
+        """Bound advance: resolve + cache the worker-queue at first use (the
+        first launch happens inside the owning fixture's env window), then
+        re-read it per reaper pass with zero env reads."""
+        if self._worker_queue is None:
+            try:
+                from utils.worker_queue import get_worker_queue
+
+                self._worker_queue = get_worker_queue()
+            except Exception:
+                return  # no queue constructible — skip, don't loop back later
+        self._worker_queue.advance_queue()
 
     @property
     def conn(self):
@@ -853,6 +871,25 @@ class JobStore:
                         )
             except OSError:
                 pass
+        # Advance the worker queue (Phase 3): free finished-launched
+        # worker slots and launch-promote queued heads. Best-effort, one
+        # pass per reaper tick — never breaks job reaping.
+        #
+        # Bound to THIS store, not the env-keyed singleton: the reaper
+        # thread is process-global and its env reads race the test
+        # fixtures' patch/unpatch (found live 2026-10-30 — reaper-driven
+        # advance_queue hit the wrong queue DB across a fixture boundary).
+        # The queue instance is resolved ONCE per store from the env at
+        # first launch (launch() runs inside the live fixture window), so
+        # later env changes can never re-point a running store's advance.
+        try:
+            self._advance_worker_queue()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "[jobs] worker-queue advance failed", exc_info=True
+            )
         self._log_garbage_collect()
 
     # -- helpers -------------------------------------------------------------------

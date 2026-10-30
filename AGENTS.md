@@ -525,6 +525,64 @@ module-level, NOT per-instance — the env-override singleton dance
 the registry was instance state. A job's fleet unit is released at the
 first `done` poll; `sweep_stale` stays the crash backstop.
 
+### Worker queue — Phase 3 (`utils/worker_queue.py` + `payloads/jadx_fleet.py`, scale-doctrine §13)
+
+Bounded-memory process pool for Arch-D units (jadx per-APK now, Burp-class
+later) — the accounting axis is the LOCAL WORKER (RAM), not the target host.
+The fleet scheduler answers "is this TARGETS's host busy?"; the worker queue
+answers "CAN THIS BOX BACK ONE MORE JVM?". Evidence base (2026-10-30): real
+APKs reach multi-GB RSS (upstream issues: 9 GB TikTok #2457, 11 GB/200 MB jar
+#2170, 35 GB large-app runaway #2189; measured ~300 MB on trivial synthetic
+corpora, flat across -j 1..16), and jadx's default launcher sets
+`-XX:MaxRAMPercentage=70.0` — N concurrent JVMs EACH claim 70% of total RAM
+with zero coordination. The queue exists because that arithmetic OOMs boxes.
+
+- **Content-keyed dedupe** (`content_key`): `"<tool>:c<sha256[:12]>"` of the
+  BYTES — identical APK bytes at a different filename are the same unit
+  (snapshot-cache precedent). Unhashable input falls back to a path+size key.
+- **Admission is one formula** (`request_unit`): dedupe → slots
+  (`WORKER_QUEUE_SLOTS`, default 2) → claims+budget ≤ (free RAM − pool floor
+  `WORKER_QUEUE_RAM_FLOOR`, default 25% of total RAM, min 2 GiB). Failing
+  memory/slots ⇒ QUEUED, never refused — waiting is cheap, OOM-killing a
+  started decompile loses its work. Queue depth is capped
+  (`WORKER_QUEUE_MAX_Q`, 16) — deeper demand is an operator signal.
+- **Heap pin rides the row**: `heap_pin_env(budget)` writes
+  `JAVA_OPTS="… -Xms32m -Xmx<budget>m"` into the stored env (last-wins after
+  the launcher's DEFAULT_JVM_OPTS) — the row's budget IS the worker's claim.
+  Caller env merges UNDER the pin.
+- **Launch is inline + atomic** (fleet roll-down precedent): admission claims
+  the row (`launching`), launches through the job store OUTSIDE the DB tx,
+  binds on success; launch failure deletes the claim (no phantom). Bind-fail
+  kills the launched job (no slot leak).
+- **Promotion is queue-side**: queued rows carry resolved argv + pinned env;
+  `advance_queue()` (wired into `JobStore._reaper_pass`, also called from
+  `jadx_fleet_status`) releases `launched` rows whose job VERIFIED finished
+  (`poll()`, not `get()` — only poll observes/reaps; get-only sweeps leak
+  slots) and launch-promotes FIFO heads while admission fits, one attempt
+  per pass (a persistently failing binary cannot wedge the reaper).
+- **Statuses**: `queued → launching → launched → finished|cancelled`.
+  `finished` = ran, exited, slot freed (SUCCESS — keep it distinct from
+  `cancelled` = operator stop/crash reclaim; conflating them made the pool
+  ledger unobservable, first lesson of Phase 3). Terminal rows age out (TTL
+  7d); queued rows TTL 24h (`WORKER_QUEUE_TTL_HOURS`); `launching` claims
+  past `WORKER_QUEUE_BIND_GRACE_S` are swept as crashed launchers.
+- **Popen(env=) is a REPLACEMENT, not a merge** — found live: queue-launched
+  children got ONLY the pin env (no PATH → execvp fell back to the compiled-in
+  default and silently ignored both test stubs and the operator's bin dir;
+  the JVM's slower boot masqueraded as flaky test timing). `_launch_claim`
+  merges into `os.environ`, pin merged last. RULE: any launch through the
+  store with a custom env starts from `os.environ` and updates.
+- **jadx twins** (`payloads/jadx_fleet.py`): `jadx_fleet(targets,
+  memory_budget=640, threads, deobf, no_res)` → per-unit
+  launched/queued/duplicate/refused + `fleet_id`; `jadx_fleet_status` (per-
+  unit state, workspace-done check, pools the advance sweep); `jadx_fleet_
+  stop` (terminate jobs + cancel queued, ownership-fenced);
+  `worker_queue_status` observability lens. Default budget 640 MiB (2× the
+  measured synthetic peak — operators raise for real APKs 1-4 GB+).
+- Budget cap 16 GiB/unit (`_JADX_FLEET_BUDGET_CAP`); `-j` per unit defaults
+  to half the cores clamped 1..8 (the pool bounds processes, -j tunes
+  threads within one).
+
 ### Memory Service (`memories.py`)
 
 SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections
