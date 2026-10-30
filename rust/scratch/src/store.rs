@@ -154,6 +154,12 @@ impl ScratchStore {
 
         // --- sqlite ---------------------------------------------------------
         let mut conn = Connection::open(db_path)?;
+        // scratch.db holds per-agent result payloads (same sensitivity as
+        // the 0700 data dir / 0600 files) — it must not be world-readable.
+        // After open(): the file may not exist beforehand.
+        if let Err(e) = fs::set_permissions(db_path, fs::Permissions::from_mode(0o600)) {
+            eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
+        }
         conn.busy_timeout(Duration::from_millis(10_000))?;
         set_wal(&conn)?;
         // Python wraps table creation in `with self.conn:` — one transaction.
@@ -236,37 +242,45 @@ impl ScratchStore {
 
         let sha = hex(&Sha256::digest(&compressed));
 
-        let mut conn = lock(&self.conn);
-
-        // Per-agent cap: evict oldest entries for this agent until within
-        // budget (python order: before id generation / payload write).
-        enforce_agent_cap(&mut conn, agent_id, self.config.max_agent_bytes)?;
-
         // Generate an unguessable ID (python: secrets.token_hex(8)).
         let scratch_id = random_hex_id()?;
         let ref_ = format!("scratch:{scratch_id}");
 
-        // Write the payload atomically: temp → fsync → rename. The temp file
-        // is created with mode 0600 directly (python chmods after fsync;
-        // final state is identical).
+        // Write the payload atomically OUTSIDE the DB lock: another agent's
+        // store() must not wait through our serialize-gzip-fsync window (the
+        // old order held the Mutex across fsync, serializing all writers on
+        // one kernel sync). Temp file is created mode 0600 directly.
         let payload_path = self.data_dir.join(format!("{scratch_id}.json.gz"));
         let tmp_path = self.data_dir.join(format!(".{scratch_id}.tmp"));
-        let mut fh = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)?;
-        fh.write_all(&compressed)?;
-        fh.sync_all()?;
-        drop(fh);
-        fs::rename(&tmp_path, &payload_path)?;
+        let payload_write: std::io::Result<()> = (|| {
+            let mut fh = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            fh.write_all(&compressed)?;
+            fh.sync_all()?;
+            drop(fh);
+            fs::rename(&tmp_path, &payload_path)
+        })();
+        if let Err(e) = payload_write {
+            // temp left behind only if open/write failed before rename
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+
+        let mut conn = lock(&self.conn);
+
+        // Per-agent cap: evict oldest entries for this agent until within
+        // budget (python order: before id generation / payload write).
+        enforce_agent_cap(&mut conn, agent_id, self.config.max_agent_bytes, &self.data_dir)?;
 
         let now = now_secs();
         let expires_at = now + self.config.ttl_hours * 3600.0;
 
         let tx = conn.transaction()?;
-        tx.execute(
+        let insert = tx.execute(
             "INSERT INTO scratch_entries \
                  (id, agent_id, chat_id, tool_id, created_at, expires_at, \
                   content_type, byte_count, sha256, payload_path, schema_version) \
@@ -284,8 +298,14 @@ impl ScratchStore {
                 payload_path.to_string_lossy(),
                 SCHEMA_VERSION,
             ],
-        )?;
-        tx.commit()?;
+        );
+        let committed = insert.and_then(|_| tx.commit());
+        if let Err(e) = committed {
+            // row absent (rolled back) → the renamed payload would leak with
+            // no reference pointing at it; unlink best-effort.
+            let _ = fs::remove_file(&payload_path);
+            return Err(e.into());
+        }
 
         Ok(StoreReceipt {
             scratch_ref: ref_,
@@ -316,20 +336,14 @@ impl ScratchStore {
         let row = {
             let conn = lock(&self.conn);
             conn.query_row(
-                "SELECT tool_id, expires_at, payload_path FROM scratch_entries \
+                "SELECT tool_id, expires_at FROM scratch_entries \
                  WHERE id = ?1 AND agent_id = ?2",
                 params![scratch_id, agent_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, f64>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
             )
             .optional()?
         };
-        let Some((tool_id, expires_at, payload_path)) = row else {
+        let Some((tool_id, expires_at)) = row else {
             // Same envelope for unknown / expired / other-agent (no leak).
             return Ok(error_envelope(format!(
                 "scratch reference {} not found, expired, or not owned by this agent",
@@ -340,17 +354,26 @@ impl ScratchStore {
         let now = now_secs();
         if now > expires_at {
             let mut conn = lock(&self.conn);
-            delete_entry(&mut conn, &scratch_id, Path::new(&payload_path))?;
+            delete_entry(&mut conn, &scratch_id, &self.data_dir)?;
             return Ok(error_envelope(format!(
                 "scratch reference {} has expired",
                 py_repr(scratch_ref)
             )));
         }
 
-        let payload_path = PathBuf::from(&payload_path);
+        // The payload path is DERIVED from the store's data dir + the row id
+        // — the payload_path column is written for observability but never
+        // trusted for I/O: a tampered row must not redirect reads/unlinks to
+        // an arbitrary file (e.g. one owned by root).
+        let Some(payload_path) = payload_file(&self.data_dir, &scratch_id) else {
+            return Ok(error_envelope(format!(
+                "invalid scratch reference {}; expected 'scratch:<hex>'",
+                py_repr(scratch_ref)
+            )));
+        };
         if !payload_path.is_file() {
             let mut conn = lock(&self.conn);
-            delete_entry(&mut conn, &scratch_id, &payload_path)?;
+            delete_entry(&mut conn, &scratch_id, &self.data_dir)?;
             return Ok(error_envelope(format!(
                 "scratch payload file missing for {}",
                 py_repr(scratch_ref)
@@ -495,7 +518,7 @@ impl ScratchStore {
     /// Public cleanup: delete expired entries. Returns count removed.
     pub fn cleanup_expired(&self) -> Result<usize> {
         let mut conn = lock(&self.conn);
-        cleanup_expired_locked(&mut conn, now_secs())
+        cleanup_expired_locked(&mut conn, now_secs(), &self.data_dir)
     }
 }
 
@@ -551,10 +574,27 @@ fn random_hex_id() -> Result<String> {
 /// (lowercase hex only, non-empty).
 pub fn parse_ref(ref_str: &str) -> Option<&str> {
     let id = ref_str.strip_prefix("scratch:")?;
-    if id.is_empty() || !id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if valid_scratch_id(id) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// A scratch row id the filesystem layer will act on: non-empty lowercase
+/// hex. Rows carry a `payload_path` TEXT column for observability, but it is
+/// never trusted — every read/unlink derives the file from `data_dir + id`,
+/// so a tampered row cannot redirect retrieve/cleanup/cap-evict at an
+/// arbitrary (possibly root-owned) path.
+fn valid_scratch_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn payload_file(data_dir: &Path, id: &str) -> Option<PathBuf> {
+    if !valid_scratch_id(id) {
         return None;
     }
-    Some(id)
+    Some(data_dir.join(format!("{id}.json.gz")))
 }
 
 fn error_envelope(msg: String) -> Value {
@@ -571,12 +611,15 @@ fn py_repr(s: &str) -> String {
     }
 }
 
-fn delete_entry(conn: &mut Connection, id: &str, payload_path: &Path) -> Result<()> {
+fn delete_entry(conn: &mut Connection, id: &str, data_dir: &Path) -> Result<()> {
     // Payload unlink is best-effort (python: `except OSError: pass`) — the
     // metadata row going away is what makes the entry dead; a leaked file is
-    // orphaned bytes and never blocks dispatch.
-    if payload_path.is_file() {
-        let _ = fs::remove_file(payload_path);
+    // orphaned bytes and never blocks dispatch. The path is derived from the
+    // id, never taken from the row.
+    if let Some(payload_path) = payload_file(data_dir, id) {
+        if payload_path.is_file() {
+            let _ = fs::remove_file(payload_path);
+        }
     }
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM scratch_entries WHERE id = ?1", params![id])?;
@@ -584,25 +627,30 @@ fn delete_entry(conn: &mut Connection, id: &str, payload_path: &Path) -> Result<
     Ok(())
 }
 
-fn cleanup_expired_locked(conn: &mut Connection, now: f64) -> Result<usize> {
-    let rows: Vec<(String, String)> = {
+fn cleanup_expired_locked(conn: &mut Connection, now: f64, data_dir: &Path) -> Result<usize> {
+    let ids: Vec<String> = {
         let mut stmt = conn.prepare(
-            "SELECT id, payload_path FROM scratch_entries WHERE expires_at < ?1",
+            "SELECT id FROM scratch_entries WHERE expires_at < ?1",
         )?;
         let rows = stmt
-            .query_map(params![now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map(params![now], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows
     };
-    for (id, path) in &rows {
-        delete_entry(conn, id, Path::new(path))?;
+    for id in &ids {
+        delete_entry(conn, id, data_dir)?;
     }
-    Ok(rows.len())
+    Ok(ids.len())
 }
 
 /// Evict oldest entries for an agent until within the per-agent cap —
 /// mirrors `_enforce_agent_cap` (check at loop top, subtract, delete).
-fn enforce_agent_cap(conn: &mut Connection, agent_id: &str, max_agent_bytes: usize) -> Result<()> {
+fn enforce_agent_cap(
+    conn: &mut Connection,
+    agent_id: &str,
+    max_agent_bytes: usize,
+    data_dir: &Path,
+) -> Result<()> {
     let total: i64 = conn.query_row(
         "SELECT COALESCE(SUM(byte_count),0) FROM scratch_entries WHERE agent_id = ?1",
         params![agent_id],
@@ -611,29 +659,25 @@ fn enforce_agent_cap(conn: &mut Connection, agent_id: &str, max_agent_bytes: usi
     if total <= max_agent_bytes as i64 {
         return Ok(());
     }
-    let rows: Vec<(String, String, i64)> = {
+    let rows: Vec<(String, i64)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, payload_path, byte_count FROM scratch_entries \
+            "SELECT id, byte_count FROM scratch_entries \
              WHERE agent_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt
             .query_map(params![agent_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows
     };
     let mut total = total;
-    for (id, path, byte_count) in rows {
+    for (id, byte_count) in rows {
         if total <= max_agent_bytes as i64 {
             break;
         }
         total -= byte_count;
-        delete_entry(conn, &id, Path::new(&path))?;
+        delete_entry(conn, &id, data_dir)?;
     }
     Ok(())
 }
@@ -861,6 +905,63 @@ mod tests {
         assert_eq!(parse_ref("scratch:xyz"), None);
         assert_eq!(parse_ref(":0123"), None);
         assert_eq!(parse_ref("scratch:123 g"), None);
+    }
+
+    #[test]
+    fn cleanup_ignores_tampered_payload_paths() {
+        // A row's payload_path column is observability only — retrieve and
+        // cleanup derive the payload file from data_dir + row id, so a
+        // tampered row must never delete an arbitrary file (e.g. root-owned).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ScratchStore::open(
+            &dir.path().join("scratch.db"),
+            &dir.path().join("scratch-data"),
+            cfg(24.0, 1024 * 1024, 1024 * 1024),
+        )
+        .expect("open store");
+        let receipt = store
+            .store(&json!({"pad": random_pad(900)}), "agent-a", "t", None)
+            .expect("store");
+        let id = receipt.scratch_ref.trim_start_matches("scratch:").to_string();
+
+        // Tamper: point the row's payload_path at an innocent bystander and
+        // force expiry in one UPDATE.
+        let victim = dir.path().join("victim.json.gz");
+        std::fs::write(&victim, b"do not delete").unwrap();
+        {
+            let conn = lock(&store.conn);
+            conn.execute(
+                "UPDATE scratch_entries SET payload_path = ?1, expires_at = 0 \
+                 WHERE id = ?2",
+                params![victim.to_string_lossy(), id],
+            )
+            .unwrap();
+        }
+
+        let removed = store.cleanup_expired().unwrap();
+        assert_eq!(removed, 1);
+        assert!(victim.is_file(), "tampered path must never be deleted");
+        let derived = store.data_dir.join(format!("{id}.json.gz"));
+        assert!(
+            !derived.is_file(),
+            "the derived payload file must be gone instead"
+        );
+        let env = store
+            .retrieve(&receipt.scratch_ref, "agent-a", RetrieveOpts::default())
+            .unwrap();
+        assert_eq!(env["status"], "error");
+        assert!(env["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn db_file_is_chmodded_0600() {
+        let (_d, store) = test_store(cfg(24.0, 1024, 1024));
+        let mode = std::fs::metadata(&store.db_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "scratch.db must not be world-readable");
     }
 
     #[test]

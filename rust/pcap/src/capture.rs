@@ -21,6 +21,27 @@ pub struct Sniffed {
     pub packets: Vec<CapturedPacket>,
 }
 
+/// Write captured packets to a new pcap file, preserving each packet's own
+/// capture timestamp. `PcapWriter::write_record` stamps whatever clock value
+/// its caller passes, which is right for synthetic packets (save_pcap stamps
+/// `now`) — live captures must keep the kernel-provided ts, serializing
+/// every frame at the same wall-clock moment loses ordering evidence.
+#[cfg(feature = "capture")]
+pub fn write_capture_records(
+    path: &std::path::Path,
+    linktype: u32,
+    packets: &[CapturedPacket],
+) -> std::io::Result<usize> {
+    let mut w = crate::format::PcapWriter::create_with_linktype(path, linktype)?;
+    for p in packets {
+        w.write_record(p.ts_sec, p.ts_usec, &p.data)?;
+    }
+    w.flush()?;
+    let count = w.count();
+    drop(w);
+    Ok(count)
+}
+
 #[derive(Debug, Clone)]
 pub enum CaptureError {
     Open(String),
@@ -123,6 +144,26 @@ pub fn sniff(
 #[cfg(all(test, feature = "capture"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_capture_records_keeps_each_packet_ts() {
+        // sniff_to_pcap used to stamp every record with wall-clock `now`,
+        // throwing away kernel-provided per-packet timestamps.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ts.pcap");
+        let packets = vec![
+            CapturedPacket { ts_sec: 1_700_000_000, ts_usec: 111, data: vec![0x01, 0x02] },
+            CapturedPacket { ts_sec: 1_700_000_005, ts_usec: 999_999, data: vec![0x33] },
+        ];
+        let n = write_capture_records(&path, 1, &packets).unwrap();
+        assert_eq!(n, 2);
+        let mut r = crate::format::PcapReader::open(&path).unwrap();
+        let a = r.next_record().unwrap().unwrap();
+        assert_eq!((a.ts_sec, a.ts_usec), (1_700_000_000, 111));
+        let b = r.next_record().unwrap().unwrap();
+        assert_eq!((b.ts_sec, b.ts_usec), (1_700_000_005, 999_999));
+        assert!(r.next_record().unwrap().is_none());
+    }
 
     #[test]
     fn bogus_device_errors() {

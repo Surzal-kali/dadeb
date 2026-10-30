@@ -19,7 +19,7 @@ Design notes
   dissection tools are therefore safe to call unprivileged and are the common
   path; send/sniff will simply error if the Brain worker isn't root.
 * The capture/send interface defaults to ``PACKET_CRAFT`` (env, loaded via
-  loaddotenv) or ``enp92s0``, resolved per-call (not at import) so .env edits
+  loaddotenv) or ``eth0``, resolved per-call (not at import) so .env edits
   take effect without re-import.  Every packet tool takes an ``interface``
   parameter; craft tools accept it for schema uniformity but ignore it
   (crafting never touches the wire).
@@ -53,7 +53,7 @@ from .scope_gate import check_send, ScopeGateError
 # PACKET_CRAFT (set in .env; loaded by loaddotenv at stack boot).  Resolved
 # at call time via _default_interface() so .env edits apply without re-import.
 PACKET_INTERFACE_ENV = "PACKET_CRAFT"
-DEFAULT_INTERFACE = "enp92s0"
+DEFAULT_INTERFACE = "eth0"
 
 # Pcap output directory — mirrors the msfvenom dropbox pattern: gitignored,
 # env-overridable, resolved at call time so .env edits apply without re-import.
@@ -705,7 +705,7 @@ def send_packet(hex: str, count: int = 1, interval: float = 0.1, interface: str 
         hex: Packet hex string from a craft_* tool.
         count: Number of times to send.
         interval: Seconds between sends.
-        interface: Interface to transmit on; defaults to PACKET_CRAFT env (fallback enp92s0).
+        interface: Interface to transmit on; defaults to PACKET_CRAFT env (fallback eth0).
     """
     # Scope gate: refuses sends to out-of-scope destinations when an operator
     # has armed a bug-bounty scope from the Tool REPL.  No-op in lab mode.
@@ -765,7 +765,7 @@ def send_and_receive_packet(hex: str, timeout: int = 5, interface: str = ""):
     Args:
         hex: Packet hex string from a craft_* tool.
         timeout: Seconds to wait for the reply (minimum 1).
-        interface: Interface to transmit/listen on; defaults to PACKET_CRAFT env (fallback enp92s0).
+        interface: Interface to transmit/listen on; defaults to PACKET_CRAFT env (fallback eth0).
     """
     # Scope gate BEFORE the try (same as send_packet): a block must RAISE and
     # surface as Failed on both dispatch paths, never be caught into a string
@@ -822,7 +822,7 @@ def sniff_packets(filter: str = "", count: int = 10, timeout: int = 30, interfac
         filter: BPF filter string (e.g. 'tcp port 80', 'icmp').
         count: Number of packets to capture.
         timeout: Capture timeout in seconds.
-        interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback enp92s0).
+        interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback eth0).
     """
     try:
         iface = interface or _default_interface()
@@ -950,7 +950,7 @@ def wait_for_packet(filter: str = "", timeout: int = 30, interface: str = ""):
     Args:
         filter: BPF filter string.
         timeout: Seconds to wait.
-        interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback enp92s0).
+        interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback eth0).
     """
     try:
         iface = interface or _default_interface()
@@ -1074,7 +1074,7 @@ def sniff_to_pcap(
         filter: BPF filter string (e.g. 'tcp port 80', 'icmp', 'host 10.0.0.1').
         count: Number of packets to capture (capped at PCAP_MAX_PACKETS_PER_FILE).
         timeout: Capture timeout in seconds.
-        interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback enp92s0).
+        interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback eth0).
         filename: Output filename (no path separators — lands in PCAP_DIR).
                   If omitted, auto-generates a timestamped name.
     """

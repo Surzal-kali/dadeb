@@ -1,6 +1,6 @@
 //! Configuration knobs mirroring `utils/packetcraft.py`'s env block
 //! (lines 60-105): `PCAP_DIR`, `PCAP_MAX_PACKETS_PER_FILE` (100_000),
-//! `PCAP_MAX_FILE_MB` (512), `PACKET_CRAFT` (interface, default `enp92s0`).
+//! `PCAP_MAX_FILE_MB` (512), `PACKET_CRAFT` (interface, default `eth0`).
 //!
 //! Same contract as scratch's `PcapConfig`: malformed env values warn to
 //! stderr and fall back to the default; explicit-path constructors make tests
@@ -18,6 +18,9 @@ pub struct PcapConfig {
     /// `PCAP_MAX_FILE_MB` — load_pcap size guard.
     pub max_file_mb: usize,
     /// `PACKET_CRAFT` — default interface for sniff_to_pcap.
+    ///
+    /// File-only lanes never touch this; there is deliberately no warning
+    /// when it is unset (a plain analysis load must not print to stderr).
     pub default_interface: String,
 }
 
@@ -54,10 +57,10 @@ impl PcapConfig {
             dir,
             max_packets_per_file: env_usize("PCAP_MAX_PACKETS_PER_FILE", 100_000),
             max_file_mb: env_usize("PCAP_MAX_FILE_MB", 512),
-            default_interface: std::env::var("PACKET_CRAFT").unwrap_or_else(|_| {
-                eprintln!("warning: env PACKET_CRAFT not set: using default enp92s0");
-                "enp92s0".to_string()
-            }),
+            default_interface: std::env::var("PACKET_CRAFT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "eth0".to_string()),
         }
     }
 
@@ -67,7 +70,7 @@ impl PcapConfig {
             dir: dir.into(),
             max_packets_per_file: 100_000,
             max_file_mb: 512,
-            default_interface: "enp92s0".to_string(),
+            default_interface: "eth0".to_string(),
         }
     }
 }
@@ -75,5 +78,16 @@ impl PcapConfig {
 impl Default for PcapConfig {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_dir_defaults_to_plain_eth0() {
+        let cfg = PcapConfig::with_dir("/tmp/does-not-matter");
+        assert_eq!(cfg.default_interface, "eth0");
     }
 }

@@ -65,12 +65,23 @@ impl ScratchConfig {
 
 fn env_f64(key: &str, default: f64) -> f64 {
     match std::env::var(key) {
-        Ok(v) if !v.trim().is_empty() => v.trim().parse().unwrap_or_else(|_| {
+        Ok(v) if !v.trim().is_empty() => parse_f64(&v).unwrap_or_else(|| {
             eprintln!("[scratch] invalid {key}={v:?}; falling back to default {default}");
             default
         }),
         _ => default,
     }
+}
+
+/// Strictly validated f64 for store knobs: finite and non-negative only.
+/// A bare `.parse::<f64>()` accepts `"nan"`, `"inf"`, and `-1` — all of them
+/// poison the TTL arithmetic (`now - nan > 0` is never true, so nothing ever
+/// expires; a negative TTL expires everything immediately).
+fn parse_f64(raw: &str) -> Option<f64> {
+    raw.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|x| x.is_finite() && *x >= 0.0)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -85,4 +96,21 @@ fn env_usize(key: &str, default: usize) -> usize {
 
 fn env_usize_mib(key: &str, default_mb: usize) -> usize {
     env_usize(key, default_mb).saturating_mul(1024 * 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_f64_rejects_nan_inf_and_negative() {
+        assert_eq!(parse_f64("nan"), None);
+        assert_eq!(parse_f64("NaN"), None);
+        assert_eq!(parse_f64("inf"), None);
+        assert_eq!(parse_f64("-inf"), None);
+        assert_eq!(parse_f64("-1"), None);
+        assert_eq!(parse_f64("0.0"), Some(0.0));
+        assert_eq!(parse_f64("24.5"), Some(24.5));
+        assert_eq!(parse_f64("  48  "), Some(48.0));
+    }
 }

@@ -259,7 +259,7 @@ fn load_pcap_filtered(
             "\n  ... {} more — load_pcap('{}', {filter_arg}offset={next_off}, limit={}) for the next page.",
             outcome.meta.expanded - next_off,
             name,
-            if opts.limit == 0 { 50 } else { opts.limit }
+            opts.limit
         ));
     } else {
         lines.push(format!(
@@ -274,6 +274,10 @@ fn load_pcap_filtered(
 /// load_pcap with the filter/regex/context extension as first-class args
 /// (python load_pcap has no filter — this is the new capability, same error
 /// surface). Errors return INSIDE the text like the python tool.
+///
+/// Python parity: `limit=50` default and `lim = max(1, int(limit))` — a text
+/// lane with unlimited output hexes every frame straight into model context,
+/// so 0 remaps to the 50-frame default and any explicit limit has a 1 floor.
 pub fn load_pcap(
     filename: &str,
     offset: usize,
@@ -300,6 +304,7 @@ pub fn load_pcap(
         );
     }
 
+    let limit = if limit == 0 { 50 } else { limit };
     let opts = SearchOpts {
         filter: filter.map(|s| s.to_string()),
         regex: regex.map(|s| s.to_string()),
@@ -309,8 +314,7 @@ pub fn load_pcap(
     };
     if filter.is_none() && regex.is_none() {
         // pure paging lane: python-parity windowed walk, no search machinery
-        let lim = if limit == 0 { usize::MAX } else { limit };
-        return match load_pcap_plain(&fpath, file_size, offset, lim) {
+        return match load_pcap_plain(&fpath, file_size, offset, limit) {
             Ok(s) => s,
             Err(e) => e,
         };
@@ -358,7 +362,7 @@ pub fn list_pcaps(cfg: &PcapConfig) -> String {
             .collect(),
         Err(e) => return format!("list_pcaps error: {e}"),
     };
-    files.sort_by(|a, b| b.1.modified().ok().cmp(&a.1.modified().ok()));
+    files.sort_by_key(|(_, md)| std::cmp::Reverse(md.modified().ok()));
 
     if files.is_empty() {
         return format!(
@@ -445,14 +449,8 @@ pub fn sniff_to_pcap(
     };
     let out_path = cfg.dir.join(&name);
 
-    let (ts, us) = now_epoch_us();
     let write = (|| -> std::io::Result<String> {
-        let mut w = PcapWriter::create_with_linktype(&out_path, linktype)?;
-        for p in &packets {
-            w.write_record(ts as u32, us, &p.data)?;
-        }
-        w.flush()?;
-        std::mem::drop(w);
+        crate::capture::write_capture_records(&out_path, linktype, &packets)?;
         let file_bytes = std::fs::read(&out_path)?;
         let sha = Sha256::digest(&file_bytes);
         let mut lines = vec![
@@ -520,6 +518,32 @@ mod tests {
         f[12..14].copy_from_slice(&0x9999u16.to_be_bytes());
         f.extend_from_slice(tag);
         hex_string(&f)
+    }
+
+    #[test]
+    fn load_pcap_limit_zero_means_default_50_not_unlimited() {
+        // Python parity: `limit=50` default and `lim = max(1, int(limit))`.
+        // A text lane that treats 0 as unlimited hexes every frame of a big
+        // capture straight into model context.
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let hexes: Vec<String> = (0..60).map(|i| frame(&[i as u8])).collect();
+        let out = save_pcap(&hexes, "big.pcap", &c);
+        assert!(out.contains("Saved 60 packet(s)"), "{out}");
+
+        let loaded = load_pcap("big.pcap", 0, 0, None, None, 0, &c);
+        assert!(loaded.contains("[50]"), "frame 50 must be the page end: {loaded}");
+        assert!(!loaded.contains("[51]"), "frame 51 must NOT be shown: {loaded}");
+        assert!(
+            loaded.contains("offset=50, limit=50"),
+            "next-page hint must point at the following page: {loaded}"
+        );
+
+        // explicit limit keeps its value (page of 3, hint carries limit=3)
+        let p3 = load_pcap("big.pcap", 0, 3, None, None, 0, &c);
+        assert!(p3.contains("[3]"), "{p3}");
+        assert!(!p3.contains("[4]"), "{p3}");
+        assert!(p3.contains("offset=3, limit=3"), "{p3}");
     }
 
     #[test]

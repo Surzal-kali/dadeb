@@ -17,6 +17,29 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+/// Refusal messages for a wrong magic: pcapng gets the convert-with-editcap
+/// hint, garbage gets the magics we can parse (pcapng files are the common
+/// "weird" capture; nanosecond pcaps are parsed, not refused).
+fn bad_magic(magic: &[u8; 4]) -> PcapFormatError {
+    let hex_str: String = magic.iter().map(|b| format!("{b:02x}")).collect();
+    if *magic == PCAPNG_MAGIC {
+        PcapFormatError::BadMagic(format!(
+            "magic bytes {hex_str} — pcapng is not supported; \
+             use tcpdump/tshark or convert with editcap -F pcap"
+        ))
+    } else {
+        PcapFormatError::BadMagic(format!(
+            "magic bytes {hex_str} — expected a1b2c3d4/d4c3b2a1 (pcap) or \
+             a1b23c4d/4d3cb2a1 (nanosecond pcap)"
+        ))
+    }
+}
+
+fn short_magic(partial: &[u8], e: std::io::Error) -> PcapFormatError {
+    let hex_str: String = partial.iter().map(|b| format!("{b:02x}")).collect();
+    PcapFormatError::BadMagic(format!("magic bytes {hex_str} (file too short: {e})"))
+}
+
 pub const GLOBAL_HEADER_SIZE: usize = 24;
 pub const RECORD_HEADER_SIZE: usize = 16;
 /// libpcap MAXIMUM_SNAPLEN — also the incl_len sanity cap.
@@ -25,7 +48,18 @@ pub const LINKTYPE_ETHERNET: u32 = 1;
 
 const LE_MAGIC: [u8; 4] = [0xd4, 0xc3, 0xb2, 0xa1];
 const BE_MAGIC: [u8; 4] = [0xa1, 0xb2, 0xc3, 0xd4];
+// Nanosecond-precision siblings (ts sub-second field carries NANOSECONDS);
+// same container otherwise, so they are parsed, not refused.
+const NANO_LE_MAGIC: [u8; 4] = [0x4d, 0x3c, 0xb2, 0xa1];
+const NANO_BE_MAGIC: [u8; 4] = [0xa1, 0xb2, 0x3c, 0x4d];
 const PCAPNG_MAGIC: [u8; 4] = [0x0a, 0x0d, 0x0d, 0x0a];
+
+/// True when the 4 magic bytes are a libpcap container we can parse
+/// (microsecond or nanosecond, either byte order) — pcapng and garbage are
+/// not.
+fn is_pcap_magic(magic: &[u8; 4]) -> bool {
+    matches!(magic, m if *m == LE_MAGIC || *m == BE_MAGIC || *m == NANO_LE_MAGIC || *m == NANO_BE_MAGIC)
+}
 
 #[derive(Debug, Clone)]
 pub struct GlobalHeader {
@@ -38,6 +72,10 @@ pub struct GlobalHeader {
     pub network: u32,
     /// True when the file was written big-endian.
     pub big_endian: bool,
+    /// Nanosecond-magic file: each record's sub-second field carried
+    /// nanoseconds; the reader normalizes `ts_usec` to microseconds
+    /// (truncating below the microsecond).
+    pub nanosecond: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -61,11 +99,7 @@ impl std::fmt::Display for PcapFormatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "pcap io error: {e}"),
-            Self::BadMagic(m) => write!(
-                f,
-                "not a pcap file (magic bytes {m}); pcapng is not supported — \
-                 use tcpdump/tshark or convert with editcap -F pcap"
-            ),
+            Self::BadMagic(m) => write!(f, "not a pcap file: {m}"),
             Self::OversizedRecord { incl_len } => {
                 write!(f, "corrupt pcap record: incl_len {incl_len} exceeds {MAX_SNAPLEN}")
             }
@@ -129,8 +163,7 @@ impl PcapWriter {
     }
 
     pub fn into_inner(self) -> std::io::Result<File> {
-        let file = self.file.into_inner().map_err(|e| e.into_error());
-        file
+        self.file.into_inner().map_err(|e| e.into_error())
     }
 }
 
@@ -154,18 +187,20 @@ impl<R: Read> PcapReader<R> {
             Ok(()) => {}
             // empty / 1-3 byte file: not a pcap container
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(Self::short_magic(&magic, e))
+                return Err(short_magic(&magic, e));
             }
             Err(e) => return Err(e.into()),
         }
-        let big_endian = if magic == LE_MAGIC {
-            false
+        let (big_endian, nanosecond) = if magic == LE_MAGIC {
+            (false, false)
         } else if magic == BE_MAGIC {
-            true
-        } else if magic == PCAPNG_MAGIC {
-            return Err(Self::bad_magic(&magic));
+            (true, false)
+        } else if magic == NANO_LE_MAGIC {
+            (false, true)
+        } else if magic == NANO_BE_MAGIC {
+            (true, true)
         } else {
-            return Err(Self::bad_magic(&magic));
+            return Err(bad_magic(&magic));
         };
         let mut buf = [0u8; GLOBAL_HEADER_SIZE - 4];
         inner.read_exact(&mut buf)?;
@@ -200,29 +235,20 @@ impl<R: Read> PcapReader<R> {
                 snaplen,
                 network,
                 big_endian,
+                nanosecond,
             },
             truncated: false,
         })
-    }
-
-    fn bad_magic(magic: &[u8; 4]) -> PcapFormatError {
-        let hex_str: String = magic.iter().map(|b| format!("{b:02x}")).collect();
-        PcapFormatError::BadMagic(hex_str)
-    }
-
-    fn short_magic(partial: &[u8], e: std::io::Error) -> PcapFormatError {
-        let hex_str: String = partial.iter().map(|b| format!("{b:02x}")).collect();
-        PcapFormatError::BadMagic(format!("{hex_str} (file too short: {e})"))
     }
 
     pub fn header(&self) -> &GlobalHeader {
         &self.header
     }
 
-    /// True once a clean stop happened on a truncated record header/payload.
-    pub fn is_truncated(&self) -> bool {
-        self.truncated
-    }
+/// True once a clean stop happened on a truncated record header/payload.
+pub fn is_truncated(&self) -> bool {
+    self.truncated
+}
 
     /// Read as much of `buf` as the stream offers. Returns the byte count:
     /// full `buf.len()`, or fewer at stream EOF (the truncated-tail signal).
@@ -252,7 +278,7 @@ impl<R: Read> PcapReader<R> {
             self.truncated = true;
             return Ok(None);
         }
-        let (ts_sec, ts_usec, incl_len, orig_len) = if self.header.big_endian {
+        let (ts_sec, ts_subsec, incl_len, orig_len) = if self.header.big_endian {
             (
                 u32::from_be_bytes(hdr[0..4].try_into().unwrap()),
                 u32::from_be_bytes(hdr[4..8].try_into().unwrap()),
@@ -270,6 +296,13 @@ impl<R: Read> PcapReader<R> {
         if incl_len > MAX_SNAPLEN {
             return Err(PcapFormatError::OversizedRecord { incl_len });
         }
+        // Nanosecond-magic files carry nanoseconds in the sub-second field;
+        // normalize so Record.ts_usec stays honest microseconds.
+        let ts_usec = if self.header.nanosecond {
+            ts_subsec / 1_000
+        } else {
+            ts_subsec
+        };
         let mut data = vec![0u8; incl_len as usize];
         let got = self.read_available(&mut data)?;
         if got < data.len() {
@@ -291,14 +324,10 @@ pub fn count_records<P: AsRef<Path>>(path: P) -> Result<usize, PcapFormatError> 
     let mut f = File::open(path.as_ref())?;
     let mut header = [0u8; GLOBAL_HEADER_SIZE];
     f.read_exact(&mut header)?;
-    let big_endian = if header[0..4] == [0xa1, 0xb2, 0xc3, 0xd4] {
-        true
-    } else if header[0..4] == [0xd4, 0xc3, 0xb2, 0xa1] {
-        false
+    let big_endian = if is_pcap_magic(&header[0..4].try_into().unwrap()) {
+        header[0..4] == [0xa1, 0xb2, 0xc3, 0xd4] || header[0..4] == [0xa1, 0xb2, 0x3c, 0x4d]
     } else {
-        return Err(PcapFormatError::BadMagic(
-            header[0..4].iter().map(|b| format!("{b:02x}")).collect(),
-        ));
+        return Err(bad_magic(&header[0..4].try_into().unwrap()));
     };
     let mut pos: u64 = GLOBAL_HEADER_SIZE as u64;
     let len = f.metadata()?.len();
@@ -371,7 +400,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             Sha256::digest(&bytes).to_vec(),
-            Sha256::digest(&[
+            Sha256::digest([
                 0xd4, 0xc3, 0xb2, 0xa1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 1, 0, 0, 0
             ])
             .to_vec()
@@ -403,8 +432,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("r.pcap");
         let mut w = PcapWriter::create(&path).unwrap();
-        w.write_record(1700000000, 1234, &vec![0x01, 0x02, 0x03]).unwrap();
-        w.write_record(1700000001, 4321, &vec![0xff; 60]).unwrap();
+        w.write_record(1700000000, 1234, &[0x01, 0x02, 0x03]).unwrap();
+        w.write_record(1700000001, 4321, &[0xff; 60]).unwrap();
         w.flush().unwrap();
         std::mem::drop(w);
 
@@ -512,5 +541,74 @@ mod tests {
             &golden_frame(77, &payload)[..],
             "record prefix must equal the hand-built golden frame"
         );
+    }
+
+    #[test]
+    fn nanosecond_le_magic_parsed_and_normalized() {
+        // LE nanosecond pcap: magic 4d 3c b2 a1, sub-second field = ns.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nano_le.pcap");
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&[0x4d, 0x3c, 0xb2, 0xa1, 2, 0, 4, 0]).unwrap();
+        f.write_all(&[0; 16]).unwrap(); // thiszone..network
+        let magic_ts = 1_700_000_000u32;
+        let nanos = [123_456_789u32, 0, 999_999_999];
+        for ns in nanos {
+            f.write_all(&magic_ts.to_le_bytes()).unwrap();
+            f.write_all(&ns.to_le_bytes()).unwrap();
+            f.write_all(&3u32.to_le_bytes()).unwrap();
+            f.write_all(&3u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xde, 0xad, 0xbe]).unwrap();
+        }
+        drop(f);
+
+        let mut r = PcapReader::open(&path).unwrap();
+        assert!(r.header().nanosecond, "nano magic must set the nano flag");
+        assert!(!r.header().big_endian);
+        assert_eq!(r.next_record().unwrap().map(|x| (x.ts_sec, x.ts_usec)),
+            Some((magic_ts, 123_456))); // truncates below the microsecond
+        assert_eq!(
+            r.next_record().unwrap().map(|x| x.ts_usec),
+            Some(0)
+        );
+        assert_eq!(
+            r.next_record().unwrap().map(|x| x.ts_usec),
+            Some(999_999) // 999_999_999 ns → 999_999 µs, not 1_000_000
+        );
+        assert!(r.next_record().unwrap().is_none());
+        assert_eq!(count_records(&path).unwrap(), 3, "seek-walk must accept nano magic");
+    }
+
+    #[test]
+    fn nanosecond_be_magic_parsed_and_normalized() {
+        // BE nanosecond pcap: magic a1 b2 3c 4d, sub-second field = ns BE.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nano_be.pcap");
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&[0xa1, 0xb2, 0x3c, 0x4d, 0, 2, 0, 4]).unwrap();
+        f.write_all(&[0; 16]).unwrap();
+        f.write_all(&1_700_000_005u32.to_be_bytes()).unwrap();
+        f.write_all(&1_500_000_000u32.to_be_bytes()).unwrap(); // sub-second ns
+        f.write_all(&4u32.to_be_bytes()).unwrap();
+        f.write_all(&4u32.to_be_bytes()).unwrap();
+        f.write_all(&[0x01, 0x02, 0x03, 0x04]).unwrap();
+        drop(f);
+
+        let mut r = PcapReader::open(&path).unwrap();
+        assert!(r.header().nanosecond);
+        assert!(r.header().big_endian);
+        let rec = r.next_record().unwrap().unwrap();
+        assert_eq!((rec.ts_sec, rec.ts_usec), (1_700_000_005, 1_500_000));
+    }
+
+    #[test]
+    fn garbage_magic_gets_its_own_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.pcap");
+        std::fs::write(&path, [0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0]).unwrap();
+        let msg = PcapReader::open(&path).unwrap_err().to_string();
+        assert!(msg.contains("a1b2c3d4"), "{msg}");
+        assert!(msg.contains("nanosecond"), "{msg}");
+        assert!(!msg.contains("pcapng"), "{msg}");
     }
 }

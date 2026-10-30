@@ -94,10 +94,6 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
     path: P,
     opts: &SearchOpts,
 ) -> Result<SearchOutcome, String> {
-    if let Some(re) = &opts.regex {
-        compile_regex(re)?;
-    }
-
     // pass 1: total count + matching frame indices
     let mut reader = PcapReader::open(&path).map_err(|e| e.to_string())?;
     let linktype = reader.header().network;
@@ -105,7 +101,7 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
     let mut match_indices = Vec::new();
     let filter_lower = opts.filter.as_ref().map(|f| f.to_lowercase());
     let re = match &opts.regex {
-        Some(p) => Some(compile_regex(p).map_err(|e| e.to_string())?),
+        Some(p) => Some(compile_regex(p)?),
         None => None,
     };
     loop {
@@ -150,10 +146,8 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
     for entry in &entries_plan[start..end] {
         match entry {
             Some(idx) => wanted.push((*idx, false)),
-            None => match wanted.last_mut() {
-                Some(_) => wanted.push((usize::MAX, true)), // gap marker rides last
-                None => {}                                  // leading gap dropped
-            },
+            None if !wanted.is_empty() => wanted.push((usize::MAX, true)), // gap marker rides last
+            None => {}                                     // leading gap dropped
         }
     }
 
@@ -163,8 +157,7 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
     let mut idx = 0usize;
     let mut wanted_iter = wanted.iter();
     let mut next = wanted_iter.next().copied();
-    loop {
-        let Some((want_idx, _)) = next else { break };
+    while let Some((want_idx, _)) = next {
         if want_idx == usize::MAX {
             entries.push(OutcomeEntry::Gap);
             next = wanted_iter.next().copied();

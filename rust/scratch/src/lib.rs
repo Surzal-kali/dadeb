@@ -7,8 +7,9 @@
 //!
 //! # Contract (mirrors the Python store)
 //!
-//! - **Storage**: `scratch.db` (SQLite metadata, WAL) + `scratch-data/`
-//!   (gzip-compressed JSON payloads, level 6; 0700 dir, 0600 files).
+//! - **Storage**: `scratch.db` (SQLite metadata, WAL, chmodded 0600) +
+//!   `scratch-data/` (gzip-compressed JSON payloads, level 6; 0700 dir,
+//!   0600 files).
 //! - **IDs**: opaque random `scratch:<16-hex>`, never sequential — a guess
 //!   from another chat cannot leak data.
 //! - **Ownership**: every entry is scoped to `agent_id`; a valid-looking ref
@@ -20,8 +21,13 @@
 //! - **Caps**: per-entry 256 MiB (`SCRATCH_MAX_PAYLOAD_MB`), per-agent 1 GiB
 //!   (`SCRATCH_MAX_AGENT_MB`); per-entry oversize stores truncated with a
 //!   stated policy, per-agent oversize evicts oldest-first.
-//! - **Atomic writes**: payload goes temp → fsync → rename, then the metadata
-//!   row commits — a crash never leaves a torn entry.
+//! - **Atomic writes**: payload goes temp → fsync → rename (outside the store
+//!   lock — concurrent `store()` calls don't queue on one fsync), then the
+//!   metadata row commits; a crash never leaves a torn entry.
+//! - **Payload paths are derived, never trusted**: rows carry the
+//!   `payload_path` column for observability, but every read/unlink derives
+//!   the file from `data_dir` + row id, so a tampered row can't redirect
+//!   retrieval/cleanup at an arbitrary file.
 //! - **Schema**: identical DDL + WAL + busy_timeout as the Python store, so
 //!   both implementations can operate the same workspace (verified against a
 //!   Python-written db via [`crate::store::ScratchStore::retrieve`]; see

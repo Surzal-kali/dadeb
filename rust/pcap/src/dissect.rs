@@ -72,7 +72,7 @@ pub fn hex_string(frame: &[u8]) -> String {
 /// `"invalid hex"` when malformed.
 pub fn hex_bytes(hex: &str) -> Result<Vec<u8>, String> {
     let clean: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-    if clean.len() % 2 != 0 || !clean.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !clean.len().is_multiple_of(2) || !clean.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid hex".to_string());
     }
     (0..clean.len())
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn vlan_tagged() {
         let mut body = vec![0x00, 0x0a, 0x08, 0x00]; // vid 10, inner ethertype IP
-        body.extend_from_slice(&eth_ip_proto(1, &vec![8, 0, 0, 0, 0, 0, 0, 1])[14..]);
+        body.extend_from_slice(&eth_ip_proto(1, &[8, 0, 0, 0, 0, 0, 0, 1])[14..]);
         let mut tagged = vec![
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
             0x81, 0x00,

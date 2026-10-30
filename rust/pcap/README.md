@@ -57,7 +57,7 @@ Captured once at `PcapConfig::from_env()` — mirrors python's config block:
 | `PCAP_DIR` | workspace `pcap/` | where `save_pcap` writes and `list_pcaps` indexes |
 | `PCAP_MAX_PACKETS_PER_FILE` | 100000 | `save_pcap` refuses past this |
 | `PCAP_MAX_FILE_MB` | 512 | `load_pcap` size guard (over-cap → the "use tcpdump/tshark" message) |
-| `PACKET_CRAFT` | `enp92s0` | default interface for `sniff_to_pcap` |
+| `PACKET_CRAFT` | `eth0` | default interface for `sniff_to_pcap` |
 
 Env-hazard note for `from_env()`: `WORKSPACE_ROOT` / brain env can hijack the
 default dir on lanes where the checkout is read-only. **All tests** construct
@@ -130,7 +130,9 @@ application layer, matching python's summary text:
   sniff → write → "Captured {n} packet(s) …" text.
 
 Not ported: live crafting/modify/send (stays scapy), pcapng files (refused —
-LE header magic is authoritative, pcapng starts with 0x0A0D0D0A).
+LE header magic is authoritative, pcapng starts with 0x0A0D0D0A). Nanosecond
+pcap magic (`a1b23c4d`/`4d3cb2a1`) IS accepted; per-frame ns are normalized
+to µs on read.
 
 ## Divergences from python, all deliberate
 
