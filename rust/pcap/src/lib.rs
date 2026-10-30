@@ -33,7 +33,11 @@ mod tools;
 mod capture;
 
 pub use config::PcapConfig;
-pub use dissect::{dissect_frame, hex_bytes, hex_string};
+pub use dissect::{
+    dissect_frame, dissect_frame_linktype, hex_bytes, hex_string, LINKTYPE_ETHERNET,
+    LINKTYPE_IPV4, LINKTYPE_IPV6, LINKTYPE_LINUX_SLL, LINKTYPE_LINUX_SLL2, LINKTYPE_LOOP,
+    LINKTYPE_NULL, LINKTYPE_RAW,
+};
 pub use format::{
     count_records, dissected_frames, GlobalHeader, PcapFormatError, PcapReader, PcapWriter, Record,
 };
@@ -43,5 +47,5 @@ pub use projection::{
 pub use tools::{list_pcaps, load_pcap, pcap_search, safe_name, save_pcap};
 
 #[cfg(feature = "capture")]
-pub use capture::{sniff, CaptureError, CapturedPacket};
+pub use capture::{sniff, CaptureError, CapturedPacket, Sniffed};
 pub use tools::sniff_to_pcap;

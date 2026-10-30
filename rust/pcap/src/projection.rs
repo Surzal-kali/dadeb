@@ -5,7 +5,7 @@
 
 use regex::Regex;
 
-use crate::dissect::{dissect_frame, hex_string, FrameView};
+use crate::dissect::{dissect_frame_linktype, hex_string, FrameView};
 use crate::format::PcapReader;
 
 #[derive(Debug, Clone, Default)]
@@ -100,6 +100,7 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
 
     // pass 1: total count + matching frame indices
     let mut reader = PcapReader::open(&path).map_err(|e| e.to_string())?;
+    let linktype = reader.header().network;
     let mut total = 0usize;
     let mut match_indices = Vec::new();
     let filter_lower = opts.filter.as_ref().map(|f| f.to_lowercase());
@@ -110,7 +111,7 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
     loop {
         let rec = reader.next_record().map_err(|e| e.to_string())?;
         let Some(rec) = rec else { break };
-        if frame_matches(&dissect_frame(&rec.data), filter_lower.as_deref(), re.as_ref()) {
+        if frame_matches(&dissect_frame_linktype(&rec.data, linktype), filter_lower.as_deref(), re.as_ref()) {
             match_indices.push(total);
         }
         total += 1;
@@ -171,7 +172,7 @@ pub fn search_frames<P: AsRef<std::path::Path>>(
         }
         let Some(rec) = reader.next_record().map_err(|e| e.to_string())? else { break };
         if idx == want_idx {
-            let view = dissect_frame(&rec.data);
+            let view = dissect_frame_linktype(&rec.data, linktype);
             entries.push(OutcomeEntry::Frame {
                 index: idx,
                 ts_sec: rec.ts_sec,

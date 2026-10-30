@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::dissect::{dissect_frame, hex_string};
+use crate::dissect::{dissect_frame_linktype, hex_string};
 use crate::format::{PcapReader, PcapWriter};
 use crate::projection::{no_match_note, search_frames, SearchOpts, SearchOutcome};
 use crate::PcapConfig;
@@ -163,6 +163,7 @@ pub fn save_pcap(hexes: &[String], filename: &str, cfg: &PcapConfig) -> String {
 fn load_pcap_plain(fpath: &Path, file_size: u64, offset: usize, limit: usize) -> Result<String, String> {
     let name = fpath.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut reader = PcapReader::open(fpath).map_err(|e| format!("load_pcap error: {e}"))?;
+    let linktype = reader.header().network;
     let mut total = 0usize;
     let mut skipped = 0usize;
     let mut page: Vec<(String, String)> = Vec::new();
@@ -170,14 +171,22 @@ fn load_pcap_plain(fpath: &Path, file_size: u64, offset: usize, limit: usize) ->
         let rec = reader.next_record().map_err(|e| format!("load_pcap error: {e}"))?;
         let Some(rec) = rec else { break };
         if total >= offset && skipped < limit {
-            let view = dissect_frame(&rec.data);
+            let view = dissect_frame_linktype(&rec.data, linktype);
             page.push((view.summary, hex_string(&rec.data)));
             skipped += 1;
         }
         total += 1;
     }
 
-    let last = if page.is_empty() { offset - 1 } else { offset + page.len() - 1 };
+    if total == 0 {
+        // python parity: `if total == 0: return f"No packets in {fpath}."` —
+        // a header-only capture (tcpdump that caught nothing) is routine.
+        return Ok(format!("No packets in {}.", abs_display(fpath).display()));
+    }
+    // python renders `off + len(page) - 1`, which for an empty page past the
+    // end is `offset - 1` (offset > 0 here since total > 0 and page empty
+    // implies offset >= total); computed without usize underflow.
+    let last = (offset + page.len()).saturating_sub(1);
     let mut lines = vec![
         format!(
             "Loaded {total} packet(s) from {name} (showing {offset}–{last} of {total}):"
@@ -408,7 +417,7 @@ pub fn sniff_to_pcap(
     };
     let cap_count = count.min(cfg.max_packets_per_file);
 
-    let packets = match crate::capture::sniff(
+    let crate::capture::Sniffed { linktype, packets } = match crate::capture::sniff(
         &iface,
         filter,
         cap_count,
@@ -438,7 +447,7 @@ pub fn sniff_to_pcap(
 
     let (ts, us) = now_epoch_us();
     let write = (|| -> std::io::Result<String> {
-        let mut w = PcapWriter::create(&out_path)?;
+        let mut w = PcapWriter::create_with_linktype(&out_path, linktype)?;
         for p in &packets {
             w.write_record(ts as u32, us, &p.data)?;
         }
@@ -464,7 +473,7 @@ pub fn sniff_to_pcap(
             ),
         ];
         for (i, p) in packets.iter().enumerate().take(20) {
-            let view = dissect_frame(&p.data);
+            let view = dissect_frame_linktype(&p.data, linktype);
             lines.push(format!("  [{}] {}  hex={}", i + 1, view.summary, hex_string(&p.data)));
         }
         if packets.len() > 20 {
@@ -546,6 +555,42 @@ mod tests {
 
         let end = load_pcap("t.pcap", 1, 50, None, None, 0, &c);
         assert!(end.contains("\n  End of capture (2 packets total)."), "{end}");
+    }
+
+    #[test]
+    fn load_header_only_pcap_is_no_packets_not_a_panic() {
+        // Regression: `offset - 1` underflowed on an empty page.
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        PcapWriter::create(dir.path().join("empty.pcap")).unwrap();
+        let out = load_pcap("empty.pcap", 0, 50, None, None, 0, &c);
+        assert!(out.starts_with("No packets in ") && out.ends_with("empty.pcap."), "{out}");
+    }
+
+    #[test]
+    fn load_offset_past_end_matches_python_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let _ = save_pcap(&[frame(b"a"), frame(b"b")], "p.pcap", &c);
+        let out = load_pcap("p.pcap", 5, 50, None, None, 0, &c);
+        assert!(out.starts_with("Loaded 2 packet(s) from p.pcap (showing 5–4 of 2):"), "{out}");
+    }
+
+    #[test]
+    fn load_honors_file_linktype() {
+        // An `any`-interface (LINUX_SLL) capture must dissect as SLL.
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let mut f = vec![0, 0, 0, 1, 0, 6, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0, 0, 0x08, 0x00];
+        f.extend_from_slice(&[0x45, 0, 0, 28, 0, 1, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2]);
+        f.extend_from_slice(&[8, 0, 0, 0, 0, 1, 0, 1]);
+        let mut w = PcapWriter::create_with_linktype(dir.path().join("any.pcap"), 113).unwrap();
+        w.write_record(1, 0, &f).unwrap();
+        drop(w);
+        let out = load_pcap("any.pcap", 0, 50, None, None, 0, &c);
+        assert!(out.contains("[1] SLL / IP / ICMP 10.0.0.1 > 10.0.0.2 echo-request 0"), "{out}");
+        let hit = load_pcap("any.pcap", 0, 50, Some("echo-request"), None, 0, &c);
+        assert!(hit.starts_with("Loaded 1 matched packet(s)"), "{hit}");
     }
 
     #[test]

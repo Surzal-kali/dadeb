@@ -12,6 +12,15 @@ pub struct CapturedPacket {
     pub data: Vec<u8>,
 }
 
+/// A finished capture: the frames plus the interface's datalink type, which
+/// the pcap writer must stamp into the file header (an `any` sniff is
+/// LINUX_SLL, not Ethernet).
+#[derive(Debug, Clone)]
+pub struct Sniffed {
+    pub linktype: u32,
+    pub packets: Vec<CapturedPacket>,
+}
+
 #[derive(Debug, Clone)]
 pub enum CaptureError {
     Open(String),
@@ -48,30 +57,45 @@ pub fn sniff_error_text(e: &CaptureError) -> String {
     }
 }
 
+/// Idle back-off between empty non-blocking reads. Bounds deadline overshoot
+/// and costs nothing in loss: the kernel ring keeps buffering meanwhile.
+const IDLE_POLL: Duration = Duration::from_millis(10);
+
 /// Capture up to `count` packets matching `bpf` on `interface`, stopping at
 /// `timeout` overall. Empty BPF = no filter.
+///
+/// The deadline is HARD: the handle is non-blocking and the loop checks the
+/// clock between reads. (A blocking `next_packet` is only woken by packets or
+/// the read timeout, and with a BPF filter that drops everything the read
+/// timeout is not reliably delivered — a quiet filter could pin the agent's
+/// tool call far past `timeout`.)
 pub fn sniff(
     interface: &str,
     bpf: &str,
     count: usize,
     timeout: Duration,
-) -> Result<Vec<CapturedPacket>, CaptureError> {
+) -> Result<Sniffed, CaptureError> {
     let mut cap = libpcap::Capture::from_device(interface)
         .map_err(|e| CaptureError::Open(e.to_string()))?
         .promisc(true)
         .snaplen(262_144)
+        .immediate_mode(true) // deliver per-packet, not per ring block
         .timeout(500) // ms — pcap binding takes i32, not a Duration
         .open()
+        .map_err(|e| CaptureError::Open(e.to_string()))?
+        .setnonblock()
         .map_err(|e| CaptureError::Open(e.to_string()))?;
     if !bpf.trim().is_empty() {
         cap.filter(bpf, true)
             .map_err(|e| CaptureError::Filter(e.to_string()))?;
     }
 
+    let linktype = cap.get_datalink().0 as u32;
     let deadline = Instant::now() + timeout;
     let mut out = Vec::new();
     while out.len() < count {
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             break;
         }
         match cap.next_packet() {
@@ -83,11 +107,17 @@ pub fn sniff(
                     data: pkt.data.to_vec(),
                 });
             }
-            Err(libpcap::Error::TimeoutExpired) => {} // read-timeout slice; deadline check next loop
+            // non-blocking: nothing buffered right now
+            Err(libpcap::Error::TimeoutExpired) => {
+                std::thread::sleep(IDLE_POLL.min(deadline - now));
+            }
             Err(e) => return Err(CaptureError::Recv(e.to_string())),
         }
     }
-    Ok(out)
+    Ok(Sniffed {
+        linktype,
+        packets: out,
+    })
 }
 
 #[cfg(all(test, feature = "capture"))]
@@ -145,12 +175,27 @@ mod tests {
         .unwrap_or(false)
     }
 
+    // Real-wire tests — need root (CAP_NET_RAW) + a live interface; run by
+    // hand:  cargo test -p pcap --features capture -- --ignored
+
+    #[test]
+    #[ignore]
+    fn deadline_is_hard_when_filter_matches_nothing() {
+        // Regression: a blocking read with a never-matching filter overran a
+        // 3 s timeout indefinitely.
+        let t = Instant::now();
+        let got = sniff("lo", "udp port 1", 5, Duration::from_secs(2)).expect("capture");
+        assert!(got.packets.is_empty());
+        assert!(t.elapsed() < Duration::from_secs(3), "overran: {:?}", t.elapsed());
+    }
+
     // Real-wire test — needs root + a live interface; run by hand:
     //   cargo test -p pcap --features capture live_loopback -- --ignored
     #[test]
     #[ignore]
     fn live_loopback_capture() {
-        let pkts = sniff("lo", "icmp", 2, Duration::from_secs(10)).expect("capture");
-        assert_eq!(pkts.len(), 2);
+        let got = sniff("lo", "icmp", 2, Duration::from_secs(10)).expect("capture");
+        assert_eq!(got.packets.len(), 2);
+        assert_eq!(got.linktype, crate::dissect::LINKTYPE_ETHERNET); // Linux lo is DLT_EN10MB
     }
 }

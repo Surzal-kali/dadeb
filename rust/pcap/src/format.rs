@@ -86,17 +86,23 @@ pub struct PcapWriter {
 }
 
 impl PcapWriter {
+    /// Ethernet-linktype capture (our crafted/saved frames).
     pub fn create<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        Self::create_with_linktype(path, LINKTYPE_ETHERNET)
+    }
+
+    /// Capture file whose frames are of `linktype` (e.g. the live capture's
+    /// `pcap_datalink`: an `any`-interface sniff is LINUX_SLL, not Ethernet —
+    /// stamping it Ethernet would make every reader misparse it).
+    pub fn create_with_linktype<P: AsRef<Path>>(path: P, linktype: u32) -> std::io::Result<Self> {
         let mut file = BufWriter::new(File::create(path.as_ref())?);
-        let hdr: [u8; 24] = [
-            0xd4, 0xc3, 0xb2, 0xa1, // LE magic
-            0x02, 0x00, 0x04, 0x00, // v2.4
-            0x00, 0x00, 0x00, 0x00, // thiszone 0
-            0x00, 0x00, 0x00, 0x00, // sigfigs 0
-            0x00, 0x00, 0x04, 0x00, // snaplen 262144 (LE)
-            LINKTYPE_ETHERNET.to_le_bytes()[0], LINKTYPE_ETHERNET.to_le_bytes()[1],
-            LINKTYPE_ETHERNET.to_le_bytes()[2], LINKTYPE_ETHERNET.to_le_bytes()[3], // network = LINKTYPE_ETHERNET
-        ];
+        let mut hdr = [0u8; GLOBAL_HEADER_SIZE];
+        hdr[0..4].copy_from_slice(&LE_MAGIC);
+        hdr[4..6].copy_from_slice(&2u16.to_le_bytes()); // v2.4
+        hdr[6..8].copy_from_slice(&4u16.to_le_bytes());
+        // [8..16): thiszone 0, sigfigs 0
+        hdr[16..20].copy_from_slice(&MAX_SNAPLEN.to_le_bytes());
+        hdr[20..24].copy_from_slice(&linktype.to_le_bytes());
         file.write_all(&hdr)?;
         Ok(Self { file, count: 0 })
     }
@@ -178,16 +184,19 @@ impl<R: Read> PcapReader<R> {
             let b: [u8; 4] = buf[start..start + 4].try_into().unwrap();
             if be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
         };
-        let thiszone = i32::from_ne_bytes(word(0, big_endian).to_ne_bytes());
-        let snaplen = word(8, big_endian);
-        let network = word(12, big_endian);
+        // `buf` starts AFTER the 4-byte magic: [0..4) version major/minor,
+        // [4..8) thiszone, [8..12) sigfigs, [12..16) snaplen, [16..20) network.
+        let thiszone = word(4, big_endian) as i32;
+        let sigfigs = word(8, big_endian);
+        let snaplen = word(12, big_endian);
+        let network = word(16, big_endian);
         Ok(Self {
             inner,
             header: GlobalHeader {
                 version_major: major,
                 version_minor: minor,
                 thiszone,
-                sigfigs: 0,
+                sigfigs,
                 snaplen,
                 network,
                 big_endian,
@@ -318,16 +327,22 @@ pub fn count_records<P: AsRef<Path>>(path: P) -> Result<usize, PcapFormatError> 
     Ok(count)
 }
 
-/// Dissect every frame through `dissect::dissect_frame`, preserving 0-based
+/// Dissect every frame per the file's linktype, preserving 0-based
 /// position — the shared walk both the search pipeline and tests use.
 pub fn dissected_frames<P: AsRef<Path>>(
     path: P,
 ) -> Result<Vec<(usize, crate::dissect::FrameView, u32, u32)>, PcapFormatError> {
     let mut reader = PcapReader::open(path)?;
+    let linktype = reader.header().network;
     let mut out = Vec::new();
     let mut idx = 0usize;
     while let Some(rec) = reader.next_record()? {
-        out.push((idx, crate::dissect::dissect_frame(&rec.data), rec.ts_sec, rec.ts_usec));
+        out.push((
+            idx,
+            crate::dissect::dissect_frame_linktype(&rec.data, linktype),
+            rec.ts_sec,
+            rec.ts_usec,
+        ));
         idx += 1;
     }
     Ok(out)
@@ -361,6 +376,26 @@ mod tests {
             ])
             .to_vec()
         );
+    }
+
+    #[test]
+    fn global_header_fields_read_back() {
+        // Regression: fields were read one slot early (snaplen came back as
+        // sigfigs, network as snaplen).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.pcap");
+        PcapWriter::create(&path).unwrap();
+        let r = PcapReader::open(&path).unwrap();
+        let h = r.header();
+        assert_eq!((h.version_major, h.version_minor), (2, 4));
+        assert_eq!(h.thiszone, 0);
+        assert_eq!(h.sigfigs, 0);
+        assert_eq!(h.snaplen, MAX_SNAPLEN);
+        assert_eq!(h.network, LINKTYPE_ETHERNET);
+
+        let path = dir.path().join("sll.pcap");
+        PcapWriter::create_with_linktype(&path, 113).unwrap();
+        assert_eq!(PcapReader::open(&path).unwrap().header().network, 113);
     }
 
     #[test]
@@ -406,6 +441,8 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let mut r = PcapReader::open(&path).unwrap();
         assert!(r.header().big_endian);
+        assert_eq!(r.header().snaplen, 262_144);
+        assert_eq!(r.header().network, 1);
         let rec = r.next_record().unwrap().unwrap();
         assert_eq!(rec.data, vec![0xde, 0xad]);
     }
@@ -477,7 +514,3 @@ mod tests {
         );
     }
 }
-
-// silence unused import when trait not needed
-#[allow(dead_code)]
-fn _unused(_: fn()) {}
