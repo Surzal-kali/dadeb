@@ -86,6 +86,9 @@ def launch_job(
     verdict_parser: Callable[[str], dict[str, Any]] | None = None,
     env: dict[str, str] | None = None,
     agent_id: str | None = None,
+    target: str | None = None,
+    fleet_body: str = "",
+    override_slots: int | None = None,
 ) -> dict[str, Any]:
     """Launch a background subprocess and return immediately with a job_id.
 
@@ -118,19 +121,75 @@ def launch_job(
         Optional explicit owner identity; defaults to the resolved ambient
         identity the dispatch lane set (executor/gateway). Anonymous
         callers are minted upstream — no silent shared-session default.
+    target
+        Optional fleet-accounting axis (URL/host/path). When present the
+        unit goes through ``utils.fleet_scheduler.request_unit`` FIRST:
+        ``duplicate`` returns the running unit's job_id to poll instead of
+        launching; ``refused`` returns the structured refusal; on
+        ``acquired`` the job launches and binds inline. Traffic-sending
+        callers pass this so the per-host courtesy contract (scale-doctrine
+        rule 6) covers every launch, fleet or not.
+    fleet_body
+        Request-body shape hint for the canonical key (field NAMES, never
+        values) — matters only for targets whose identity includes POST
+        params.
+    override_slots
+        Explicit slot-raise request (scheduler stamps a warning; the
+        absolute ceiling cannot be exceeded).
 
     Returns
     -------
     dict
-        ``{"job_id", "status": "running", "log_file", "tool", "started",
-        "agent_id", "message"}`` — the caller hands ``job_id`` to its poll
-        function.
+        Without ``target``: the classic launch envelope —
+        ``{"job_id", "status": "running", ...}``.  With ``target``: the
+        launch envelope carries the fleet decision fields (``unit_key``,
+        ``slot_contract``); a ``duplicate``/``refused`` decision replaces
+        it with a no-launch envelope (``status: "duplicate"`` /
+        ``status: "refused"`` + ``reason``) that callers return to the
+        model verbatim.
     """
     store = get_store()
     owner = agent_id or current_agent_id()
     if verdict_parser is not None:
         store.register_parser(tool_name, verdict_parser)
-    return store.launch(
+
+    # --- Fleet accounting (optional lane): scheduler decides BEFORE spawn.
+    if target:
+        from utils.fleet_scheduler import get_scheduler
+
+        decision = get_scheduler().request_unit(
+            tool_name,
+            target,
+            agent_id=owner,
+            body=fleet_body or "",
+            override_slots=override_slots,
+        )
+        if decision["decision"] == "duplicate":
+            return {
+                "status": "duplicate",
+                "job_id": decision.get("job_id"),
+                "unit_key": decision.get("unit_key"),
+                "started_by": decision.get("agent_id"),
+                "started": decision.get("started"),
+                "message": decision.get(
+                    "message",
+                    "an identical unit is already running; poll its job_id",
+                ),
+            }
+        if decision["decision"] == "refused":
+            return {
+                "status": "refused",
+                "reason": decision.get("reason"),
+                "unit_key": decision.get("unit_key"),
+                "message": decision.get("message", "scheduler refused the unit"),
+                "detail": {
+                    k: v
+                    for k, v in decision.items()
+                    if k not in ("decision", "message")
+                },
+            }
+
+    result = store.launch(
         command,
         tool_name=tool_name,
         agent_id=owner,
@@ -138,6 +197,15 @@ def launch_job(
         log_dir=log_dir,
         env=env,
     )
+    if target:
+        from utils.fleet_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        scheduler.bind_job(decision["unit_key"], result["job_id"])
+        result["unit_key"] = decision["unit_key"]
+        if decision.get("warning"):
+            result["warning"] = decision["warning"]
+    return result
 
 
 def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:

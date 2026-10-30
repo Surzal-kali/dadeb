@@ -424,6 +424,72 @@ launching store reaps via live `Popen.poll()`; pid-probe is the
 cross-lane fallback; terminate-grace uses `waitpid(WNOHANG)` so the
 kill path can't stall on our own zombies.
 
+### Fleet scheduler — Phase 1 (`utils/fleet_scheduler.py`, scale-doctrine Annex C)
+
+Per-host concurrency regulator + dedupe ledger over the job store — the
+coherence primitive for fleet adapters (sqlmap fleet first, Phase 2).
+Accounting axis is the TARGET HOST, not the agent; NOT a process
+supervisor (adapters launch via `utils.job_store`; the scheduler decides
+may-this-start/dedupe/wait per unit).
+
+Adapter contract (each adapter contributes only these; scheduling logic
+is never copied between adapters):
+
+1. `request_unit(tool, target, agent_id=..., body=...)` — decision
+   envelope: `acquired` (launch now via job store, then `bind_job`),
+   `duplicate` (a live unit with the same canonical key runs — POLL its
+   `job_id`, never launch a second process), or `refused`
+   (`slots_exhausted` | `host_serialized_auth`, with guidance).
+2. Canonical key = `<tool>:<host>:<path>:<hash>` where the hash covers
+   param/field NAMES only (shape keys — per-run CSRF/nonce values must
+   not fork units). Never key on raw body bytes.
+3. `release_unit` when the unit's job finishes (owner or `force=True`).
+
+Policy (rules 6/7, env `FLEET_*`): per-host slots default 2 with an
+ABSOLUTE hard ceiling 4 (override above it is refused; raising above
+default needs explicit `override_slots` + a warning stamped on the
+envelope). Auth-adjacent units (`FLEET_AUTH_ADJACENT_RE` —
+login/auth/session/token/...) hold the host exclusively in both
+directions. Crash-stale reclaim (`sweep_stale()`, runs inside every
+request): finished-job (VERIFIED exit only — a missing job row is not
+proof of completion), jobless past `FLEET_BIND_GRACE_S`, or past
+`FLEET_UNIT_TTL_HOURS`. Storage `run/fleet/fleet.db`; rows are
+agent-attributed and cross-actor visible (dedupe is the point);
+`fleet_host_status` is the observability lens (`@framework_tool`,
+infra tag — `utils/` runs in-process, cookie-jar lane).
+
+### sqlmap fleet adapter — Phase 2 (`payloads/sqlmap.py`, scale-doctrine Annex D)
+
+Annex A over the Phase 0/1 substrate. The scheduler rides the **launch
+path**, not a parallel API: `launch_job(..., target=..., fleet_body=...,
+override_slots=...)` (`utils/background_job.py`) runs `request_unit →
+launch → bind_job` atomically — duplicate/refused decisions return
+WITHOUT launching (structured envelopes the model reads). Single-target
+`run_sqlmap` IS one fleet unit, so single launches and fleet fanouts
+share the per-host courtesy contract; adapters opt in with one kwarg.
+Models never touch `request_unit` themselves — acquire-and-use is one
+step inside the tool body (a model that could hold slots without
+launching would DoS the host table).
+
+Adapter contributions (the only per-tool pieces): policy table
+(`_build_sqlmap_command`: forced `--batch`, threads policy
+`--threads=1`, per-unit `--output-dir=run/sqlmap_fleet/<key>/` +
+`-t traffic.log`, caller options last, `--purge` REFUSED per rule 5),
+aggregator (`_aggregate_log`: verdict + technique tags + params), and
+the fleet twins: `run_sqlmap_fleet(targets) -> fleet_id` (per-unit
+acquired/duplicate/refused/scope-blocked), `sqlmap_fleet_status`
+(releases finished units), `sqlmap_fleet_results(dedupe=param|host)`
+(rule 8: rows cite `traffic.log`), `sqlmap_fleet_stop` (ownership
+fenced). `fleet_id` records live in the scheduler's generic batch
+registry (PK `(batch_id, seq)` — same-shape targets in one batch are
+two decisions, not one row).
+
+**Verdict parsers are process-wide**: `utils/job_store._PARSERS` is
+module-level, NOT per-instance — the env-override singleton dance
+(launch on instance A, poll on instance B) silently parsed nothing when
+the registry was instance state. A job's fleet unit is released at the
+first `done` poll; `sweep_stale` stays the crash backstop.
+
 ### Memory Service (`memories.py`)
 
 SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections

@@ -3,27 +3,34 @@
 sqlmap is inherently long-running: a real crawl+scan over many injectable
 parameters can take minutes to tens of minutes. A *blocking* ``run_sqlmap``
 holds the entire secretary turn open for the scan's full runtime and fights
-the turn timeout no matter how large the budget. Instead this module uses the
-same shape the ZAP tools already use (``zap_spider`` returns a scan id,
-``zap_spider_status`` polls it):
+the turn timeout no matter how large the budget. Instead this module uses
+the ZAP shape (``zap_spider`` returns a scan id, ``zap_spider_status``
+polls it):
 
-- ``run_sqlmap(target_url, options)`` launches sqlmap as a background
-  ``subprocess.Popen`` and returns immediately with a ``job_id`` plus a log
-  file path. The secretary turn is NOT held open.
-- ``sqlmap_status(job_id)`` polls the job: checks whether the process is
-  still alive, tails the log, and parses a verdict (injectable / not
-  injectable / still running) so the model can decide whether to keep
-  polling or call ``report_finding``.
+- ``run_sqlmap(target_url, options)`` launches sqlmap as a background job
+  and returns immediately with a ``job_id`` plus a log file path. The
+  secretary turn is NOT held open. Routes through the Phase 0 job store
+  AND the Phase 1 fleet scheduler (``launch_job(target=...)``) — one
+  canonical unit per target, per-host slot policy enforced.
+- ``sqlmap_status(job_id)`` polls the job: running/done + a parsed verdict
+  (injectable / not injectable / still running) so the model can decide
+  whether to keep polling or call ``report_finding``.
+
+Fleet mode (Phase 2, scale-doctrine Annex A): ``run_sqlmap_fleet`` fans a
+list of target URLs across the fleet scheduler — one per-target unit,
+canonical shape keys, per-host slot policy, per-unit ``--output-dir``
+session isolation; ``sqlmap_fleet_status`` / ``sqlmap_fleet_results`` /
+``sqlmap_fleet_stop`` are the poll/aggregate/stop twins.
 
 Non-interactivity is enforced defensively on two layers:
 
 1. ``--batch`` is auto-injected when the caller omits it (sqlmap otherwise
    prompts on stdin: "do you want to test this URL? [Y/n/q]", ...).
-2. ``stdin=subprocess.DEVNULL`` so any future unsuppressed prompt reads EOF
-   and never blocks.
+2. ``stdin=subprocess.DEVNULL`` (in the job-store launcher) so any future
+   unsuppressed prompt reads EOF and never blocks.
 
-A wall-clock cap (``SQLMAP_TIMEOUT``, default 1800s) reaps a wedged scan via
-a ``threading.Timer`` so the subprocess can't run forever; the poll then
+A wall-clock cap (``SQLMAP_TIMEOUT``, default 1800s) is enforced by the
+job store's shared reaper (a cap kill stamps ``timed_out``); the poll
 reports the timeout with the partial log.
 """
 
@@ -32,25 +39,10 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import subprocess
-import threading
-import time
-import uuid
-from typing import Any, Dict
+from typing import Any
 
 from constants import framework_tool
-from utils.background_job import register_verdict_parser
-
-
-# In-process job registry. One entry per live or recently-finished scan so the
-# secretary can poll across turns. Capped to avoid unbounded growth in long
-# sessions; oldest finished jobs are evicted first.
-_MAX_JOBS = 64
-_JOBS: Dict[str, Dict[str, Any]] = {}
-_JOBS_LOCK = threading.Lock()
-
-# Log directory for per-job sqlmap output. Created lazily.
-_LOG_DIR = os.getenv("SQLMAP_LOG_DIR", "/tmp")
+from utils.background_job import launch_job, poll_job, register_verdict_parser, terminate_job
 
 
 def _inject_batch(extra: list[str]) -> list[str]:
@@ -145,109 +137,35 @@ def run_sqlmap(target_url: str, options: str = "") -> dict[str, Any]:
         raise ScopeGateError(f"scope gate: {_sc_reason}")
 
     # -u takes the URL as its own argv element; never interpolate it into a
-    # shell string.
-    extra = shlex.split(options) if options else []
-    extra = _inject_batch(extra)
-    command = ["sqlmap", "-u", target_url, *extra]
+    # shell string. Policy defaults (threads, per-unit output dir) come from
+    # _build_sqlmap_command; caller options come LAST so explicit flags win.
+    command = _build_sqlmap_command(target_url, options)
 
-    job_id = uuid.uuid4().hex[:8]
-    log_path = os.path.join(_LOG_DIR, f"sqlmap_{job_id}.log")
-    meta_path = os.path.join(_LOG_DIR, f"sqlmap_{job_id}.meta")
-    started = time.time()
-
-    cap = float(os.getenv("SQLMAP_TIMEOUT", "1800"))
-
-    log_fh = open(log_path, "w", buffering=1)  # line-buffered so polls see live progress
-    proc = subprocess.Popen(
+    # launch_job(target=...) routes through the fleet scheduler: a duplicate
+    # (same canonical unit already running) returns the running job's id to
+    # poll; a refusal returns the structured slot/auth-adjacent envelope.
+    # Neither launches a process.
+    result = launch_job(
         command,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        # Detach into its own session so the scan keeps running even if the
-        # launcher thread/process dies unexpectedly -- the poll reads the log
-        # and reaps via the reaper timer, so an orphaned scan is still
-        # observable and bounded, not silently killed with its parent.
-        start_new_session=True,
+        tool_name="sqlmap",
+        timeout=float(os.getenv("SQLMAP_TIMEOUT", "1800")),
+        target=target_url,
+        fleet_body=_extract_data_body(options),
+        verdict_parser=_parse_verdict,
     )
 
-    entry: dict[str, Any] = {
-        "job_id": job_id,
-        "target": target_url,
-        "options": options,
-        "log_file": log_path,
-        "meta_file": meta_path,
-        "started": started,
-        "cap": cap,
-        "proc": proc,
-        "log_fh": log_fh,
-        "timed_out": False,
-    }
-
-    # Disk sidecar so a job survives a harness restart and can be polled from
-    # a different process. The in-process _JOBS entry is the fast path (live
-    # Popen handle); the sidecar is the durable fallback (log + pid).
-    import json as _json
-    try:
-        with open(meta_path, "w") as f:
-            _json.dump(
-                {
-                    "job_id": job_id,
-                    "tool": "sqlmap",
-                    "target": target_url,
-                    "options": options,
-                    "log_file": log_path,
-                    "started": started,
-                    "cap": cap,
-                    "pid": proc.pid,
-                },
-                f,
-            )
-    except OSError:
-        pass
-
-    # Reap the subprocess if it exceeds the wall-clock cap so a wedged scan
-    # can't run forever. The timer does NOT block the caller; it fires later
-    # in a daemon thread and the next poll observes the timeout.
-    def _reaper(p: subprocess.Popen, fh: Any, jid: str) -> None:
-        try:
-            p.wait(timeout=cap)
-        except subprocess.TimeoutExpired:
-            p.terminate()
-            try:
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                p.kill()
-            with _JOBS_LOCK:
-                j = _JOBS.get(jid)
-                if j:
-                    j["timed_out"] = True
-            try:
-                fh.write(f"\n[sqlmap reaper] exceeded {cap:.0f}s wall-clock; terminated\n")
-            except Exception:
-                print(f"[sqlmap reaper] exceeded {cap:.0f}s wall-clock; terminated (failed to write to log)")
-
-    t = threading.Thread(target=_reaper, args=(proc, log_fh, job_id), daemon=True)
-    entry["_reaper"] = t
-    t.start()
-
-    with _JOBS_LOCK:
-        _JOBS[job_id] = entry
-        # Evict oldest finished jobs if we've grown past the cap.
-        if len(_JOBS) > _MAX_JOBS:
-            finished = sorted(
-                (k for k, v in _JOBS.items() if v["proc"].poll() is not None),
-                key=lambda k: _JOBS[k]["started"],
-            )
-            for k in finished[: len(_JOBS) - _MAX_JOBS]:
-                _cleanup_job(k)
+    if result.get("status") == "duplicate":
+        return result  # includes the running unit's job_id to poll
+    if result.get("status") == "refused":
+        return result  # slots_exhausted / host_serialized_auth, with guidance
 
     return {
-        "job_id": job_id,
+        "job_id": result["job_id"],
         "status": "running",
-        "log_file": log_path,
+        "log_file": result["log_file"],
         "target": target_url,
-        "started": started,
+        "unit_key": result.get("unit_key"),
+        "started": result["started"],
         "message": (
             "launch accepted; perform one status poll to confirm the job is "
             "running, then hand off to the user. Poll again only when the "
@@ -276,83 +194,34 @@ def sqlmap_status(job_id: str) -> dict[str, Any]:
     Args:
         job_id: The ``job_id`` returned by ``run_sqlmap``.
     """
-    with _JOBS_LOCK:
-        entry = _JOBS.get(job_id)
-
-    # Durable fallback: if the job isn't in this process's _JOBS (e.g. it was
-    # started before a harness restart, or this is a different process), try
-    # to reconstruct it from the disk sidecar. We never get a live Popen
-    # handle back, but the log file + the recorded pid are enough to tell
-    # running from done and to parse a verdict.
-    if entry is None:
-        entry = _reconstruct_job(job_id)
-
-    if entry is None:
-        return {
-            "job_id": job_id,
-            "status": "unknown",
-            "error": f"no sqlmap job with id {job_id!r} (it may have been evicted)",
-        }
-
-    proc: subprocess.Popen | None = entry.get("proc")
-    rc: int | None
-    if proc is not None:
-        rc = proc.poll()
-    else:
-        # Reconstructed job: infer liveness from the recorded pid and the log.
-        rc = _pid_status(entry)
-    elapsed = time.time() - entry["started"]
-    timed_out = entry.get("timed_out", False)
-
-    # Poll-side cap enforcement (defense-in-depth alongside the launcher's
-    # reaper thread). The reaper lives in the launcher process; if that
-    # process has exited (or restarted), the reaper is gone and an
-    # over-running scan would otherwise run forever. Whoever polls reaps it
-    # here, so the cap is honoured even across harness restarts.
-    cap = float(entry.get("cap", 0) or 0)
-    if rc is None and not timed_out and cap and elapsed > cap:
-        _terminate_job(entry)
-        timed_out = True
-        if proc is not None:
-            rc = proc.poll()
-        else:
-            rc = _pid_status(entry)  # now dead -> exit code
-        try:
-            with open(entry["log_file"], "a") as fh:
-                fh.write(f"\n[sqlmap poll-reaper] exceeded {cap:.0f}s wall-clock; terminated\n")
-        except OSError:
-            pass
-
-    log_text = _read_log(entry["log_file"])
-    parsed = _parse_verdict(log_text)
-    recent = _tail(log_text, 20)
-
-    if rc is None and not timed_out:
-        status = "running"
-    else:
-        status = "done"
-
-    result: dict[str, Any] = {
-        "job_id": job_id,
-        "status": status,
-        "exit_code": rc if rc is not None else None,
-        "elapsed": round(elapsed, 1),
-        "injectable": parsed["injectable"],
-        "dbms": parsed["dbms"],
-        "verdict": parsed["verdict"],
-        "timed_out": timed_out,
-        "recent_lines": recent,
-        "log_file": entry["log_file"],
-    }
-    if status == "done":
-        # Surface the full output on completion so the secretary has the
-        # evidence needed for report_finding, but cap it so a giant dump
-        # doesn't blow out the model context.
-        result["full_output"] = log_text[-8000:]
+    result = poll_job(job_id)
+    if result.get("status") == "unknown":
+        return result
+    # Fleet release: a finished job must free its scheduler slot.
+    if result["status"] == "done":
+        _release_unit_for_job(job_id)
     return result
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _release_unit_for_job(job_id: str) -> None:
+    """Free the fleet unit whose bound job finished (best-effort: the unit
+    key lives in the scheduler table; job_id -> unit_key is a reverse
+    look-up, and a unit already released/stale is simply a no-op)."""
+    try:
+        from utils.fleet_scheduler import get_scheduler
+
+        sched = get_scheduler()
+        rows = sched.conn.execute(
+            "SELECT unit_key FROM fleet_units WHERE job_id = ? AND status = 'running'",
+            (job_id,),
+        ).fetchall()
+        for r in rows:
+            sched.release_unit(r["unit_key"], force=True)  # poll-side release is bookkeeping, not a cross-agent stop
+    except Exception:
+        pass  # scheduling bookkeeping must never break a status poll
 
 
 def _read_log(path: str) -> str:
@@ -363,94 +232,11 @@ def _read_log(path: str) -> str:
         return ""
 
 
-def _reconstruct_job(job_id: str) -> dict[str, Any] | None:
-    """Rebuild a job entry from the disk sidecar when it's not in _JOBS.
-
-    Used after a harness restart (or from a different process) so polls keep
-    working. There is no live Popen handle, so liveness is inferred from the
-    recorded pid (``os.kill(pid, 0)``) plus sqlmap's ``[*] ending @`` log line.
-    """
-    import json as _json
-    meta_path = os.path.join(_LOG_DIR, f"sqlmap_{job_id}.meta")
-    try:
-        with open(meta_path) as f:
-            meta = _json.load(f)
-    except (OSError, _json.JSONDecodeError):
-        return None
-    return {
-        "job_id": job_id,
-        "target": meta.get("target", ""),
-        "options": meta.get("options", ""),
-        "log_file": meta.get("log_file", os.path.join(_LOG_DIR, f"sqlmap_{job_id}.log")),
-        "meta_file": meta_path,
-        "started": meta.get("started", time.time()),
-        "cap": meta.get("cap", float(os.getenv("SQLMAP_TIMEOUT", "1800"))),
-        "proc": None,  # no live handle
-        "pid": meta.get("pid"),
-        "log_fh": None,
-        "timed_out": False,
-        "_reconstructed": True,
-    }
-
-
-def _terminate_job(entry: dict[str, Any]) -> None:
-    """Terminate a running sqlmap job: terminate() then kill() the live Popen,
-    or, for a reconstructed job with only a pid, send SIGTERM/SIGKILL directly.
-    """
-    proc: subprocess.Popen | None = entry.get("proc")
-    if proc is not None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        return
-    pid = entry.get("pid")
-    if not pid:
-        return
-    import signal
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        return
-    # Give it a moment to die, then SIGKILL if still alive.
-    for _ in range(20):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        except OSError:
-            return
-        time.sleep(0.25)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except OSError:
-        pass
-
-
-def _pid_status(entry: dict[str, Any]) -> int | None:
-    """For a reconstructed job: return the process exit code if it has exited,
-    or None if it's still running. Falls back to the log's ``ending`` marker
-    when the pid is gone but we can't read an exit code.
-    """
-    pid = entry.get("pid")
-    log_text = _read_log(entry["log_file"])
-    if pid is not None:
-        try:
-            os.kill(pid, 0)  # signal 0 = liveness probe, no signal sent
-            # Process still alive.
-            return None
-        except ProcessLookupError:
-            # Exited. We can't recover the exact exit code without waitpid on
-            # our own child (this isn't our child), so report 0 to mean "done".
-            return 0 if "[*] ending @" not in log_text else 0
-        except PermissionError:
-            # Exists but not ours to signal -- treat as still running.
-            return None
-    # No pid recorded: rely on sqlmap's own completion marker.
-    return 0 if "[*] ending @" in log_text else None
+def _reconstruct_job(job_id: str) -> dict[str, Any] | None:  # pragma: no cover - legacy shim
+    """Legacy no-op: the Phase 0 job store owns reconstruction (indexed row
+    lookup replaces the /tmp sidecar scan). Kept so stale internal imports
+    don't break — internal callers only, not the public surface."""
+    return None
 
 
 def _tail(text: str, n: int) -> list[str]:
@@ -462,11 +248,402 @@ def _tail(text: str, n: int) -> list[str]:
     return lines[-n:]
 
 
-def _cleanup_job(job_id: str) -> None:
-    entry = _JOBS.pop(job_id, None)
-    if not entry:
-        return
+# --- Annex A policy table (the adapter's contribution rule 9) ------------------
+
+
+def _extract_data_body(options: str) -> str:
+    """Pull the ``--data=...`` body out of the options string (feeds the
+    fleet unit's canonical-key shape). Returns '' when absent.\"\"\""""
     try:
-        entry["log_fh"].close()
-    except Exception:
-        print(f"[sqlmap cleanup] failed to close log file for job {job_id}")
+        parts = shlex.split(options or "")
+    except ValueError:
+        return ""
+    for i, p in enumerate(parts):
+        if p == "--data" and i + 1 < len(parts):
+            return parts[i + 1]
+        if p.startswith("--data="):
+            return p[len("--data="):]
+    return ""
+
+
+def _classify_threads(options: str) -> str:
+    """Annex A threads policy. Conservative: time-based oracles are serial
+    conversations — parallel char bisection turns the delay into noise on
+    the oracle — so 1 thread unless the caller explicitly overrides."""
+    return "--threads=1"
+
+
+def _reject_forbidden_flags(extra: list[str]) -> str | None:
+    """Doctrine rule 5: bulk state wipes are FORBIDDEN in any fleet path.
+    ``--purge`` targets sqlmap's SHARED global data dir — one actor's purge
+    must never destroy every other actor's running sessions."""
+    for flag in extra:
+        if flag == "--purge" or flag.startswith("--purge="):
+            return (
+                "--purge is forbidden: it wipes sqlmap's shared data dir and "
+                "would destroy other concurrent units' sessions. Per-unit "
+                "re-testing uses --flush-session instead."
+            )
+    return None
+
+
+def _build_sqlmap_command(
+    target_url: str, options: str, *, output_dir: str | None = None
+) -> list[str]:
+    """Assemble the launch line (Annex A launch-line shape): forced batch,
+    threads policy, per-unit output dir (session isolation == resume per
+    unit), per-unit traffic.log (the finding-citable artifact). Caller
+    options come LAST so explicit caller flags always win over policy
+    defaults (the nmap/shaping ordering convention)."""
+    extra = shlex.split(options) if options else []
+    extra = _inject_batch(extra)
+    forbidden = _reject_forbidden_flags(extra)
+    if forbidden:
+        raise ValueError(forbidden)
+    policy: list[str] = []
+    if not any(a.startswith("--threads") for a in extra):
+        policy.append(_classify_threads(options))
+    if output_dir and not any(a.startswith("--output-dir") for a in extra):
+        policy.append(f"--output-dir={output_dir}")
+        policy.append(f"-t={os.path.join(output_dir, 'traffic.log')}")
+    return ["sqlmap", "-u", target_url, *policy, *extra]
+
+
+def _aggregate_log(log_text: str, target: str, log_file: str) -> dict[str, Any]:
+    """Per-unit aggregator (doctrine §4e): verdict + technique tags +
+    affected params, deduped upstream by the caller (§4f results twin)."""
+    parsed = _parse_verdict(log_text)
+    params: list[str] = []
+    for m in re.finditer(r"Parameter '([^']+)'", log_text or ""):
+        if m.group(1) not in params:
+            params.append(m.group(1))
+    techniques: list[str] = []
+    for tag, pat in (
+        ("boolean", r"boolean-based blind"),
+        ("error", r"error-based"),
+        ("union", r"UNION query"),
+        ("time", r"time-based blind"),
+        ("stacked", r"stacked queries"),
+    ):
+        if re.search(pat, log_text or "", re.IGNORECASE):
+            techniques.append(tag)
+    return {
+        "target": target,
+        "injectable": parsed["injectable"],
+        "dbms": parsed["dbms"],
+        "verdict": parsed["verdict"],
+        "params": params,
+        "techniques": techniques,
+        "log_file": log_file,
+    }
+
+
+# --- Fleet surface (Phase 2, doctrine §4f twins) --------------------------------
+
+
+@framework_tool(
+    "FAN OUT sqlmap across a list of target URLs: one scheduler unit per "
+    "target (canonical shape keys dedupe, per-host slot policy applies, "
+    "per-unit --output-dir isolates sessions and enables resume). Returns a "
+    "fleet_id you poll with sqlmap_fleet_status; refusals/duplicates are "
+    "reported per unit, not fatal. Use for MANY targets; for one target use "
+    "run_sqlmap (same scheduler, same contract). Honours the scope gate per "
+    "unit.",
+    tags=["web.fuzz"],
+    next_hints=["sqlmap_fleet_status", "sqlmap_fleet_results"],
+)
+def run_sqlmap_fleet(
+    targets: list[str], options: str = "", override_slots: int | None = None
+) -> dict[str, Any]:
+    """Launch sqlmap fleet units, one per target URL, through the scheduler.
+
+    Args:
+        targets: Target URLs to test (each becomes one canonical unit).
+        options: sqlmap options string applied to every unit (shared level/
+            risk/tamper policy). ``--purge`` is rejected (rule 5).
+        override_slots: Explicit per-host slot raise (scheduler warns; the
+            absolute ceiling cannot be exceeded).
+
+    Returns the fleet envelope: ``fleet_id`` + per-unit decisions
+    (acquired/duplicate/refused). ``duplicate`` units carry the running
+    job's id — poll it, never relaunch (the scheduler refused to).
+    """
+    if not targets:
+        return {"status": "error", "error": "no targets given"}
+    from utils.fleet_scheduler import canonical_unit_key, get_scheduler
+    from utils.scope_gate import check_scan
+
+    units: dict[str, dict[str, Any]] = {}
+    seq_rows: list[tuple[int, str, str, str]] = []
+    scope_blocks: list[str] = []
+    launched = 0
+
+    for seq, target in enumerate(targets):
+        target = (target or "").strip()
+        if not target:
+            continue
+        ok, reason = check_scan(target)
+        if not ok:
+            scope_blocks.append(f"{target}: {reason}")
+            unit_key = canonical_unit_key("sqlmap", target)
+            seq_rows.append((seq, unit_key, target, f"blocked|{reason}"))
+            units[str(seq)] = {"target": target, "decision": "blocked", "reason": reason}
+            continue
+
+        command = _build_sqlmap_command(
+            target, options, output_dir=_unit_output_dir(target)
+        )
+        result = launch_job(
+            command,
+            tool_name="sqlmap",
+            timeout=float(os.getenv("SQLMAP_TIMEOUT", "1800")),
+            target=target,
+            fleet_body=_extract_data_body(options),
+            override_slots=override_slots,
+            verdict_parser=_parse_verdict,
+        )
+        decision = result.get("status", "running")
+        if decision == "running":  # classic launch envelope == acquired
+            decision = "acquired"
+            launched += 1
+        unit_key = result.get("unit_key", canonical_unit_key("sqlmap", target))
+        if decision in ("duplicate", "refused"):
+            detail = f"{decision}|{result.get('job_id') or result.get('reason', '')}"
+            seq_rows.append((seq, unit_key, target, detail))
+            # Normalize: refused/duplicate envelopes carry status+reason —
+            # expose them as `decision` so the count fields and downstream
+            # status polling see one shape.
+            result["decision"] = decision
+            units[str(seq)] = {"target": target, **result}
+        else:
+            seq_rows.append((seq, unit_key, target, f"acquired|job:{result['job_id']}"))
+            units[str(seq)] = {
+                "target": target,
+                "decision": "acquired",
+                "job_id": result["job_id"],
+                "log_file": result["log_file"],
+                "unit_key": unit_key,
+            }
+            if result.get("warning"):
+                units[str(seq)]["warning"] = result["warning"]
+
+    from utils.agent_identity import current_agent_id
+
+    fleet_id = get_scheduler().create_batch("sqlmap", current_agent_id(), seq_rows)
+    summary = {
+        "status": "ok" if launched or units else "nothing-to-do",
+        "fleet_id": fleet_id,
+        "requested": len(targets),
+        "acquired": launched,
+        "duplicates": sum(1 for u in units.values() if u.get("decision") == "duplicate"),
+        "refused": sum(1 for u in units.values() if u.get("decision") == "refused"),
+        "scope_blocked": scope_blocks,
+        "units": units,
+        "message": (
+            f"{launched} unit(s) launched; poll sqlmap_fleet_status('{fleet_id}') "
+            "once to confirm, then hand off. Do not poll in a loop."
+        ),
+    }
+    return summary
+
+
+def _unit_output_dir(target: str) -> str:
+    """Per-unit isolated state dir (rule 5): session SQLite + traffic.log
+    live under run/sqlmap_fleet/<key>/ so crash-restart resume is
+    trivially per-unit and bulk wipes never enter the lane."""
+    from utils.fleet_scheduler import canonical_unit_key
+    from constants import resolve_workspace_root
+
+    key = canonical_unit_key("sqlmap", target)
+    base = resolve_workspace_root() / "run" / "sqlmap_fleet" / key.replace(":", "_")
+    base.mkdir(parents=True, exist_ok=True)
+    return str(base)
+
+
+@framework_tool(
+    "Poll a sqlmap fleet: per-unit running/done/verdict summary across every "
+    "unit in the batch. Call once to confirm launch, then only when the user "
+    "asks for an update. When units are done, follow with sqlmap_fleet_results "
+    "for the deduped finding-ready aggregate.",
+    tags=["web.fuzz"],
+    next_hints=["sqlmap_fleet_results", "sqlmap_fleet_stop"],
+)
+def sqlmap_fleet_status(fleet_id: str) -> dict[str, Any]:
+    """Status of every unit in one fleet batch.
+
+    Args:
+        fleet_id: The ``fleet_id`` returned by ``run_sqlmap_fleet``.
+    """
+    from utils.fleet_scheduler import get_scheduler
+
+    batch = get_scheduler().batch_status(fleet_id)
+    if batch.get("status") == "unknown":
+        return batch
+    out: dict[str, Any] = {**batch, "unit_status": {}}
+    done = 0
+    running = 0
+    for u in batch["units"]:
+        if u["decision"] != "acquired" or not u["job_id"]:
+            out["unit_status"][str(u["seq"])] = {"decision": u["decision"]}
+            continue
+        poll = poll_job(u["job_id"])
+        st = poll.get("status", "unknown")
+        out["unit_status"][str(u["seq"])] = {
+            "target": u["target"],
+            "job_id": u["job_id"],
+            "status": st,
+            "injectable": poll.get("injectable"),
+            "dbms": poll.get("dbms"),
+            "timed_out": poll.get("timed_out"),
+        }
+        if st == "done":
+            done += 1
+            _release_unit_for_job(u["job_id"])
+        elif st == "running":
+            running += 1
+    out["running"] = running
+    out["done"] = done
+    if running == 0 and batch["status"] == "running":
+        from utils.fleet_scheduler import FleetScheduler
+        with get_scheduler()._lock:
+            get_scheduler().conn.execute(
+                "UPDATE fleet_batches SET status = 'complete', finished = ? "
+                "WHERE batch_id = ?",
+                (__import__("time").time(), fleet_id),
+            )
+            get_scheduler().conn.commit()
+        out["status"] = "complete"
+    out["message"] = (
+        f"{done} done, {running} running. "
+        + (
+            "All units settled — call sqlmap_fleet_results for the aggregate."
+            if running == 0
+            else "Poll again only when the user requests an update."
+        )
+    )
+    return out
+
+
+@framework_tool(
+    "Aggregate a finished sqlmap fleet into finding-ready rows: per unique "
+    "(host, param, technique) triple with the excerpt + the per-unit "
+    "traffic.log path as citable evidence (rule 8: findings cite artifacts). "
+    "Deduplicates across units; feed each unique triple to report_finding.",
+    tags=["web.fuzz", "infra"],
+    next_hints=["report_finding"],
+)
+def sqlmap_fleet_results(
+    fleet_id: str, dedupe: str = "param", excerpts: bool = True
+) -> dict[str, Any]:
+    """Deduped results across a fleet batch.
+
+    Args:
+        fleet_id: The ``fleet_id`` from ``run_sqlmap_fleet``.
+        dedupe: ``param`` (host+param+technique) | ``host`` (host only).
+        excerpts: Include the corroborating log line per row.
+    """
+    from utils.fleet_scheduler import get_scheduler
+
+    batch = get_scheduler().batch_status(fleet_id)
+    if batch.get("status") == "unknown":
+        return batch
+    seen: dict[tuple, dict[str, Any]] = {}
+    scanned = 0
+    for u in batch["units"]:
+        if u["decision"] != "acquired" or not u["job_id"]:
+            continue
+        poll = poll_job(u["job_id"])
+        log_file = poll.get("log_file", "")
+        if not log_file:
+            continue
+        try:
+            with open(log_file, errors="replace") as fh:
+                log_text = fh.read()
+        except OSError:
+            continue
+        scanned += 1
+        agg = _aggregate_log(log_text, u["target"], log_file)
+        if not agg["injectable"]:
+            continue
+        technique_key = "+".join(agg["techniques"]) or "unknown"
+        if dedupe == "host":
+            key = (agg["target"].split("/")[2] if "//" in agg["target"] else agg["target"],)
+        else:
+            param = agg["params"][0] if agg["params"] else "*"
+            key = (
+                agg["target"].split("/")[2] if "//" in agg["target"] else agg["target"],
+                param,
+                technique_key,
+            )
+        if key not in seen:
+            row = {
+                "host": key[0],
+                "param": None if dedupe == "host" else (agg["params"][0] if agg["params"] else "*"),
+                "techniques": agg["techniques"],
+                "dbms": agg["dbms"],
+                "targets": [agg["target"]],
+                "traffic_log": os.path.join(os.path.dirname(agg["log_file"]), "traffic.log"),
+                "unit_log": agg["log_file"],
+            }
+            if excerpts and agg["verdict"]:
+                row["excerpt"] = agg["verdict"][:300]
+            seen[key] = row
+        else:
+            tgt = agg["target"]
+            if tgt not in seen[key]["targets"]:
+                seen[key]["targets"].append(tgt)
+    rows = sorted(seen.values(), key=lambda r: (r["host"], r.get("param") or ""))
+    return {
+        "status": "ok",
+        "fleet_id": fleet_id,
+        "dedupe": dedupe,
+        "units_scanned": scanned,
+        "unique_findings": len(rows),
+        "rows": rows,
+        "message": (
+            f"{len(rows)} unique finding row(s) from {scanned} unit log(s). "
+            "report_finding per row, citing traffic_log."
+        ),
+    }
+
+
+@framework_tool(
+    "Stop one or every running unit of a sqlmap fleet batch (same-agent "
+    "ownership; force=True is the operator-level cross-agent override). Stops "
+    "the background job via the job store and releases its scheduler slot.",
+    tags=["web.fuzz", "infra"],
+)
+def sqlmap_fleet_stop(fleet_id: str, force: bool = False) -> dict[str, Any]:
+    """Stop a fleet batch's running units.
+
+    Args:
+        fleet_id: The ``fleet_id`` from ``run_sqlmap_fleet``.
+        force: Operator-level crossing of agent ownership.
+    """
+    from utils.fleet_scheduler import get_scheduler
+
+    batch = get_scheduler().batch_status(fleet_id)
+    if batch.get("status") == "unknown":
+        return batch
+    stopped, skipped = [], []
+    for u in batch["units"]:
+        if u["decision"] != "acquired" or not u["job_id"]:
+            continue
+        poll = poll_job(u["job_id"])
+        if poll.get("status") == "running":
+            ok = terminate_job(u["job_id"], force=force)
+            (stopped if ok else skipped).append(u["job_id"])
+            if ok:
+                _release_unit_for_job(u["job_id"])
+        else:
+            _release_unit_for_job(u["job_id"])
+    return {
+        "status": "ok",
+        "fleet_id": fleet_id,
+        "stopped": stopped,
+        "skipped": skipped,
+        "message": (
+            f"{len(stopped)} unit(s) stopped. "
+            + ("" if not skipped else f"{len(skipped)} refused (ownership — pass force=True).")
+        ),
+    }

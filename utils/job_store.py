@@ -147,6 +147,17 @@ def _pid_alive(pid: int | None) -> bool | None:
         return True  # exists but not signalable — treat as alive
 
 
+# Verdict parsers are PROCESS-WIDE registrations (tool modules register at
+# import time; any store instance in this process applies them by tool
+# name) — deliberately NOT per-instance state: the env-override singleton
+# dance would otherwise fragment the registry between the launching and
+# polling store instances (found the hard way 2026-10-29: launch registered
+# 'sqlmap' on instance A; the poll looked it up on instance B and parsed
+# nothing).
+_PARSERS: dict[str, Callable[[str], dict[str, Any]]] = {}
+_PARSERS_LOCK = threading.Lock()
+
+
 class JobStore:
     """SQLite-backed background-job registry.
 
@@ -178,10 +189,6 @@ class JobStore:
         self._live_proc: dict[str, subprocess.Popen] = {}
         self._live_log_fh: dict[str, Any] = {}
         self._live_lock = threading.Lock()
-        # Verdict parsers, keyed by tool_name (mirrors the pre-v2 registry —
-        # parsers are closure-bound at import time, so they stay in-process).
-        self._parsers: dict[str, Callable[[str], dict[str, Any]]] = {}
-        self._parsers_lock = threading.Lock()
         self._init_tables()
         self._ensure_reaper()
 
@@ -221,8 +228,8 @@ class JobStore:
     # -- registration ----------------------------------------------------------
 
     def register_parser(self, tool_name: str, parser: Callable[[str], dict[str, Any]]) -> None:
-        with self._parsers_lock:
-            self._parsers[tool_name] = parser
+        with _PARSERS_LOCK:
+            _PARSERS[tool_name] = parser
 
     def launch(
         self,
@@ -617,8 +624,8 @@ class JobStore:
     # -- helpers -------------------------------------------------------------------
 
     def _get_parser(self, tool_name: str) -> Callable[[str], dict[str, Any]] | None:
-        with self._parsers_lock:
-            return self._parsers.get(tool_name)
+        with _PARSERS_LOCK:
+            return _PARSERS.get(tool_name)
 
     @staticmethod
     def _read_log(path: str) -> str:
@@ -650,21 +657,30 @@ def current_agent_id() -> str:
 # --- Module-level singleton (lazy) ----------------------------------------------
 
 _store: JobStore | None = None
+_store_key: str = ""
 
 
 def get_store() -> JobStore:
     """Process-wide job store singleton. Env ``BG_JOB_STORE_DIR`` re-points
-    the whole store (tests); a fresh dir per test run keeps isolation."""
-    global _store
+    the whole store (tests); the singleton caches PER OVERRIDE VALUE so
+    repeated calls in one process share the instance (parsers, live
+    handles). A new override value rebuilds; ``reset_store`` forces it."""
+    global _store, _store_key
     override = os.getenv("BG_JOB_STORE_DIR", "").strip()
     if override:
-        return JobStore(jobs_dir=override)
+        if _store is not None and _store_key == override:
+            return _store
+        _store = JobStore(jobs_dir=override)
+        _store_key = override
+        return _store
     if _store is None:
         _store = JobStore()
+        _store_key = ""
     return _store
 
 
 def reset_store() -> None:
     """Test hook: forget the singleton so the next get_store() re-reads env."""
-    global _store
+    global _store, _store_key
     _store = None
+    _store_key = ""
