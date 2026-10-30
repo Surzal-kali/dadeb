@@ -33,7 +33,6 @@ anyway, so we don't pay the async tax.
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, cast
 
@@ -41,78 +40,30 @@ import requests
 import requests.adapters
 from urllib3.util.retry import Retry
 
+# --- carved guts (tool surface never moves; plain-helper shims are lane-legal)
+from auxiliaries._zap_api import (
+    ZAP_API_KEY,
+    ZAP_BASE,
+    ZAP_HOST,  # noqa: F401 - facade re-export (daemon binds it via ZAP_BASE)
+    ZAP_PORT,  # noqa: F401 - facade re-export (bootstrap probes ZAP via env)
+    ZAPAPIError,
+    _canonical,
+    _canonical_from_envelope,
+    _status_from_headers,
+    _zap_error_guard,
+)
+from auxiliaries._zap_scope_sync import (
+    _host_from_raw_request,
+    drift_guard,
+)
+from auxiliaries._zap_scope_sync import (
+    sync_protect_scope as _scope_sync_impl,
+)
 from constants import framework_tool
-
-
-class ZAPAPIError(Exception):
-    """Raised when ZAP returns an HTTP 4xx/5xx with a structured error body.
-
-    Carries the ZAP ``code`` and ``message`` fields so callers (and the model)
-    see *why* the call failed — e.g. ``url_not_found: URL Not Found in the
-    Scan Tree`` — instead of a bare ``400 Client Error`` from
-    ``raise_for_status``.
-    """
-
-    def __init__(self, status_code: int, code: str = "", message: str = "") -> None:
-        self.status_code = status_code
-        self.code = code
-        self.message = message
-        super().__init__(f"ZAP {status_code} {code}: {message}" if code
-                         else f"ZAP {status_code}: {message}")
-
-
-ZAP_HOST = os.getenv("ZAP_HOST", "127.0.0.1")
-ZAP_PORT = int(os.getenv("ZAP_PORT", "8090"))
-ZAP_API_KEY = os.getenv("ZAP_API_KEY", "")
-ZAP_BASE = f"http://{ZAP_HOST}:{ZAP_PORT}"
 
 # Prefix for replacer / rate-limit rule descriptions so we can find and
 # remove our own rules without touching user-defined ones.
 _RI_PREFIX = "intigriti-roar-"
-
-
-def _canonical(url: str) -> str:
-    """Normalise a URL for comparison: strip trailing slashes, lowercase
-    host, **preserve the query string**. Used to verify
-    ``core/view/messages?url=...`` returned the URL we actually asked for
-    (it does fuzzy substring matching otherwise).
-
-    The query string MUST be preserved: without it, ``http://h/page?a=1``
-    and ``http://h/page`` both canonicalise to ``hpage`` and the first
-    match (the bare entry) is returned instead of the query-string entry
-    — proven by the ``?zzprobe9=x`` probe returning the bare body (67808)
-    instead of the real response (67952).
-    """
-    from urllib.parse import urlsplit
-    parts = urlsplit(url.strip())
-    host = (parts.hostname or "").lower()
-    path = parts.path.rstrip("/") or "/"
-    query = f"?{parts.query}" if parts.query else ""
-    return f"{host}{path}{query}"
-
-
-def _canonical_from_envelope(envelope: dict[str, Any]) -> str:
-    """Recover the URL an envelope corresponds to from its requestHeader."""
-    req = envelope.get("requestHeader", "")
-    # requestHeader starts with "GET <url> HTTP/1.1" -- take the second token.
-    parts = req.split()
-    if len(parts) >= 2:
-        return _canonical(parts[1])
-    return ""
-
-
-def _status_from_headers(response_header: str) -> str:
-    """Pull the status line from a raw HTTP response header block.
-
-    The header block starts with ``HTTP/1.1 200 OK\\r\\n`` -- return the
-    second token (``200``) so the model can show status at a glance. Empty
-    string on malformed input rather than raising -- callers display it.
-    """
-    if not response_header:
-        return ""
-    first_line = response_header.splitlines()[0] if response_header else ""
-    parts = first_line.split()
-    return parts[1] if len(parts) >= 2 else ""
 
 
 class ZAPClient:
@@ -948,105 +899,6 @@ def _zap() -> ZAPClient:
     return ZAPClient.get_instance()
 
 
-# --- ZAP error guard --------------------------------------------------------
-#
-# Every zap_* wrapper is decorated with @_zap_error_guard (below the
-# @framework_tool decorator) so a ZAPAPIError — whether a 400 structured
-# error (url_not_found, MODE_VIOLATION, DOES_NOT_EXIST) or a 500 internal
-# daemon error — is returned as a structured dict the model can reason about,
-# instead of propagating as a bare exception that _launch_in_process wraps in
-# a generic "In-process launch failed: ZAP 500: ..." message with no
-# actionable detail.
-#
-# ScopeGateError is deliberately NOT caught here: it's a pre-flight scope
-# violation (the operator armed the wrong scope), not a ZAP daemon problem.
-
-import functools as _functools
-
-# Hints surfaced for specific ZAP error codes / status patterns so the model
-# gets an actionable next step, not just the raw error text.
-_ZAP_ERROR_HINTS = {
-    "MODE_VIOLATION": (
-        "ZAP is in protect mode and refused this target as out-of-scope. "
-        "Run zap_sync_scope to re-mirror the armed scope, or check that "
-        "the target is in the armed scope manifest."
-    ),
-    "url_not_found": (
-        "The URL is not in ZAP's sites tree. Run zap_open_url or zap_spider "
-        "on it first so ZAP discovers it before querying."
-    ),
-    "DOES_NOT_EXIST": (
-        "The named ZAP resource does not exist (e.g. a replacer rule that "
-        "was already removed). This is usually benign — the operation is "
-        "idempotent."
-    ),
-    "BAD_VIEW": (
-        "This ZAP API endpoint was removed or renamed in this ZAP version "
-        "(2.17). The client code may need updating for the installed build."
-    ),
-    "no_implementor": (
-        "The required ZAP add-on is not installed. Install it from the ZAP "
-        "marketplace and restart the daemon."
-    ),
-    "timeout": (
-        "The ZAP API call timed out waiting for the target to respond. "
-        "The target is likely unreachable or very slow. Verify the target "
-        "is up and reachable from this host before retrying. "
-        "Action endpoints are NOT retried (no double side-effects)."
-    ),
-    "no_response": (
-        "ZAP sent the request but the target never spoke HTTP (closed "
-        "port, unreachable host, or a non-HTTP service on that port). "
-        "Scheme-forced https attempts are auto-retried over the request "
-        "as written before this error is surfaced — the origin is silent "
-        "on both the https and the as-written scheme."
-    ),
-}
-
-
-def _zap_error_guard(func):
-    """Catch ZAPAPIError and return a structured dict instead of propagating.
-
-    Applied as the inner decorator (below @framework_tool) on every zap_*
-    wrapper.  Uses functools.wraps so inspect.signature (used by the registry
-    for parameter extraction) sees the original function's signature.
-    """
-
-    @_functools.wraps(func)
-    def _wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except ZAPAPIError as e:
-            hint = _ZAP_ERROR_HINTS.get(e.code, "")
-            if not hint and e.status_code >= 500:
-                _xmx = os.getenv("ZAP_XMX", "512m")
-                hint = (
-                    f"ZAP daemon returned HTTP {e.status_code} (internal "
-                    f"server error). View endpoints are retried 5x with "
-                    f"backoff; action endpoints (sendRequest, scan, etc.) "
-                    f"are NOT retried to avoid double side-effects. If this "
-                    f"persists: check /tmp/zap.log for Java stack traces, "
-                    f"verify the daemon is healthy (curl "
-                    f"http://127.0.0.1:{ZAP_PORT}/JSON/core/view/version), "
-                    f"and consider restarting ZAP or raising ZAP_XMX "
-                    f"(currently {_xmx}) if OOM-adjacent. If "
-                    f"/tmp/zap.log shows an SSLException/ConnectException "
-                    f"on sendRequest, the origin port does not speak the "
-                    f"scheme in the request line — write the line in "
-                    f"absolute form (GET http://host/path HTTP/1.1)."
-                )
-            return {
-                "error": str(e),
-                "zap_code": e.code,
-                "zap_status": e.status_code,
-                "zap_message": e.message,
-                "status": "Failed",
-                **({"hint": hint} if hint else {}),
-            }
-
-    return _wrapper
-
-
 # --- @framework_tool wrappers ----------------------------------------------
 #
 # Doc strings here are what the registry embeds for semantic matching. Keep
@@ -1337,34 +1189,6 @@ def zap_report(report_format: str = "html",
         report_title=report_title,
     )
 
-def _host_from_raw_request(raw_request: str) -> str | None:
-    """Extract the target host from a raw HTTP request for scope gating.
-
-    Checks the ``Host:`` header first (the common case for vhost-gated
-    targets), falling back to an absolute-form request target
-    (``GET http://host/path HTTP/1.1``).  Strips a trailing ``:port`` for
-    IPv4/domain hosts; leaves IPv6 literals (bracketed) intact.  Returns
-    ``None`` if no host can be determined.
-    """
-    lines = (raw_request or "").lstrip().splitlines()
-    host = None
-    for ln in lines:
-        if ln.lower().startswith("host:"):
-            host = ln.split(":", 1)[1].strip()
-            break
-    if not host and lines:
-        from urllib.parse import urlparse
-        first = lines[0].split()
-        if len(first) >= 2 and "://" in first[1]:
-            host = urlparse(first[1]).hostname
-    if not host:
-        return None
-    if host.startswith("[") and "]" in host:
-        return host[1:host.index("]")]
-    if host.count(":") == 1:  # IPv4/domain :port
-        return host.rsplit(":", 1)[0]
-    return host
-
 
 @framework_tool(
     "Send a raw HTTP request with full control over method, path, headers "
@@ -1429,128 +1253,33 @@ def zap_send_raw(raw_request: str,
 # ZAP has no API-level redirect off; mode=protect + a context mirroring the
 # operator-armed scope is the architectural control: ZAP itself refuses every
 # out-of-scope request (redirect hops, spider crawls, scan traffic, proxied
-# manual browsing). The armed manifest is read here — never written.
+# manual browsing). Implementation carved to auxiliaries/_zap_scope_sync.py
+# (client-injected — the sibling holds no facade name); this facade owns
+# client acquisition and keeps the import surface bootstrap binds. The armed
+# manifest is read here — never written.
 
 def sync_protect_scope(zap: ZAPClient | None = None) -> dict[str, Any]:
     """Mirror the armed scope into a ZAP context and set mode=protect.
 
-    Reads ``scope/.armed_packet_scope.json`` + the cached manifest (the
-    operator-armed scope is the single source of truth; this function NEVER
-    writes scope state). Allowlist IPs, blessed hostnames, and web-surface
-    manifest assets become context includes; out-of-scope assets become
-    excludes. CIDR assets are skipped (not URL-regex expressible — bless
-    individual IPs with ``scope add-ip`` instead). Sets ``mode=protect``
-    last, so ZAP enforces the boundary itself.
+    Facade wrapper over ``auxiliaries._zap_scope_sync.sync_protect_scope``:
+    injects the shared singleton client when none is passed, then delegates.
+    Reads ``scope/.armed_packet_scope.json`` + the cached manifest; never
+    writes scope state.
     """
-    import re
+    return _scope_sync_impl(zap or _zap())
 
-    from utils.scope_gate import _load_manifest, _load_state
 
-    state = _load_state()
-    if state is None:
-        return {
-            "status": "Failed",
-            "error": (
-                "no scope armed (lab mode) — nothing to protect; arm with "
-                "'scope on <handle>' (or add-ips) and re-run"
-            ),
-        }
-    handle = state.get("handle", "") or "scope"
-    platform = state.get("platform", "h1")
-    manifest = _load_manifest(state.get("handle", ""), platform)
-    if manifest is None:
-        from auxiliaries.program_scope import _load_cache
+def _zap_scope_drift_guard() -> dict[str, Any] | None:
+    """Detect armed-scope drift and auto-repair the ZAP mirror (mechanism:
+    ``auxiliaries._zap_scope_sync.drift_guard``).
 
-        manifest = _load_cache(state.get("handle", ""), platform)
-
-    zap = zap or _zap()
-    context_name = f"framework-armed-{handle}"
-
-    includes: list[str] = []
-    excludes: list[str] = []
-    skipped: list[dict[str, str]] = []
-
-    def _host_patterns(host: str) -> list[str]:
-        h = re.escape(host.lower())
-        return [
-            rf"https?://([^.]+\.)?{h}(:\d+)?(/.*)?",
-            rf"https?://{h}(:\d+)?(/.*)?",
-        ]
-
-    def _asset_patterns(
-        asset: dict[str, Any], out: list[str], skip: list[dict[str, str]]
-    ) -> None:
-        atype = str(asset.get("asset_type", "")).upper()
-        ident = str(asset.get("asset_identifier", "")).strip()
-        if not ident:
-            return
-        if atype == "DOMAIN":
-            out.extend(_host_patterns(ident))
-        elif atype == "WILDCARD":
-            base = ident[2:] if ident.startswith("*.") else ident
-            out.extend(_host_patterns(base))
-        elif atype == "URL":
-            out.append(re.escape(ident.rstrip("/")) + ".*")
-        elif atype in ("ANDROID", "IOS", "BLOCKCHAIN"):
-            skip.append({"asset": ident, "reason": f"{atype}: not a web surface"})
-        elif atype == "CIDR":
-            skip.append(
-                {
-                    "asset": ident,
-                    "reason": "CIDR not URL-regex expressible — bless "
-                    "individual IPs via 'scope add-ip'",
-                }
-            )
-        else:
-            skip.append({"asset": ident, "reason": f"unmapped asset_type {atype}"})
-
-    for ip, host in (state.get("allowlist") or {}).items():
-        if ip:
-            includes.extend(_host_patterns(ip))
-        if host:
-            includes.extend(_host_patterns(host))
-    # Blessed hostnames (tier 1b, 'scope add-host'): operator-asserted
-    # hostname->blessed-IP mappings.  ZAP's sender connects to the Host
-    # header's host, so protect mode must accept the same NAMES the L1 gate
-    # accepts — without these, a gate-blessed vhost still hits
-    # "mode_violation" (mirror lagging the gate, observed live 2026-09-20).
-    for hostname in (state.get("blessed_hosts") or {}):
-        if hostname:
-            includes.extend(_host_patterns(hostname))
-    for asset in manifest.get("out_of_scope_assets") or []:
-        _asset_patterns(asset, excludes, skipped)
-    for asset in manifest.get("in_scope") or []:
-        _asset_patterns(asset, includes, skipped)
-
-    try:
-        zap.context_new(context_name)
-    except Exception as e:  # noqa: BLE001 - tolerate already_exists; refuse real failures
-        if not zap._context_exists(context_name):
-            return {
-                "status": "Failed",
-                "error": f"context setup failed: {type(e).__name__}: {e}",
-            }
-    for rx in includes:
-        zap.context_include(context_name, rx)
-    for rx in excludes:
-        zap.context_exclude(context_name, rx)
-    zap.set_mode("protect")
-
-    return {
-        "status": "Success",
-        "mode": zap.get_mode(),
-        "context": context_name,
-        "include_count": len(includes),
-        "exclude_count": len(excludes),
-        "skipped": skipped[:20],
-        "handle": handle,
-        "note": (
-            "ZAP now refuses out-of-scope requests itself (mode=protect): "
-            "redirect hops, spider crawls, scan traffic, and proxied manual "
-            "browsing to non-scope hosts. Manual recon beyond scope happens "
-            "OUTSIDE ZAP by design."
-        ),
-    }
+    Compares the armed state file's mtime against the last-synced mtime
+    (sidecar ``.zap_protect_sync.json``). Called at the top of every
+    traffic-bearing ZAP client method so a scope change the operator made
+    without a re-sync is picked up BEFORE the next request fires; repair
+    failures are reported but never block the tool call.
+    """
+    return drift_guard(_zap())
 
 
 @framework_tool(
@@ -1571,70 +1300,3 @@ def sync_protect_scope(zap: ZAPClient | None = None) -> dict[str, Any]:
 def zap_sync_scope() -> dict[str, Any]:
     """Sync ZAP's context + mode with the operator-armed scope (read-only on scope)."""
     return sync_protect_scope()
-
-
-def _zap_scope_drift_guard() -> dict[str, Any] | None:
-    """Detect armed-scope drift and auto-repair the ZAP mirror.
-
-    Compares the armed state file's mtime against the last-synced mtime
-    (sidecar ``.zap_protect_sync.json`` next to the state file). Called at
-    the top of every traffic-bearing ZAP client method (open_url, spider,
-    active_scan, ajax_spider, send_raw) so a scope change the operator made
-    without a re-sync is picked up BEFORE the next request fires:
-
-    - scope CHANGED -> sync_protect_scope() re-mirrors the context and keeps
-      mode=protect (layer-1 gate already reads live state at entry; this
-      closes the layer-2 mirror-drift window: internal redirect hops and
-      spider/scan crawling that the per-call locks cannot see).
-    - scope DISARMED -> mode=standard restored and sidecar cleared (lab
-      mode is the operator's chosen state; ZAP must not keep a stale
-      boundary).
-    - fresh mirror -> None, no side effects.
-
-    Repair failures are reported but never block the tool call: the
-    tool-entry gate (check_scan) remains authoritative for the requested
-    target; the drift only ever affects ZAP-internal hops.
-    """
-    import json as _json
-    from pathlib import Path
-
-    from utils.scope_gate import _state_path
-
-    state_p = Path(_state_path())
-    sidecar = state_p.parent / ".zap_protect_sync.json"
-    try:
-        armed_mtime: float | None = state_p.stat().st_mtime
-    except OSError:
-        armed_mtime = None  # armed state file removed -> disarmed
-
-    last: float | None = None
-    if sidecar.is_file():
-        try:
-            last = float(_json.loads(sidecar.read_text()).get("armed_mtime") or 0)
-        except Exception:  # noqa: BLE001 - unreadable sidecar = treat as stale
-            last = None
-
-    if armed_mtime is None:
-        if last is None:
-            return None  # never synced, nothing to restore
-        try:
-            _zap().set_mode("standard")
-            sidecar.unlink()
-            return {"drift": "scope disarmed — ZAP mode restored to standard"}
-        except Exception as e:  # noqa: BLE001
-            return {"drift": f"scope disarmed, but ZAP restore failed: {e}"}
-
-    if last == armed_mtime:
-        return None  # mirror is fresh
-    try:
-        result = sync_protect_scope(_zap())
-        if result.get("status") == "Success":
-            sidecar.write_text(_json.dumps({"armed_mtime": armed_mtime}))
-            return {
-                "drift": "re-synced",
-                "mode": result.get("mode"),
-                "context": result.get("context"),
-            }
-        return {"drift": f"re-sync failed: {result.get('error')}"}
-    except Exception as e:  # noqa: BLE001 - never block the tool call on the guard
-        return {"drift": f"re-sync failed: {type(e).__name__}: {e}"}
