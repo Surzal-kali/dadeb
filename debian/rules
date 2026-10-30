@@ -129,10 +129,18 @@ override_dh_auto_install:
 	# output and crate-internal state never stage (target/, run/).
 	install -d -m 0755 debian/daharness/usr/share/daharness/rust
 	for d in scratch pcap brain; do \
-	  cp -a rust/$d debian/daharness/usr/share/daharness/rust/; \
-	  rm -rf debian/daharness/usr/share/daharness/rust/$d/target \
-	         debian/daharness/usr/share/daharness/rust/$d/run; \
+	  cp -a rust/$$d debian/daharness/usr/share/daharness/rust/; \
+	  rm -rf debian/daharness/usr/share/daharness/rust/$$d/target \
+	         debian/daharness/usr/share/daharness/rust/$$d/run; \
 	done
+	# Prune at ALL depths, then delete any socket file: a stale staged
+	# tree from an earlier rules variant once nested a whole copy here
+	# (rust/rust/brain/run/brain-worker.sock), and dh_dwz -a aborts the
+	# whole build on a staged UNIX socket it cannot open (2026-10-30).
+	# The deb tree must ever only carry rust source text.
+	find debian/daharness/usr/share/daharness/rust -type d \
+	  \( -name target -o -name run \) -prune -exec rm -rf {} +
+	find debian/daharness/usr/share/daharness/rust -type s -delete
 	# init.d fallback scripts (systemd-less hosts: NetHunter chroot, WSL1).
 	# Shipped under packaging/initd/ so postinst copies them to /etc/init.d/
 	# ONLY when systemd is absent — the systemd lane never touches them.
