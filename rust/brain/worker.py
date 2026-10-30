@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
-"""dadeb Brain tool-worker (milestone 2).
+"""dadeb Brain tool-worker.
 
 The Rust brain owns the client-facing socket, framing, and dispatch ROUTING.
 Tool EXECUTION stays here, in Python — this is the long-lived worker the brain
-forwards CALL_TOOL / SCAN_TOOLS to. It speaks the SAME length-prefixed framing
-as listeners/thebrain.py (4-byte big-endian length + payload), so the
-brain<->worker hop and the client<->brain hop share one wire format.
+forwards CALL_TOOL / SCAN_TOOLS to, over the SAME length-prefixed framing
+(4-byte big-endian length + payload) as listeners/thebrain.py. One wire format,
+both links.
 
-Scope: a minimal, stdlib-only demo registry (demo.echo, demo.add, demo.sysinfo)
-so the IPC seam runs end-to-end TODAY without dragging in the full 218-tool
-import chain (scapy et al.). The real registry wires in where marked below.
+Backend selection (load_backend):
+  * REAL: imports the harness registry + execution tracker and primes it with a
+    startup scan. Requires the harness env (frameit.so built, scapy + tool deps
+    installed) — i.e. a normal checkout on the box.
+  * DEMO: a stdlib-only registry (demo.echo/add/sysinfo/sleep) + a no-op tracker,
+    used when BRAIN_WORKER_DEMO=1 or when the real import fails (bare env). Lets
+    the transport be smoke-tested without the full tool chain.
+
+Both backends execute through the SAME core, tool_exec.execute_call_tool.
 
 Run:
     BRAIN_WORKER_SOCKET=/run/daharness/brain-worker.sock python3 worker.py
+    BRAIN_WORKER_DEMO=1 BRAIN_WORKER_SOCKET=run/brain-worker.sock python3 worker.py
 """
 import asyncio
 import json
 import os
 import struct
 import sys
+from pathlib import Path
+
+# This worker lives at rust/brain/worker.py; put the framework ROOT on sys.path
+# (rust/brain -> rust -> root) so `import tool_exec` and the `listeners` package
+# resolve, same trick thebrain.py uses when launched directly.
+_FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_FRAMEWORK_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FRAMEWORK_ROOT))
+
+import tool_exec  # root-level, import-light shared execution core
 
 # --- framing: identical wire shape to thebrain.py / the Rust codec ----------
 HEADER = "!I"
@@ -42,13 +59,7 @@ async def read_message(reader: asyncio.StreamReader) -> bytes:
     return await reader.readexactly(length)
 
 
-# --- demo registry ----------------------------------------------------------
-# MILESTONE-2 PLACEHOLDER. To run the real tools, import the existing registry
-# instead of this dict, e.g.:
-#     from listeners.thebrain import registry, scan_tools
-# and route CALL_TOOL/SCAN_TOOLS through registry.get_tool(...) / scan_tools(...).
-# Kept minimal + stdlib-only here so the seam runs without the heavy tool-module
-# import chain while we validate the transport.
+# --- DEMO backend (stdlib-only, scapy-free) ---------------------------------
 def _echo(*args, **kwargs):
     return {"args": list(args), "kwargs": kwargs}
 
@@ -61,52 +72,76 @@ def _sysinfo():
     return {"pid": os.getpid(), "python": sys.version.split()[0]}
 
 
-REGISTRY = {
-    "demo.echo": _echo,
-    "demo.add": _add,
-    "demo.sysinfo": _sysinfo,
-}
+async def _sleep(seconds):
+    # Async tool, used to exercise the ceiling / kill path end to end.
+    await asyncio.sleep(float(seconds))
+    return f"slept {seconds}s"
 
 
-def _parse_args(args_str: str):
-    """dict -> kwargs, list -> positional. Same contract as thebrain CALL_TOOL."""
-    args_str = args_str.strip()
-    if not args_str:
-        return [], {}
-    parsed = json.loads(args_str)
-    if isinstance(parsed, dict):
-        return [], parsed
-    if isinstance(parsed, list):
-        return parsed, {}
-    raise ValueError(f"expected a JSON object or list, got {type(parsed).__name__}")
+class DemoRegistry:
+    """Minimal FunctionRegistry-shaped stand-in so demo mode runs through the
+    exact same tool_exec path as the real registry (get_tool / _class_tools /
+    instance_for_session)."""
+
+    def __init__(self):
+        self._tools = {
+            "demo.echo": _echo,
+            "demo.add": _add,
+            "demo.sysinfo": _sysinfo,
+            "demo.sleep": _sleep,
+        }
+        self._class_tools = {}  # no class-method tools in the demo set
+
+    def get_tool(self, name):
+        return self._tools.get(name)
+
+    def instance_for_session(self, session_id, cls):  # pragma: no cover - unused
+        return cls()
+
+    def names(self):
+        return list(self._tools)
 
 
-def handle_scan_tools(_payload: str) -> str:
-    # The Python Brain returns "SCAN_COMPLETE|id:doc,id:doc,...".
-    tools = ",".join(f"{name}:(demo tool)" for name in REGISTRY)
-    return "SCAN_COMPLETE|" + tools
+class NoopTracker:
+    """A tracker that satisfies tool_exec's contract without real bookkeeping —
+    enough for demo mode. The REAL EXECUTION_TRACKER (zombie reaping, ceilings,
+    kill switch) is used in real mode."""
+
+    def set_caller_session(self, session_id): pass
+    def begin(self, tool_id, session_id, kind): return "demo-exec"
+    def attach_task(self, exec_id, task): pass
+    def attach_future(self, exec_id, future): pass
+    def finish(self, exec_id): pass
+
+    async def kill(self, exec_id, force=False, reason=""):
+        return {"status": "noop", "reason": reason}
 
 
-def handle_call_tool(payload: str) -> str:
-    tool_id, args_str = payload.split("|", 1) if "|" in payload else (payload, "")
-    tool = REGISTRY.get(tool_id)
-    if tool is None:
-        return json.dumps(
-            {"status": "error", "tool_id": tool_id,
-             "error": f"Tool {tool_id} not found in demo registry."}
-        )
+def load_backend():
+    """Return (registry, scan_fn_or_None, tracker, mode)."""
+    if os.getenv("BRAIN_WORKER_DEMO") == "1":
+        print("[worker] BRAIN_WORKER_DEMO=1 — demo backend")
+        return DemoRegistry(), None, NoopTracker(), "demo"
     try:
-        args, kwargs = _parse_args(args_str)
-        result = tool(*args, **kwargs)
-        try:
-            json.dumps(result)  # keep the envelope JSON-serializable
-        except (TypeError, ValueError):
-            result = str(result)
-        return json.dumps({"status": "success", "tool_id": tool_id, "result": result})
-    except Exception as e:  # noqa: BLE001 — envelope every failure, never crash the worker
-        return json.dumps(
-            {"status": "error", "tool_id": tool_id, "error": f"Execution failed: {e}"}
-        )
+        from listeners.thebrain import registry, scan_tools, _startup_scan
+        from listeners.execution_tracker import EXECUTION_TRACKER
+        _startup_scan()  # prime the registry (scans the harness tool dirs)
+        print(f"[worker] real backend — {len(registry.tools)} tools registered")
+        return registry, scan_tools, EXECUTION_TRACKER, "real"
+    except Exception as e:  # noqa: BLE001 — any import/scan failure -> demo
+        print(f"[worker] real registry unavailable ({e!r}); falling back to demo backend")
+        return DemoRegistry(), None, NoopTracker(), "demo"
+
+
+REGISTRY, SCAN_FN, TRACKER, MODE = load_backend()
+
+
+def handle_scan_tools(payload: str) -> str:
+    if SCAN_FN is not None:
+        # Real scan: path in payload, else the framework root (thebrain default).
+        return SCAN_FN(payload or str(_FRAMEWORK_ROOT))
+    tools = ",".join(f"{name}:(demo tool)" for name in REGISTRY.names())
+    return "SCAN_COMPLETE|" + tools
 
 
 async def handle_client(reader, writer):
@@ -119,20 +154,19 @@ async def handle_client(reader, writer):
     try:
         message = data.decode()
         try:
-            event_type, _session_id, payload = message.split("|", 2)
+            event_type, session_id, payload = message.split("|", 2)
+            session_id = int(session_id)
         except ValueError:
             writer.write(pack_message(b"Error: Malformed event"))
             await writer.drain()
             return
 
-        print(f"[worker] {event_type} :: {payload}")
+        print(f"[worker:{MODE}] {event_type} session={session_id} :: {payload}")
         if event_type == "SCAN_TOOLS":
             resp = handle_scan_tools(payload)
         elif event_type == "CALL_TOOL":
-            resp = handle_call_tool(payload)
+            resp = await tool_exec.execute_call_tool(REGISTRY, payload, session_id, TRACKER)
         else:
-            # The brain only forwards tool events here; anything else is a bug
-            # on the brain side, so say so rather than guessing.
             resp = json.dumps(
                 {"status": "error",
                  "error": f"worker received a non-tool event {event_type!r}"}
@@ -154,7 +188,7 @@ async def main():
     if os.path.exists(path):
         os.remove(path)
     server = await asyncio.start_unix_server(handle_client, path=path)
-    print(f"[worker] listening on {path}")
+    print(f"[worker] listening on {path} (mode={MODE})")
     async with server:
         await server.serve_forever()
 
