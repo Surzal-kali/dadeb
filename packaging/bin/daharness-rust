@@ -1,0 +1,277 @@
+#!/bin/sh
+# daharness-rust(1) — the python/c -> python/rust upgrade lane.
+#
+# The 0.2.0 deb ships the three rust crates under /usr/share/daharness/rust/
+# as SOURCE (the deb build lane stays python+C and network-isolated by
+# policy; no cargo Build-Depends). Compiling them is a user opt-in for
+# internet-connected boxes, and this script is its one command instead of a
+# paste-bomb:
+#
+#   daharness-rust status            offline: what is provisioned, what is missing
+#   sudo daharness-rust toolchain    apt rustc/cargo + libpcap-dev           (network)
+#   sudo daharness-rust build        cargo build --release --locked         (network, first run)
+#   sudo daharness-rust smoke        cargo test --release --locked          (network, first run)
+#   sudo daharness-rust all          toolchain && build && smoke
+#   daharness-rust brain             run the rust sidecar lane (worker + brain)
+#
+# Network contract: `status` and `brain` never touch the network;
+# toolchain/build/smoke are deliberate fetches (crates.io, first run only —
+# Cargo.lock ships inside each crate and `--locked` pins the resolve). That
+# is the upgrade shape the package policy wants: install stays isolated,
+# the rust upgrade is an explicit step.
+#
+# Lane overrides (dev checkouts, tests):
+#   DAHARNESS_RUST_SRC    crate sources root (default /usr/share/daharness/rust)
+#   DAHARNESS_RUST_TARGET build output root (default $WORKSPACE_ROOT/rust/target;
+#                         default WORKSPACE_ROOT /var/lib/daharness)
+#   BRAIN_BIN             built brain binary path (default $TARGET/release/brain)
+
+set -u
+
+DAHARNESS_RUST_SRC=${DAHARNESS_RUST_SRC:-/usr/share/daharness/rust}
+
+err() { echo "daharness-rust: $*" >&2; }
+say() { echo "daharness-rust: $*"; }
+ok()  { echo "  [ok]  $*"; }
+no()  { echo "  [--]  $*"; }
+
+# State root + run dir resolve the same way the wrappers do: profile.d
+# plumbing (WORKSPACE_ROOT/BRAIN_SOCKET), then the conffile, then the deb
+# default. Non-deb lanes (dev checkout) pass DAHARNESS_RUST_SRC themselves.
+WORKSPACE_ROOT=${WORKSPACE_ROOT:-}
+if [ -r /etc/profile.d/daharness.sh ]; then . /etc/profile.d/daharness.sh; fi
+if [ -r /etc/daharness/daharness.env ]; then set -a; . /etc/daharness/daharness.env; set +a; fi
+WORKSPACE_ROOT=${WORKSPACE_ROOT:-/var/lib/daharness}
+DAHARNESS_RUST_TARGET=${DAHARNESS_RUST_TARGET:-$WORKSPACE_ROOT/rust/target}
+RUN_DIR=${DAHARNESS_RUST_RUN_DIR:-$WORKSPACE_ROOT/run}
+
+CRATES="scratch pcap brain"
+BRAIN_SRC=$DAHARNESS_RUST_SRC/brain
+SCRATCH_SRC=$DAHARNESS_RUST_SRC/scratch
+
+umask 0007
+
+# Group-share the state-root build tree when privileged; unprivileged runs
+# need only membership in the daharness group (state root is 2770 setgid).
+ensure_dirs() {
+    for d in "$DAHARNESS_RUST_TARGET" "$RUN_DIR"; do
+        [ -d "$d" ] && continue
+        mkdir -p "$d" 2>/dev/null && chown daharness:daharness "$d" 2>/dev/null && chmod 2770 "$d" 2>/dev/null || true
+    done
+}
+
+fix_owner() {
+    # Build artifacts are daharness-group content (the service lanes read
+    # the state root, not /root). No-op when unprivileged.
+    if [ "$(id -u)" = "0" ]; then
+        chown -R daharness:daharness "$DAHARNESS_RUST_TARGET" 2>/dev/null || true
+    fi
+}
+
+crt_ver() {
+    # Crate's self-declared version (manifest grep — no cargo needed).
+    sed -n 's/^version *= *"\(.*\)"$/\1/p' "$1/Cargo.toml" 2>/dev/null | head -1
+}
+
+# ─── status ─────────────────────────────────────────────────────────── #
+# Offline by contract: no cargo invocation, no network, no downloads.
+cmd_status() {
+    say "rust upgrade lane status (sources: $DAHARNESS_RUST_SRC)"
+    if [ -d "$DAHARNESS_RUST_SRC" ] && [ -d "$SCRATCH_SRC" ]; then
+        for c in $CRATES; do
+            ok "sources: $c $(crt_ver "$DAHARNESS_RUST_SRC/$c") ($(find "$DAHARNESS_RUST_SRC/$c/src" -name '*.rs' 2>/dev/null | wc -l) src files)"
+        done
+    else
+        no "crate sources not found at $DAHARNESS_RUST_SRC (is this the 0.2.0+ deb? pass DAHARNESS_RUST_SRC on dev checkouts)"
+    fi
+
+    if command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+        ok "toolchain: rustc $(rustc --version | sed 's/^rustc //'), cargo $(cargo --version | cut -d' ' -f2)"
+    else
+        no "toolchain: rustc/cargo missing — run 'sudo daharness-rust toolchain' (needs network)"
+    fi
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libpcap; then
+        ok "libpcap dev: present (pcap crate builds with the capture feature)"
+    else
+        no "libpcap dev: absent — pcap crate needs it, or build with DAHARNESS_RUST_NO_PCAP=1 (codec core builds dependency-free)"
+    fi
+
+    if [ -d "$DAHARNESS_RUST_TARGET" ]; then
+        for c in $CRATES; do
+            if [ -f "$DAHARNESS_RUST_TARGET/$c.build.ok" ]; then
+                ok "built: $c (stamp: $(head -1 "$DAHARNESS_RUST_TARGET/$c.build.ok" 2>/dev/null))"
+            else
+                no "built: $c — no stamp, run 'sudo daharness-rust build'"
+            fi
+        done
+        [ -x "${BRAIN_BIN:-$DAHARNESS_RUST_TARGET/release/brain}" ] && \
+            ok "brain binary: ${BRAIN_BIN:-$DAHARNESS_RUST_TARGET/release/brain}" || true
+    else
+        no "no build outputs yet at $DAHARNESS_RUST_TARGET"
+    fi
+
+    if [ -r "$BRAIN_SRC/worker.py" ]; then
+        ok "python tool-worker shipped ($BRAIN_SRC/worker.py — the rust sidecar executes tools through it)"
+    fi
+    [ -S "${BRAIN_SOCKET:-/run/daharness/brain.sock}" ] && \
+        ok "canonical brain socket present (python sidecar or stale): ${BRAIN_SOCKET:-/run/daharness/brain.sock}" || true
+
+    say "next steps:"
+    say "  sudo daharness-rust all      # toolchain + build + smoke (network on first run)"
+    say "  daharness-rust brain --help  # run the rust sidecar lane after building"
+    echo
+    echo "  upgrade semantics: nothing built here replaces the python service"
+    echo "  lanes — daharness.service keeps running the shipped python stack"
+    echo "  (tool execution, registry, scope gate stay python by design). The"
+    echo "  built rust lane is an opt-in sidecar: see daharness-rust(1)."
+}
+
+# ─── toolchain ──────────────────────────────────────────────────────── #
+cmd_toolchain() {
+    if [ "$(id -u)" != "0" ]; then err "toolchain needs root (apt-get install) — re-run with sudo"; exit 1; fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        err "no apt-get on this box; install rustc+cargo+pkg-config+libpcap-dev with your package manager, then re-run: daharness-rust build"
+        exit 1
+    fi
+    say "installing rustc cargo pkg-config libpcap-dev (network step; kali-rolling, noninteractive)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        rustc cargo pkg-config libpcap-dev >/dev/null
+    if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then
+        err "toolchain install did not land rustc/cargo — check apt output above"; exit 1
+    fi
+    say "toolchain ready: rustc $(rustc --version | sed 's/^rustc //'), cargo $(cargo --version | cut -d' ' -f2)"
+    say "next: sudo daharness-rust build"
+}
+
+# ─── build ──────────────────────────────────────────────────────────── #
+cmd_build() {
+    [ -d "$SCRATCH_SRC" ] || { err "crate sources not found at $DAHARNESS_RUST_SRC — this is not a 0.2.0+ deb; set DAHARNESS_RUST_SRC on dev checkouts"; exit 1; }
+    if ! command -v cargo >/dev/null 2>&1; then
+        err "no cargo — run 'sudo daharness-rust toolchain' first (or install rustc/cargo yourself)"; exit 1
+    fi
+    ensure_dirs
+    _no_pcap=${DAHARNESS_RUST_NO_PCAP:-0}
+    for _a in "$@"; do case "$_a" in --no-pcap) _no_pcap=1 ;; esac; done
+
+    _failed=0
+    say "building crates (target dir: $DAHARNESS_RUST_TARGET; first run fetches crates.io — Cargo.lock pins the resolve)"
+    rm -f "$DAHARNESS_RUST_TARGET"/*.build.ok 2>/dev/null || true
+    for c in $CRATES; do
+        set -- --manifest-path "$DAHARNESS_RUST_SRC/$c/Cargo.toml"
+        if [ "$c" = "pcap" ] && [ "$_no_pcap" = "1" ]; then
+            set -- "$@" --no-default-features
+            say "building $c $(crt_ver "$DAHARNESS_RUST_SRC/$c") (no capture feature — codec core only)"
+        else
+            say "building $c $(crt_ver "$DAHARNESS_RUST_SRC/$c")"
+        fi
+        if CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo build --release --locked "$@"; then
+            rustc --version >"$DAHARNESS_RUST_TARGET/$c.build.ok" 2>/dev/null
+            ok "$c built (stamp -> $DAHARNESS_RUST_TARGET/$c.build.ok)"
+        else
+            no "$c FAILED"
+            if [ "$c" = "pcap" ] && [ "$_no_pcap" != "1" ]; then
+                say "  retry without the capture lane: sudo daharness-rust build --no-pcap"
+                say "  (or: apt install libpcap-dev pkg-config, then re-run)"
+            fi
+            _failed=1
+        fi
+    done
+    fix_owner
+    [ "$_failed" = 0 ] || { err "one or more crates failed (see above) — nothing is half-installed: the deb's python stack never touched these"; exit 1; }
+    say "next: sudo daharness-rust smoke (crate test suites), then 'daharness-rust brain --help'"
+}
+
+# ─── smoke ──────────────────────────────────────────────────────────── #
+cmd_smoke() {
+    command -v cargo >/dev/null 2>&1 || { err "no cargo — run 'sudo daharness-rust toolchain' first"; exit 1; }
+    ensure_dirs
+    _failed=0
+    say "running crate test suites (target dir: $DAHARNESS_RUST_TARGET)"
+    for c in $CRATES; do
+        say "testing $c"
+        if CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo test --release --locked \
+            --manifest-path "$DAHARNESS_RUST_SRC/$c/Cargo.toml" >/dev/null 2>&1; then
+            ok "$c test suite passed"
+        else
+            no "$c test suite FAILED (rerun verbose for the log:"
+            no "  CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo test --release --locked --manifest-path $DAHARNESS_RUST_SRC/$c/Cargo.toml )"
+            _failed=1
+        fi
+    done
+    fix_owner
+    [ "$_failed" = 0 ] || { err "a crate test suite failed — the port does not hold its semantics on YOUR box; do not adopt this lane"; exit 1; }
+    say "rust lane verified on this box"
+}
+
+# ─── brain ──────────────────────────────────────────────────────────── #
+# The rust sidecar lane: python tool-worker (holds the harness registry,
+# executes tools through tool_exec) + the rust brain (socket + framing +
+# dispatch + singleton dance). Defaults to its own private sockets so it
+# coexists with the shipped python sidecar; --canonical takes the real
+# Brain socket path (the binary's own flock/connect-probe guard refuses a
+# live python sidecar — stop daharness.service first).
+socket_live() {
+    [ -S "$1" ] && python3 -c "
+import socket, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    s.connect(sys.argv[1])
+    s.close()
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+" "$1" 2>/dev/null
+}
+
+cmd_brain() {
+    _canonical=0
+    for _a in "$@"; do case "$_a" in --canonical) _canonical=1 ;; esac; done
+    _bin=${BRAIN_BIN:-$DAHARNESS_RUST_TARGET/release/brain}
+    [ -x "$_bin" ] || { err "rust brain not built — run 'sudo daharness-rust build' first (or set BRAIN_BIN)"; exit 1; }
+    [ -r "$BRAIN_SRC/worker.py" ] || { err "python tool-worker not found at $BRAIN_SRC/worker.py — not a built rust lane"; exit 1; }
+
+    if [ "$_canonical" = "1" ]; then
+        # Canonical path: profile.d plumbing exports BRAIN_SOCKET on the deb
+        # lane (/run/daharness/brain.sock via the unit's RuntimeDirectory).
+        if [ -z "${BRAIN_SOCKET:-}" ]; then
+            err "--canonical: BRAIN_SOCKET is not set (source /etc/profile.d/daharness.sh or point it at the real path)"; exit 1
+        fi
+        if socket_live "$BRAIN_SOCKET"; then
+            err "the canonical brain socket is LIVE ($BRAIN_SOCKET) — the singleton guard would refuse; stop the shipped sidecar first:"
+            err "    sudo systemctl stop daharness"
+            exit 1
+        fi
+        say "canonical lane: $BRAIN_SOCKET (python sidecar must stay down)"
+    else
+        BRAIN_SOCKET=${DAHARNESS_RUST_BRAIN_SOCKET:-$RUN_DIR/brain-rust.sock}
+        say "private lane: $BRAIN_SOCKET (coexists with the shipped python sidecar)"
+    fi
+    BRAIN_WORKER_SOCKET=${DAHARNESS_RUST_WORKER_SOCKET:-$RUN_DIR/brain-worker.sock}
+    export BRAIN_WORKER_SOCKET
+
+    ensure_dirs
+    say "starting python tool-worker -> $BRAIN_WORKER_SOCKET"
+    python3 "$BRAIN_SRC/worker.py" &
+    _worker=$!
+    trap 'kill -TERM "$_worker" 2>/dev/null || true' EXIT INT TERM
+    # Worker bind is near-instant (bind + serve loop); the brain retries on
+    # its own, so a hard sleep is only cosmetic.
+    sleep 1
+    say "starting rust brain -> $BRAIN_SOCKET (worker backend: ${BRAIN_WORKER_DEMO:+demo}${BRAIN_WORKER_DEMO:-real})"
+    say "  smoke from another shell: python3 $BRAIN_SRC/smoke.py $BRAIN_SOCKET"
+    BRAIN_SOCKET="$BRAIN_SOCKET" BRAIN_WORKER_SOCKET="$BRAIN_WORKER_SOCKET" "$_bin"
+}
+
+case "${1:-status}" in
+    status) shift; cmd_status "$@" ;;
+    toolchain) shift; cmd_toolchain "$@" ;;
+    build) shift; cmd_build "$@" ;;
+    smoke) shift; cmd_smoke "$@" ;;
+    all)
+        cmd_toolchain && cmd_build && cmd_smoke ;;
+    brain) shift; cmd_brain "$@" ;;
+    --help|-h|help)
+        sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) err "unknown command: $1 (status|toolchain|build|smoke|all|brain)"; exit 1 ;;
+esac

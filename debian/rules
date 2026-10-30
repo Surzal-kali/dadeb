@@ -74,6 +74,11 @@ override_dh_auto_install:
 	# operator re-index pass: fresh deb ships an EMPTY registry;
 	# nothing fills it for you (daemon boot never indexes — deliberate).
 	install -D -m 0755 packaging/bin/daharness-index debian/daharness/usr/bin/daharness-index
+	# python/c -> python/rust upgrade lane (daharness-rust(1)): the three
+	# crate sources ship above; building them is the user's opt-in
+	# network step — one command instead of paste-bombs. Installed and
+	# inert until run, like daharness-pg.
+	install -D -m 0755 packaging/bin/daharness-rust debian/daharness/usr/bin/daharness-rust
 	# The IDE-facing stub lane ships with the wrapper that routes to it
 	# (daharness-index --stubs); the rest of scripts/ stays dev/container
 	# tooling, not package payload.

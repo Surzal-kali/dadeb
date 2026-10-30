@@ -33,6 +33,12 @@ daharness (0.2.0) kali; urgency=medium
   * Packaging alignment (this release):
     - debian/rules ships rust/ crate sources under
       /usr/share/daharness/rust/ (target/ + crate-internal run/ excluded).
+    - daharness-rust(1): the python/c -> python/rust upgrade lane —
+      status probes offline, toolchain/build/smoke are explicit network
+      steps (crate sources + Cargo.locks ship; builds land in the state
+      root, never the package tree), brain runs the rust sidecar + its
+      python tool-worker. Install stays isolated; nothing replaces the
+      shipped python lanes.
     - daharness-index(1): the removed --chat/secretary lane (removed
       2026-10-20) is retired from the docs — python -m daharness.core
       accepts --clear only; the driving LLM is external.

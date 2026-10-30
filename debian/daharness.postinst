@@ -255,4 +255,20 @@ if ! ([ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1); then
     unset _SRC
 fi
 
+# ────────────────────────────────────────────────────────────────────── #
+# rust upgrade lane hint (0.1.x -> 0.2.0: python/c -> python/rust)       #
+# ────────────────────────────────────────────────────────────────────── #
+# The 0.2.0 deb ships the three rust crates as SOURCE under
+# /usr/share/daharness/rust/ — deliberately unbuilt (the install stays
+# network-isolated; the deb build lane has no cargo). For users online,
+# building + verifying + running the rust sidecar lane is ONE command:
+# see daharness-rust(1). Echoed on UPGRADES ONLY (postinst $2 is the
+# previously installed version); a fresh install learns it from
+# daharness-rust status / the man page instead.
+if [ -n "${2:-}" ]; then
+    echo "daharness: rust crate sources shipped to /usr/share/daharness/rust/ (scratch, pcap, brain)"
+    echo "daharness:   upgrade lane: 'daharness-rust status' probes; 'sudo daharness-rust all' builds + tests it (network)"
+    echo "daharness:   nothing is built or replaced automatically — the python service lanes are unchanged"
+fi
+
 #DEBHELPER#
