@@ -23,7 +23,7 @@ use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use nix::unistd::{geteuid, Gid, Uid};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -145,21 +145,35 @@ impl ScratchStore {
         // --- data dir (0700) ------------------------------------------------
         fs::create_dir_all(data_dir)?;
         repair_ownership_if_needed(db_path, data_dir);
-        match fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700)) {
+        // SECURITY: open() may run as root over paths the (non-root)
+        // workspace owner controls, so permissions are set through an
+        // O_NOFOLLOW descriptor (fchmod), never by path. A symlinked data
+        // dir is allowed (e.g. pointed at a bigger disk) but never chmodded
+        // through: a planted `scratch-data -> /etc` must not get /etc 0700.
+        match open_nofollow(data_dir, true).and_then(|d| d.set_permissions(fs::Permissions::from_mode(0o700))) {
             Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => eprintln!(
+                "[scratch] data dir {} is a symlink; leaving its target's permissions alone",
+                data_dir.display()
+            ),
             // best-effort: non-POSIX fs or not owner — python's
             // `except OSError: pass`
             Err(e) => eprintln!("[scratch] data-dir chmod 0700 skipped: {e}"),
         }
 
         // --- sqlite ---------------------------------------------------------
-        let mut conn = Connection::open(db_path)?;
-        // scratch.db holds per-agent result payloads (same sensitivity as
-        // the 0700 data dir / 0600 files) — it must not be world-readable.
-        // After open(): the file may not exist beforehand.
-        if let Err(e) = fs::set_permissions(db_path, fs::Permissions::from_mode(0o600)) {
-            eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
-        }
+        // scratch.db holds per-agent metadata (agent/tool/chat ids, sizes,
+        // hashes) — it must not be world-readable. Create or chmod it 0600
+        // through an O_NOFOLLOW descriptor BEFORE sqlite touches it (no
+        // world-readable window on a fresh file), and open it with
+        // SQLITE_OPEN_NOFOLLOW: a symlinked scratch.db is refused outright
+        // — following it as root would chmod (and write a schema into)
+        // whatever the link points at. Divergence: the python store follows.
+        prepare_db_file(db_path)?;
+        let mut conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         conn.busy_timeout(Duration::from_millis(10_000))?;
         set_wal(&conn)?;
         // Python wraps table creation in `with self.conn:` — one transaction.
@@ -273,7 +287,9 @@ impl ScratchStore {
         let mut conn = lock(&self.conn);
 
         // Per-agent cap: evict oldest entries for this agent until within
-        // budget (python order: before id generation / payload write).
+        // budget. Divergence: python evicts before writing the payload; here
+        // the payload is already on disk (written outside the lock above),
+        // so disk use can briefly exceed the cap by this one entry.
         enforce_agent_cap(&mut conn, agent_id, self.config.max_agent_bytes, &self.data_dir)?;
 
         let now = now_secs();
@@ -523,6 +539,56 @@ impl ScratchStore {
 }
 
 // ---------------------------------------------------------------- helpers --
+
+/// Open `path` itself (never a symlink's target): ELOOP when it is a link.
+fn open_nofollow(path: &Path, dir: bool) -> std::io::Result<fs::File> {
+    let mut flags = nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
+    if dir {
+        flags |= nix::libc::O_DIRECTORY;
+    }
+    OpenOptions::new().read(true).custom_flags(flags).open(path)
+}
+
+/// Create `scratch.db` 0600 (O_EXCL|O_NOFOLLOW) or fchmod an existing one
+/// to 0600 through an O_NOFOLLOW descriptor. A symlink is a hard error; a
+/// chmod we aren't allowed to do (not owner) is logged and left to sqlite.
+fn prepare_db_file(db_path: &Path) -> Result<()> {
+    let created = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(db_path);
+    let file = match created {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match open_nofollow(db_path, false) {
+            Ok(f) => f,
+            Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => {
+                return Err(ScratchError::Io(std::io::Error::other(format!(
+                    "refusing to open {}: it is a symlink",
+                    db_path.display()
+                ))))
+            }
+            Err(e) => {
+                // e.g. root-owned db under a non-root run: the root guard
+                // already warned; let sqlite report the real failure.
+                eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
+                return Ok(());
+            }
+        },
+        Err(e) => return Err(e.into()),
+    };
+    if !file.metadata()?.file_type().is_file() {
+        return Err(ScratchError::Io(std::io::Error::other(format!(
+            "refusing to open {}: not a regular file",
+            db_path.display()
+        ))));
+    }
+    if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+        eprintln!("[scratch] db-file chmod 0600 skipped: {e}");
+    }
+    Ok(())
+}
 
 /// fs::read → MultiGzDecoder → UTF-8 → JSON, errors flattened into one
 /// Display string for the "corrupted" envelope (python catches OSError /
@@ -1390,5 +1456,59 @@ mod tests {
         chown_tree_nofollow(&linked, uid, gid);
         assert_eq!(owner(&outside), 0);
         assert_eq!(owner(&outside.join("shadow")), 0);
+    }
+
+    #[test]
+    fn symlinked_db_is_refused_and_target_untouched() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim-passwd");
+        fs::write(&victim, b"root:x:0:0::/root:/bin/sh\n").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, d.path().join("scratch.db")).unwrap();
+
+        let err = ScratchStore::open(
+            &d.path().join("scratch.db"),
+            &d.path().join("scratch-data"),
+            cfg(24.0, 1024, 1024),
+        )
+        .err()
+        .expect("a symlinked scratch.db must be refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        let mode = fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the link target must keep its permissions");
+        assert_eq!(fs::read(&victim).unwrap(), b"root:x:0:0::/root:/bin/sh\n");
+    }
+
+    #[test]
+    fn symlinked_data_dir_target_is_not_chmodded() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("bigdisk");
+        fs::create_dir(&outside).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&outside, d.path().join("scratch-data")).unwrap();
+
+        let store = ScratchStore::open(
+            &d.path().join("scratch.db"),
+            &d.path().join("scratch-data"),
+            cfg(24.0, 1024, 1024),
+        )
+        .expect("a symlinked data dir is allowed");
+        let mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "must not chmod through the link");
+        // and the store still works through it
+        let r = store.store(&json!({"k": "v"}), "a", "t", None).unwrap();
+        assert_eq!(store.retrieve(&r.scratch_ref, "a", RetrieveOpts::default()).unwrap()["status"], "ok");
+    }
+
+    #[test]
+    fn existing_world_readable_db_is_tightened_to_0600() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("scratch.db");
+        drop(ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024)).unwrap());
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+        let store = ScratchStore::open(&db, &d.path().join("scratch-data"), cfg(24.0, 1024, 1024)).unwrap();
+        assert_eq!(fs::metadata(&store.db_path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
