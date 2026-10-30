@@ -263,15 +263,17 @@ cmd_brain() {
     BRAIN_SOCKET="$BRAIN_SOCKET" BRAIN_WORKER_SOCKET="$BRAIN_WORKER_SOCKET" "$_bin"
 }
 
-case "${1:-status}" in
-    status) shift; cmd_status "$@" ;;
-    toolchain) shift; cmd_toolchain "$@" ;;
-    build) shift; cmd_build "$@" ;;
-    smoke) shift; cmd_smoke "$@" ;;
+cmd=${1:-status}
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+    status) cmd_status "$@" ;;
+    toolchain) cmd_toolchain "$@" ;;
+    build) cmd_build "$@" ;;
+    smoke) cmd_smoke "$@" ;;
     all)
         cmd_toolchain && cmd_build && cmd_smoke ;;
-    brain) shift; cmd_brain "$@" ;;
+    brain) cmd_brain "$@" ;;
     --help|-h|help)
         sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) err "unknown command: $1 (status|toolchain|build|smoke|all|brain)"; exit 1 ;;
+    *) err "unknown command: $cmd (status|toolchain|build|smoke|all|brain)"; exit 1 ;;
 esac
