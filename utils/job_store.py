@@ -49,16 +49,21 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import subprocess
 import threading
 import time
 import uuid
-import weakref
 from pathlib import Path
 from typing import Any, Callable
 
 from constants import resolve_workspace_root
+from utils import _jobstore_reaper as _reaper
+from utils._jobstore_procs import (
+    _pid_alive,
+    _pid_matches,
+    _proc_start_ticks,
+    _terminate_proc_tree,
+)
 
 _DEFAULT_ROOT = resolve_workspace_root()
 _DEFAULT_JOBS_DIR = _DEFAULT_ROOT / "run" / "jobs"
@@ -86,16 +91,6 @@ _JOBS_LOG_GC_INTERVAL_DEFAULT = 1800.0
 # counts). Zero = never ran — the first pass after import proceeds.
 _LOG_GC_LAST = 0.0
 _LOG_GC_LOCK = threading.Lock()
-
-# Process-liveness poll cadence inside a single terminate() await-grace loop.
-_TERMINATE_GRACE_S = 5.0
-
-_REAPER_THREAD: threading.Thread | None = None
-_REAPER_WAKE = threading.Event()
-# Live store instances the single background reaper services. Weak — a
-# store dropped by its owner (per-test instances) stops being reaped.
-_ACTIVE_STORES: "weakref.WeakSet[JobStore]" = weakref.WeakSet()
-_ACTIVE_LOCK = threading.Lock()
 
 # Live children OF THIS PROCESS, process-scoped — deliberately NOT
 # per-instance. The env-keyed singleton may legitimately rebuild mid-flight
@@ -137,168 +132,6 @@ def _log_gc_hours() -> float:
 def _log_gc_interval() -> float:
     raw = os.getenv("BG_LOG_GC_INTERVAL_S", "").strip()
     return float(raw) if raw else _JOBS_LOG_GC_INTERVAL_DEFAULT
-
-
-def _terminate_proc_tree(
-    pid: int, *, pid_start: float | None = None, started: float | None = None
-) -> bool:
-    """SIGTERM the process group (jobs spawn with start_new_session=True,
-    so the pgid == pid), grace-wait, then SIGKILL stragglers. Surgical:
-    never a global sweep, matching scale-doctrine rule 3.
-
-    PID-fence: when the stored pid now belongs to a DIFFERENT process
-    (start mismatch against the row's recorded /proc starttime ticks —
-    legacy rows fall back to the ``started`` epoch estimate), nothing is
-    signalled and False is returned — killing an innocent process that
-    recycled the pid is the one unrecoverable outcome here.
-
-    Grace detection has a zombie trap: a dead-but-unreaped child answers
-    ``os.kill(pid, 0)`` successfully (the pid entry stays until waitpid).
-    So each grace tick ALSO tries a nonblocking waitpid — for our own
-    children that reaps the zombie instantly and ends the wait; for
-    foreign pids the EINVAL/ChildError is ignored and kill(pid,0) decides.
-    """
-    if _pid_matches(pid, pid_start, started) is False:
-        return False  # pid was recycled — refuse to signal the new occupant
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            return True
-    import errno
-
-    deadline = time.monotonic() + _TERMINATE_GRACE_S
-    while time.monotonic() < deadline:
-        # Reap if it's our child (WNOHANG: 0 = still running, pid = reaped).
-        try:
-            wpid, _status = os.waitpid(pid, os.WNOHANG)
-            if wpid == pid:
-                return True  # reaped — fully dead, no zombie trap
-        except (ChildProcessError, OSError) as exc:
-            if getattr(exc, "errno", None) == errno.ECHILD:
-                pass  # not our child — fall through to the pid probe
-            else:
-                pass  # transient; the probe decides
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True  # exited (and someone else reaped it)
-        except (PermissionError, OSError):
-            return True  # alive but not signalable further
-        time.sleep(0.2)
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    return True
-
-
-def _pid_alive(pid: int | None) -> bool | None:
-    """True/False when a pid exists, None when unknown (no pid recorded)."""
-    if not pid:
-        return None
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError, ValueError):
-        return True  # exists but not signalable — treat as alive
-
-
-def _clock_ticks_per_second() -> float:
-    try:
-        return float(os.sysconf(os.sysconf_names["SC_CLK_TCK"]))
-    except (KeyError, ValueError, OSError, AttributeError):
-        return 100.0  # Linux default
-
-
-def _proc_boot_epoch() -> float | None:
-    """Boot time (epoch seconds) from the btime line of /proc/stat."""
-    try:
-        with open("/proc/stat", "r") as fh:
-            for line in fh:
-                if line.startswith("btime "):
-                    return float(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
-
-
-def _proc_start_ticks(pid: int | None) -> float | None:
-    """Field 22 of /proc/<pid>/stat — the process's starttime in clock
-    ticks since boot. Comm (field 2) may contain spaces and parens, so
-    parse after the LAST ')'. Raw ticks are deliberately preferred over
-    a btime-derived epoch (jiffies freeze across suspend while the wall
-    clock advances, so ONLY the raw-tick compare is suspension-immune)."""
-    if not pid:
-        return None
-    try:
-        with open(f"/proc/{int(pid)}/stat", "rb") as fh:
-            data = fh.read().decode("utf-8", "replace")
-    except (OSError, ValueError):
-        return None
-    rparen = data.rfind(")")
-    if rparen < 0:
-        return None
-    fields = data[rparen + 1 :].split()
-    if len(fields) < 20:
-        return None
-    try:
-        return float(fields[19])
-    except ValueError:
-        return None
-
-
-def _epoch_from_ticks(
-    ticks: float, btime: float | None = None
-) -> float | None:
-    """Epoch estimate for a starttime-ticks value (legacy rows only)."""
-    if btime is None:
-        btime = _proc_boot_epoch()
-    if btime is None:
-        return None
-    return btime + ticks / _clock_ticks_per_second()
-
-
-_PID_START_LEGACY_TOL_S = 3.0
-
-
-def _pid_matches(
-    pid: int | None,
-    pid_start: float | None = None,
-    started: float | None = None,
-) -> bool | None:
-    """Does the pid recorded on a row still name the SAME process?
-
-    - New rows store raw ``/proc`` starttime ticks (``pid_start``): the
-      compare is exact and definitive — False means the pid was reused
-      by a different process.
-    - Legacy rows (``pid_start`` NULL) fall back to an epoch estimate
-      from the ticks against the row's ``started`` timestamp with a
-      small tolerance (wall-clock skew between Popen and the row write).
-      Suspend in the window can skew the estimate, so a legacy mismatch
-      is trusted only in the SAFE direction (refusing to signal), never
-      for stamping a live row finished.
-    - ``None`` (no pid, /proc missing, /proc/stat unreadable) — cannot
-      verify; callers keep today's behavior.
-    """
-    ticks = _proc_start_ticks(pid)
-    if ticks is None:
-        return None
-    if pid_start is not None:
-        return abs(ticks - float(pid_start)) < 0.5
-    if started is not None:
-        est = _epoch_from_ticks(ticks)
-        if est is None:
-            return None
-        return abs(est - float(started)) <= _PID_START_LEGACY_TOL_S
-    return None
 
 
 # Verdict parsers are PROCESS-WIDE registrations (tool modules register at
@@ -599,7 +432,7 @@ class JobStore:
                 # "unknown". Fail honestly instead.
                 raise
         self._enforce_caps(agent_id)
-        _REAPER_WAKE.set()
+        _reaper.wake()
 
         return {
             "job_id": job_id,
@@ -1082,35 +915,10 @@ class JobStore:
     # -- reaper -------------------------------------------------------------------
 
     def _ensure_reaper(self) -> None:
-        """Register this store for the ONE background reaper thread — no
-        thread per job, no thread per store (per-test instances share it)."""
-        global _REAPER_THREAD
-        with _ACTIVE_LOCK:
-            _ACTIVE_STORES.add(self)
-            if _REAPER_THREAD is not None and _REAPER_THREAD.is_alive():
-                return
-        _REAPER_THREAD = threading.Thread(
-            target=self._reaper_loop, name="job-store-reaper", daemon=True
-        )
-        _REAPER_THREAD.start()
+        """Register this store for the ONE background reaper thread."""
+        _reaper.register(self)
 
-    @staticmethod
-    def _reaper_loop() -> None:
-        interval = _reaper_interval()
-        while True:
-            _REAPER_WAKE.wait(timeout=interval)
-            _REAPER_WAKE.clear()
-            with _ACTIVE_LOCK:
-                stores = list(_ACTIVE_STORES)
-            for store in stores:
-                try:
-                    store._reaper_pass()
-                except Exception:
-                    import logging
-
-                    logging.getLogger(__name__).debug(
-                        "[jobs] reaper pass failed", exc_info=True
-                    )
+    # -- reaper pass (thread body: utils._jobstore_reaper._reaper_loop) ----------
 
     def _reaper_pass(self) -> None:
         rows = self.conn.execute(

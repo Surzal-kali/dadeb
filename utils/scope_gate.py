@@ -87,14 +87,30 @@ import ipaddress
 import json
 import os
 import re
-import socket
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from constants import resolve_workspace_root
+from utils._scope_gate_disabled import (
+    disable_tools,
+    disabled_reject_envelope,
+    enable_tools,
+    is_disabled,
+    list_disabled,
+)
+from utils._scope_gate_net import (
+    _expand_comma_shorthand,
+    _forward_confirm,
+    _is_cidr,
+    _is_gated_target,
+    _is_ip,
+    _range_endpoints,
+    _resolved_ips,
+    _reverse_dns,
+    _spec_to_checkable,
+)
+
 
 def _state_path() -> Path:
     """Resolve the armed-state file path at CALL time, not import time
@@ -175,152 +191,9 @@ def _load_manifest(handle: str, platform: str) -> dict[str, Any] | None:
 
 
 # --------------------------------------------------------------------------- #
-# Small host/IP shape helpers
-# --------------------------------------------------------------------------- #
-
-def _is_ip(s: str) -> bool:
-    try:
-        ipaddress.ip_address(s.strip())
-        return True
-    except ValueError:
-        return False
-
-
-def _is_cidr(s: str) -> bool:
-    if "/" not in s:
-        return False
-    try:
-        ipaddress.ip_network(s.strip(), strict=False)
-        return True
-    except ValueError:
-        return False
-
-
-def _is_hyphen_range(text: str) -> bool:
-    """nmap/masscan numeric ranges only — both sides of the last dash must
-    be numeric-shaped ('10.0.0.1-50', '10.0.0.1-10.0.0.25', '1-50').  Real
-    nmap ranges are numeric on both sides, so hostnames with digit-hyphen-
-    digit shapes ('co-uk', 's3-2024.example.com', 'wordpress-2024.example.com')
-    stop false-matching and fall through to hostname matching.  Octet-range
-    forms ('10.0.0-255.1-254') also fall through → unmatched → refused
-    (strict) — same end state as the previous broad-refuse, while hostname
-    misrefusals are fixed."""
-    if "-" not in text:
-        return False
-    left, _, right = text.rpartition("-")
-    left_v4  = left.count(".") == 3 and all(p.isdigit() for p in left.split("."))
-    right_v4 = right.count(".") == 3 and all(p.isdigit() for p in right.split("."))
-    return (left_v4 and right_v4) or (left_v4 and right.isdigit()) \
-        or (left.isdigit() and right.isdigit())
-
-
-def _reverse_dns(ip: str, timeout: float = 2.0) -> list[str]:
-    """PTR-lookup an IP, returning lowercased hostnames.  Capped at 2s so a
-    slow/broken resolver never pins a scan.  Failure → empty list, which the
-    gate treats as 'unconfirmed'."""
-    try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(socket.gethostbyaddr, ip)
-            host, aliases, _ = fut.result(timeout=timeout)
-        names = [host.lower()] + [a.lower() for a in (aliases or [])]
-        return [n for n in names if n]
-    except Exception:
-        return []
-
-
-def _forward_confirm(host: str, ip: str, timeout: float = 2.0) -> bool:
-    """Forward-confirm a PTR hostname back to ``ip`` (tier-3 acceptance).
-
-    PTR records are attacker-settable, so an in-scope PTR name may only
-    auto-allow when its A record resolves to the same IP that was scanned.
-    Capped at ``timeout`` like :func:`_reverse_dns` so a slow/broken resolver
-    never pins a scan; any failure → False (no auto-allow, fail-closed).
-    """
-    try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(socket.gethostbyname, host)
-            return fut.result(timeout=timeout) == ip
-    except Exception:
-        return False
-
-
-def _is_gated_target(ip: str) -> bool:
-    """True only for routable unicast IPs directed at a real host.  Loopback,
-    link-local, multicast, broadcast/reserved, and unspecified addresses are
-    local-network traffic, not bounty-host probes — never gate them."""
-    try:
-        addr = ipaddress.ip_address(ip.strip())
-    except ValueError:
-        return False  # not an IP at all (e.g. a bare MAC) — can't gate
-    return not (
-        addr.is_loopback
-        or addr.is_link_local
-        or addr.is_multicast
-        or addr.is_unspecified
-        or addr.is_reserved
-    )
-
-
-# --------------------------------------------------------------------------- #
-def _resolved_ips(host: str, timeout: float = 2.0) -> list[str]:
-    """Forward-resolve a hostname to its CURRENT IP set (bounded).
-
-    Used only by the optional ``--ip-boundary`` tier: a hostname asset passes
-    the operator's IP boundary when every address it resolves to right now is
-    in the blessed allowlist.  Capped at ``timeout`` like
-    :func:`_reverse_dns` so a slow/broken resolver never pins a scan; any
-    failure -> empty list, which the boundary treats as 'unconfirmable'
-    (refused, fail-closed).
-    """
-
-    def _resolve() -> list[str]:
-        infos = socket.getaddrinfo(host, None)
-        return sorted({info[4][0] for info in infos})
-
-    try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_resolve)
-            return fut.result(timeout=timeout)
-    except Exception:
-        return []
-
-
-# --------------------------------------------------------------------------- #
 # Per-target verdict (shared by check_send and check_scan)
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
-
-def _range_endpoints(spec: str) -> tuple[Any, Any] | None:
-    """Parse a hyphen range into (low, high) IP addresses, or None.
-
-    Both endpoint spellings: full IPs ("10.0.0.5-10.0.0.30") and the
-    last-octet shorthand ("10.0.0.5-30" — the right side inherits the
-    left's first three octets).  Returns None for anything that is not a
-    clean numeric range (hyphenated hostnames, mixed v4/v6, reversed
-    bounds are normalized by min/max).
-    """
-    if "/" in spec or "-" not in spec:
-        return None
-    left, _, right = spec.strip().rpartition("-")
-    if not left or not right:
-        return None
-    left, right = left.strip(), right.strip()
-    anchor = ""
-    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", left):
-        anchor = ".".join(left.split(".")[:3]) + "."
-    if right.isdigit() and len(right) <= 3:
-        if not anchor:
-            return None
-        right = anchor + right  # last-octet shorthand
-    try:
-        lo = ipaddress.ip_address(left)
-        hi = ipaddress.ip_address(right)
-    except ValueError:
-        return None
-    if lo.version != hi.version:
-        return None
-    return (lo, hi) if int(lo) <= int(hi) else (hi, lo)
-
 
 def _check_one(checkable: str | None, state: dict[str, Any]) -> tuple[bool, str]:
     """Verdict for a single hostname or IP against the armed scope.
@@ -590,28 +463,6 @@ def _check_broad(spec: str, state: dict[str, Any]) -> tuple[bool, str]:
 # Public verdicts (called by traffic-sending tools)
 # --------------------------------------------------------------------------- #
 
-def _expand_comma_shorthand(raw: str) -> str:
-    """Expand nmap-style octet-list commas: 'a.b.c.d,e,f' -> full IPs.
-
-    Only rewrites comma-runs anchored on a dotted quad with BARE-octet
-    followers (192.168.90.114,115,116,118).  Full-IP comma merges
-    ('a.b.c.d,w.x.y.z'), CIDRs, hyphen ranges, and hostnames pass through
-    untouched — nmap's own octet-list syntax stays one argv element for
-    run_nmap, while the gate gets fully-qualified targets to validate.
-    """
-
-    def _expand(match: re.Match[str]) -> str:
-        anchor = match.group(0).split(",")[0]
-        prefix = anchor.rsplit(".", 1)[0]
-        followers = re.findall(r",(\d{1,3})", match.group(0))
-        return ",".join([anchor] + [f"{prefix}.{o}" for o in followers])
-
-    return re.sub(
-        r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?:,\d{1,3})+(?![\d.])",
-        _expand,
-        raw,
-    )
-
 def check_send(dst_ip: str | None) -> tuple[bool, str]:
     """Verdict for a single packet destination IP (packetcraft).
 
@@ -679,31 +530,6 @@ def check_scan(target: str | None) -> tuple[bool, str]:
     if warnings:
         summary += " | " + " | ".join(warnings)
     return True, summary
-
-
-def _spec_to_checkable(spec: str) -> tuple[str | None, bool]:
-    """Reduce one target spec to a (checkable_hostname_or_ip, is_broad_range).
-
-    ``is_broad_range`` is True for CIDRs wider than /32 and hyphen-ranges,
-    which are handled by :func:`_check_broad` instead of host-by-host.
-    """
-    spec = spec.strip()
-    if "://" in spec:
-        host = urlparse(spec).hostname
-        return (host, False) if host else (None, False)
-    if _is_cidr(spec):
-        try:
-            net = ipaddress.ip_network(spec, strict=False)
-        except ValueError:
-            return (spec, False)
-        if net.prefixlen in (32, 128):
-            return (str(net.network_address), False)
-        return (None, True)
-    if _is_hyphen_range(spec):
-        return (None, True)
-    if _is_ip(spec):
-        return (spec, False)
-    return (spec, False)  # bare hostname
 
 
 # --------------------------------------------------------------------------- #
@@ -1003,181 +829,6 @@ def status() -> dict[str, Any]:
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Tool-disable list — operator authority over non-traffic tools
-# --------------------------------------------------------------------------- #
-#
-# The scope gate governs WIRE TRAFFIC (check_scan/check_send resolve target
-# hosts/IPs against the manifest). Cracking and other offline compute have
-# no target IP, so the traffic gate never sees them. The disabled_tools
-# list is the operator's blunt brake: a tool_id (or family prefix) the
-# model may not dispatch while the scope is armed. Applies only while
-# armed — disarmed = lab = unrestricted stays the standing posture. Same
-# armed-state file, same mtime-checked _load_state(), same atomic
-# _write_state(), same operator-only authority: no model lane can write it.
-#
-# Prefix matching mirrors TOOL_BUDGET_TERMINAL_ALLOWLIST:
-#   trailing-dot family prefix  ("payloads.hash_crack.")  → kills the family
-#   bare stem, no dot           ("...run_john")           → exact tool_id only
-
-# Terminal-lane prefixes that may NOT be disabled without --force — a model
-# that can't write findings or memory can't comply with anything (tool_budget
-# terminal-allowlist precedent).
-_TERMINAL_PREFIXES = ("utils.memory_tools.", "utils.findings.")
-
-
-def _matches_disabled(tool_id: str, prefixes: list[str]) -> str | None:
-    """Return the prefix that disables ``tool_id``, or None.
-
-    A trailing-dot prefix (``payloads.hash_crack.``) matches the whole family
-    via startswith; a bare stem (no trailing dot) is an exact tool_id match
-    only, so a typo can't silently become a family kill.
-    """
-    if not tool_id or not prefixes:
-        return None
-    for p in prefixes:
-        if not p:
-            continue
-        if p.endswith("."):
-            if tool_id.startswith(p):
-                return p
-        elif tool_id == p:
-            return p
-    return None
-
-
-def is_disabled(tool_id: str) -> tuple[bool, str | None]:
-    """Verdict: is ``tool_id`` disabled for the armed scope?
-
-    Returns ``(True, prefix)`` when disabled (``prefix`` is the list entry
-    that matched, for the remediation string), ``(False, None)`` when not
-    disabled or no scope is armed. Mtime-cached like every other read here
-    so a REPL-side ``scope disable`` is visible to a running Brain on the
-    very next call.
-    """
-    state = _load_state()
-    if state is None:
-        return False, None
-    prefixes = list(state.get("disabled_tools") or [])
-    match = _matches_disabled(tool_id, prefixes)
-    if match is not None:
-        return True, match
-    return False, None
-
-
-def disable_tools(prefixes: list[str], *, force: bool = False) -> dict[str, Any]:
-    """Add tool_id prefixes to the disabled list (REPL authority).
-
-    Requires the gate to be armed — the disable list is an engagement-posture
-    control, not a lab-mode control. Refuses to disable terminal-lane
-    families (findings/memory) without ``force`` — a model that can't report
-    findings or write memory is trapped with no way to comply.
-    """
-    state = _load_state()
-    if state is None:
-        return {"ok": False, "error": "no scope armed; run 'scope on <handle>' first"}
-    clean = [p.strip() for p in (prefixes or []) if p.strip()]
-    if not clean:
-        return {"ok": False, "error": "at least one prefix is required: scope disable <prefix> [...]"}
-    # Terminal-lane guard: refuse without --force.
-    blocked: list[str] = []
-    if not force:
-        for p in clean:
-            if any(p.startswith(tp) or tp.startswith(p) for tp in _TERMINAL_PREFIXES):
-                blocked.append(p)
-        if blocked:
-            return {
-                "ok": False,
-                "error": (
-                    f"refusing to disable terminal-lane family {blocked} — a "
-                    "model that can't write findings or memory can't comply "
-                    "with anything. Re-run with --force to override."
-                ),
-            }
-    current = list(state.get("disabled_tools") or [])
-    added: list[str] = []
-    for p in clean:
-        if p not in current:
-            current.append(p)
-            added.append(p)
-    state["disabled_tools"] = current
-    _write_state(state)
-    return {
-        "ok": True,
-        "disabled_tools": current,
-        "added": added,
-        "count": len(current),
-        "message": f"disabled {len(added)} prefix(es)" + (
-            "; list now: " + ", ".join(current) if current else ""
-        ),
-    }
-
-
-def enable_tools(prefixes: list[str]) -> dict[str, Any]:
-    """Remove tool_id prefixes from the disabled list (REPL authority)."""
-    state = _load_state()
-    if state is None:
-        return {"ok": False, "error": "no scope armed"}
-    clean = [p.strip() for p in (prefixes or []) if p.strip()]
-    if not clean:
-        return {"ok": False, "error": "at least one prefix is required: scope enable <prefix> [...]"}
-    current = list(state.get("disabled_tools") or [])
-    removed: list[str] = []
-    for p in clean:
-        if p in current:
-            current.remove(p)
-            removed.append(p)
-    state["disabled_tools"] = current
-    _write_state(state)
-    return {
-        "ok": True,
-        "disabled_tools": current,
-        "removed": removed,
-        "count": len(current),
-        "message": f"enabled {len(removed)} prefix(es)" + (
-            "; list now: " + ", ".join(current) if current else " (list empty)"
-        ),
-    }
-
-
-def list_disabled() -> dict[str, Any]:
-    """List the disabled prefixes + a per-tool verdict probe (REPL +
-    agent-callable ``scope_status`` surface — read-only)."""
-    state = _load_state()
-    if state is None:
-        return {"ok": True, "armed": False, "disabled_tools": [], "message": "disarmed (lab mode — no disable list)"}
-    prefixes = list(state.get("disabled_tools") or [])
-    return {
-        "ok": True,
-        "armed": True,
-        "disabled_tools": prefixes,
-        "count": len(prefixes),
-        "message": f"{len(prefixes)} disabled prefix(es)" if prefixes else "no tools disabled",
-    }
-
-
-def disabled_reject_envelope(tool_id: str, prefix: str) -> dict[str, Any]:
-    """Structured reject envelope for a disabled-tool dispatch refusal.
-
-    Used by both enforcement points (executor preflight + Brain CALL_TOOL
-    guard) so the model reads a consistent Failed status + remediation.
-    """
-    return {
-        "status": "Failed",
-        "error": (
-            f"tool {tool_id!r} is disabled for the armed scope "
-            f"(matched disable prefix {prefix!r}). The operator turned it "
-            "off for this engagement."
-        ),
-        "remediation": (
-            "Ask the operator to re-enable it ('scope enable <prefix>' in "
-            "the Tool REPL), or use an alternative tool. This is an "
-            "authorization brake, not hash-provenance enforcement — the "
-            "list can't tell whether a hash came from an in-scope dump."
-        ),
-        "disabled": True,
-        "matched_prefix": prefix,
-    }
 
 
 def is_armed() -> bool:

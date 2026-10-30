@@ -8,20 +8,28 @@ one-line pointers are stored in vector memory via ``remember_text``.
 
 The markdown renderer in :meth:`FindingStore.render_markdown` doubles as a
 bug-bounty submission draft and lab documentation, all from the same data.
+
+Internal logic is split downward into private siblings next to this module
+(:mod:`daharness._findings_store` — DDL/connection/SQL write lane,
+:mod:`daharness._findings_ledger` — unknowns ledger,
+:mod:`daharness._findings_render` — markdown shaping).  This module remains
+the only public import surface.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
-from .models import Finding, Unknown
+
 from constants import resolve_workspace_root
+
+from . import _findings_ledger as _ledger
+from . import _findings_render as _render
+from . import _findings_store as _store
+from .models import Finding, Unknown
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +63,9 @@ def ensure_ids_db(db_path: str | None = None) -> Path:
     store = FindingStore(str(path))
     try:
         conn = store.conn
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS targets
-            (id INTEGER PRIMARY KEY, ip_address TEXT, port INTEGER, status TEXT)"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS sessions
-            (id INTEGER PRIMARY KEY, target_id INTEGER, payload TEXT, status TEXT,
-             start_time DATETIME, end_time DATETIME, note TEXT,
-             FOREIGN KEY(target_id) REFERENCES targets(id))"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS notes
-            (id INTEGER PRIMARY KEY, target_id INTEGER, note TEXT,
-             FOREIGN KEY(target_id) REFERENCES targets(id))"""
-        )
+        conn.execute(_store.TARGETS_TABLE_DDL)
+        conn.execute(_store.SESSIONS_TABLE_DDL)
+        conn.execute(_store.NOTES_TABLE_DDL)
         conn.commit()
     finally:
         store.close()
@@ -80,6 +76,10 @@ def ensure_ids_db(db_path: str | None = None) -> Path:
 
 class FindingStore:
     """Append-only findings store backed by a SQLite table in ``ids.db``."""
+
+    _VALID_STATUSES = _store.VALID_FINDING_STATUSES
+    _VALID_UNKNOWN_DOMAINS = _ledger.VALID_UNKNOWN_DOMAINS
+    _VALID_UNKNOWN_STATUSES = _ledger.VALID_UNKNOWN_STATUSES
 
     def __init__(self, db_path: str | None = None):
         # Workspace-resolved default (never tree-relative: a hardcoded
@@ -130,149 +130,21 @@ class FindingStore:
     def _repair_ownership_if_needed(self) -> None:
         """Chown ids.db + WAL + SHM back to the workspace owner.
 
-        Mirrors utils/scratch_store.py and utils/cookie_jar.py.  When the
-        framework runs as root, SQLite creates ids.db, ids.db-wal, and
-        ids.db-shm as root-owned.  WAL mode needs write access to all three
-        DB files; a subsequent non-root run can't write the WAL/SHM sidecars
-        and gets "database is locked" instead of a clean permission error.
-
-        ids.db is shared with utils/sessions.py and
-        auxiliaries/framework_status.py — fixing it here covers all three
-        callers since they open the same physical file.
+        See :func:`daharness._findings_store.repair_db_ownership` — the
+        mechanics and rationale live there (mirrors utils/scratch_store.py
+        and utils/cookie_jar.py).
         """
-        import logging
-        log = logging.getLogger(__name__)
-        db_p = Path(self.db_path)
-        workspace_root = resolve_workspace_root()
-
-        try:
-            ws_stat = workspace_root.stat()
-            target_uid = ws_stat.st_uid
-            target_gid = ws_stat.st_gid
-        except OSError:
-            return
-
-        if target_uid == 0:
-            return  # workspace is root-owned; consistent
-
-        is_root = os.geteuid() == 0
-        files_to_check = [
-            db_p,
-            db_p.with_name(db_p.name + "-wal"),
-            db_p.with_name(db_p.name + "-shm"),
-        ]
-
-        needs_repair = False
-        for f in files_to_check:
-            try:
-                if f.exists() and f.stat().st_uid == 0:
-                    needs_repair = True
-                    break
-            except OSError:
-                pass
-
-        if not needs_repair:
-            return
-
-        if not is_root:
-            log.warning(
-                "[findings] %s and/or WAL/SHM files are root-owned but "
-                "the framework is running as non-root (uid=%d). SQLite WAL "
-                "mode needs write access to all three DB files. The findings "
-                "store will fail with 'database is locked' on writes. Fix: "
-                "run once as root to trigger the auto-repair, or run: "
-                "sudo chown %d:%d %s %s-wal %s-shm",
-                db_p, os.geteuid(), target_uid, target_gid, db_p, db_p, db_p,
-            )
-            return
-
-        import subprocess
-        chown_spec = f"{target_uid}:{target_gid}"
-        for f in files_to_check:
-            if f.exists():
-                try:
-                    subprocess.run(
-                        ["chown", chown_spec, str(f)],
-                        check=False, capture_output=True, timeout=5,
-                    )
-                except Exception:
-                    pass
-        log.info(
-            "[findings] Root guard: chowned ids.db + WAL + SHM back to "
-            "uid=%d (workspace owner). A prior root run had root-owned "
-            "these files, which would make the next non-root run fail with "
-            "'database is locked'.",
-            target_uid,
-        )
+        _store.repair_db_ownership(self.db_path)
 
     def _init_table(self) -> None:
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS findings (
-                id          TEXT PRIMARY KEY,
-                title       TEXT NOT NULL,
-                severity    TEXT NOT NULL,
-                cwe         TEXT,
-                asset       TEXT NOT NULL,
-                evidence    TEXT,
-                repro       TEXT,
-                tool_chain  TEXT,
-                memory_ref  TEXT,
-                ts          TEXT NOT NULL
-            )
-            """
-        )
-        # --- unknown ledger (open questions, REA-style) -------------------
-        # A Finding records a conclusion; an Unknown records an explicit "I
-        # don't know yet" — an unprobed service, a credential not yet
-        # validated against other services, an ambiguous result, a scope
-        # question.  Same DB, separate table, so render_findings stays a
-        # conclusions report and the ledger never pollutes it.
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS unknowns (
-                id          TEXT PRIMARY KEY,
-                question    TEXT NOT NULL,
-                domain      TEXT NOT NULL DEFAULT 'general',
-                asset       TEXT,
-                context     TEXT,
-                opened_by   TEXT,
-                resolution  TEXT,
-                resolved_by TEXT,
-                status      TEXT NOT NULL DEFAULT 'open',
-                ts          TEXT NOT NULL,
-                closed_ts   TEXT
-            )
-            """
-        )
-        # --- migrations: add lifecycle columns to pre-existing tables ---
-        # ALTER TABLE ... ADD COLUMN is idempotent-safe: we check the existing
-        # columns first and only add the ones that are missing.  This lets the
-        # store work on both fresh databases and ones with legacy schema.
-        existing_cols = {
-            row[1]
-            for row in self.conn.execute("PRAGMA table_info(findings)").fetchall()
-        }
-        migrations = [
-            ("status", "TEXT NOT NULL DEFAULT 'open'"),
-            ("superseded_by", "TEXT"),
-            ("closed_by", "TEXT"),
-            ("closed_reason", "TEXT"),
-            ("closed_ts", "TEXT"),
-        ]
-        for col_name, col_def in migrations:
-            if col_name not in existing_cols:
-                self.conn.execute(
-                    f"ALTER TABLE findings ADD COLUMN {col_name} {col_def}"
-                )
-        self.conn.commit()
+        """Create the findings + unknowns tables and apply lifecycle migrations.
+
+        The DDL/migration building blocks live in
+        :mod:`daharness._findings_store`.
+        """
+        _store.init_findings_tables(self.conn)
 
     # -- unknown ledger (open questions) -----------------------------------
-
-    _VALID_UNKNOWN_DOMAINS = {
-        "recon", "web", "creds", "enum", "postex", "scope", "general",
-    }
-    _VALID_UNKNOWN_STATUSES = {"open", "resolved", "wontfix", "promoted"}
 
     def add_unknown(
         self,
@@ -283,75 +155,20 @@ class FindingStore:
         opened_by: str = "",
     ) -> Unknown:
         """Record an open question and return the minted Unknown (U-001 style id)."""
-        domain = (domain or "general").strip().lower()
-        if domain not in self._VALID_UNKNOWN_DOMAINS:
-            raise ValueError(
-                f"Invalid domain {domain!r}. Must be one of: "
-                f"{', '.join(sorted(self._VALID_UNKNOWN_DOMAINS))}"
-            )
-        ts = datetime.now(timezone.utc).isoformat()
-
-        # Same lost-id race handling as findings.add: concurrent writers
-        # (gateway + secretary + MCP clients share ids.db) can compute the
-        # same U-id; the PRIMARY KEY turns that into a loud IntegrityError
-        # and we recount/retry.
-        last_exc: BaseException | None = None
-        unknown: Unknown | None = None
-        for _attempt in range(10):
-            cur = self.conn.execute("SELECT COUNT(*) FROM unknowns")
-            unknown_id = f"U-{cur.fetchone()[0] + 1:03d}"
-            unknown = Unknown(
-                id=unknown_id,
-                question=question,
-                domain=domain,
-                asset=asset or "",
-                context=context or "",
-                opened_by=opened_by or "",
-                ts=ts,
-            )
-            try:
-                with self.conn:  # atomic INSERT + commit
-                    self.conn.execute(
-                        """
-                        INSERT INTO unknowns
-                            (id, question, domain, asset, context, opened_by,
-                             resolution, resolved_by, status, ts, closed_ts)
-                        VALUES (?, ?, ?, ?, ?, ?, '', '', 'open', ?, '')
-                        """,
-                        (
-                            unknown.id,
-                            unknown.question,
-                            unknown.domain,
-                            unknown.asset,
-                            unknown.context,
-                            unknown.opened_by,
-                            unknown.ts,
-                        ),
-                    )
-                return unknown
-            except sqlite3.IntegrityError:
-                unknown.id = f"U-{uuid4()}"  # lost the id race - retry
-            except sqlite3.OperationalError as exc:
-                last_exc = exc  # e.g. 'database is locked' after busy_timeout
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("could not assign a unique unknown ID after retries")
+        domain = _ledger.normalize_unknown_domain(domain)
+        return _ledger.mint_unknown(
+            self.conn,
+            question=question,
+            domain=domain,
+            asset=asset,
+            context=context,
+            opened_by=opened_by,
+            ts=datetime.now(timezone.utc).isoformat(),
+        )
 
     @staticmethod
     def _row_to_unknown(row) -> Unknown:
-        return Unknown(
-            id=row["id"],
-            question=row["question"],
-            domain=row["domain"],
-            asset=row["asset"] or "",
-            context=row["context"] or "",
-            opened_by=row["opened_by"] or "",
-            resolution=row["resolution"] or "",
-            resolved_by=row["resolved_by"] or "",
-            status=row["status"],
-            ts=row["ts"],
-            closed_ts=row["closed_ts"] or "",
-        )
+        return _ledger.row_to_unknown(row)
 
     def unknowns(
         self,
@@ -368,22 +185,14 @@ class FindingStore:
         rows = self.conn.execute(
             "SELECT * FROM unknowns ORDER BY CAST(SUBSTR(id, 3) AS INTEGER) ASC"
         ).fetchall()
-        items = [self._row_to_unknown(r) for r in rows]
-        if status:
-            items = [u for u in items if u.status == status]
-        if domain:
-            items = [u for u in items if u.domain == domain.lower()]
-        if asset:
-            items = [u for u in items if asset.lower() in u.asset.lower()]
-        if not include_closed:
-            items = [u for u in items if u.status == "open"]
-        return items
+        items = [_ledger.row_to_unknown(r) for r in rows]
+        return _ledger.filter_unknowns(
+            items, status=status, domain=domain, asset=asset,
+            include_closed=include_closed,
+        )
 
     def get_unknown(self, unknown_id: str) -> Unknown | None:
-        row = self.conn.execute(
-            "SELECT * FROM unknowns WHERE id = ?", (unknown_id,)
-        ).fetchone()
-        return self._row_to_unknown(row) if row else None
+        return _ledger.load_unknown(self.conn, unknown_id)
 
     def unknown_count(self) -> int:
         cur = self.conn.execute("SELECT COUNT(*) FROM unknowns")
@@ -402,26 +211,12 @@ class FindingStore:
         (answered AND became a finding — pass the finding ID via ``resolved_by``
         so the report can link them).
         """
-        status = (status or "").strip().lower()
-        if status not in self._VALID_UNKNOWN_STATUSES:
-            raise ValueError(
-                f"Invalid status {status!r}. Must be one of: "
-                f"{', '.join(sorted(self._VALID_UNKNOWN_STATUSES))}"
-            )
-        if status == "promoted" and not resolved_by:
-            raise ValueError("promoted requires resolved_by (the finding ID it became)")
+        status = _ledger.validate_unknown_status(status, resolved_by)
         closed_ts = datetime.now(timezone.utc).isoformat()
-        with self.conn:
-            cur = self.conn.execute(
-                """
-                UPDATE unknowns
-                SET status = ?, resolution = ?, resolved_by = ?, closed_ts = ?
-                WHERE id = ?
-                """,
-                (status, resolution, resolved_by, closed_ts, unknown_id),
-            )
-            if cur.rowcount == 0:
-                return None
+        if not _ledger.close_unknown(
+            self.conn, unknown_id, status, resolution, resolved_by, closed_ts
+        ):
+            return None
         return self.get_unknown(unknown_id)
 
     # -- write --------------------------------------------------------------
@@ -439,57 +234,18 @@ class FindingStore:
     ) -> Finding:
         """Append a finding, auto-assigning an incremental ID and timestamp."""
         ts = datetime.now(timezone.utc).isoformat()
-
-        # Concurrent adds (gateway + secretary + MCP clients all share
-        # ids.db) can compute the same F-id; the PRIMARY KEY turns that
-        # into a loud IntegrityError instead of a duplicate. Recount and
-        # retry so the caller just gets their finding, slightly later.
-        last_exc: BaseException | None = None
-        for _attempt in range(10):
-            cur = self.conn.execute("SELECT COUNT(*) FROM findings")
-            finding_id = f"F-{cur.fetchone()[0] + 1:03d}"
-            finding = Finding(
-                id=finding_id,
-                title=title,
-                severity=severity,
-                cwe=cwe,
-                asset=asset,
-                evidence=evidence or {},
-                repro=repro or [],
-                tool_chain=tool_chain or [],
-                memory_ref=memory_ref,
-                ts=ts,
-            )
-            try:
-                with self.conn:  # atomic INSERT + commit
-                    self.conn.execute(
-                        """
-                        INSERT INTO findings
-                            (id, title, severity, cwe, asset, evidence, repro,
-                             tool_chain, memory_ref, ts, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
-                        """,
-                        (
-                            finding.id,
-                            finding.title,
-                            finding.severity,
-                            finding.cwe,
-                            finding.asset,
-                            json.dumps(finding.evidence),
-                            json.dumps(finding.repro),
-                            json.dumps(finding.tool_chain),
-                            finding.memory_ref,
-                            finding.ts,
-                        ),
-                    )
-                return finding
-            except sqlite3.IntegrityError:
-                finding.id = f"F-{uuid4()}"  # lost the id race - generate a new one and retry
-            except sqlite3.OperationalError as exc:
-                last_exc = exc  # e.g. 'database is locked' after busy_timeout
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("could not assign a unique finding ID after 3 attempts")
+        return _store.mint_finding(
+            self.conn,
+            title=title,
+            severity=severity,
+            asset=asset,
+            cwe=cwe,
+            evidence=evidence,
+            repro=repro,
+            tool_chain=tool_chain,
+            memory_ref=memory_ref,
+            ts=ts,
+        )
 
     # -- read ---------------------------------------------------------------
 
@@ -509,8 +265,6 @@ class FindingStore:
         return self._row_to_finding(row) if row else None
 
     # -- lifecycle (close / supersede / reopen) ----------------------------
-
-    _VALID_STATUSES = {"open", "closed", "superseded", "false_positive", "duplicate"}
 
     def update_status(
         self,
@@ -564,31 +318,9 @@ class FindingStore:
                 )
 
         ts = datetime.now(timezone.utc).isoformat()
-        with self.conn:
-            if status == "open":
-                # Reopening: clear the closure audit trail so we don't
-                # overwrite the original closed_ts with the reopen time
-                # and leave dangling closed_by / superseded_by pointers.
-                self.conn.execute(
-                    """
-                    UPDATE findings
-                    SET status = 'open', superseded_by = NULL,
-                        closed_by = NULL, closed_reason = NULL,
-                        closed_ts = NULL
-                    WHERE id = ?
-                    """,
-                    (finding_id,),
-                )
-            else:
-                self.conn.execute(
-                    """
-                    UPDATE findings
-                    SET status = ?, superseded_by = ?, closed_by = ?,
-                        closed_reason = ?, closed_ts = ?
-                    WHERE id = ?
-                    """,
-                    (status, superseded_by, closed_by, closed_reason, ts, finding_id),
-                )
+        _store.set_finding_lifecycle(
+            self.conn, finding_id, status, superseded_by, closed_by, closed_reason, ts
+        )
         return self.get(finding_id)
 
     def supersede(
@@ -627,17 +359,7 @@ class FindingStore:
     def _supersede_chain(self, finding_id: str) -> set:
         """Return the set of all IDs that ``finding_id`` is superseded by
         (transitively), for circular-chain detection."""
-        seen = set()
-        current = finding_id
-        while current:
-            if current in seen:
-                break  # already detected a cycle in the existing chain
-            seen.add(current)
-            row = self.conn.execute(
-                "SELECT superseded_by FROM findings WHERE id = ?", (current,)
-            ).fetchone()
-            current = row["superseded_by"] if row else None
-        return seen
+        return _store.supersede_chain(self.conn, finding_id)
 
     # -- read (with status awareness) ---------------------------------------
 
@@ -666,14 +388,6 @@ class FindingStore:
         documentation.
         """
         findings = self.all()
-        if severity:
-            findings = [f for f in findings if f.severity == severity]
-        if asset:
-            findings = [f for f in findings if asset.lower() in f.asset.lower()]
-        if status:
-            findings = [f for f in findings if f.status == status]
-        if not include_closed:
-            findings = [f for f in findings if f.status == "open"]
 
         # Open questions from the unknown ledger — fetched up front so the
         # appendix can render even when no findings exist (early-days
@@ -683,104 +397,14 @@ class FindingStore:
         except Exception:
             open_unknowns = []
 
-        if not findings and not open_unknowns:
-            return "_(no findings reported yet)_"
-
-        if not findings:
-            # Nothing confirmed yet, but the ledger has open threads — render
-            # the report with the appendix instead of a bare no-findings line.
-            lines = ["# Findings Report (no findings reported yet)", ""]
-        else:
-            # Status breakdown for the header
-            open_count = sum(1 for f in findings if f.status == "open")
-            closed_count = len(findings) - open_count
-            header = f"# Findings Report ({len(findings)} finding(s)"
-            if closed_count:
-                header += f", {open_count} open / {closed_count} closed"
-            header += ")"
-            lines = [header, ""]
-
-            # Summary table
-            lines.append("| ID | Title | Severity | CWE | Asset | Status |")
-            lines.append("|---|---|---|---|---|---|")
-            for f in findings:
-                status_cell = f.status
-                if f.superseded_by:
-                    status_cell += f" → {f.superseded_by}"
-                lines.append(
-                    f"| {f.id} | {f.title} | {f.severity} | {f.cwe or '—'} | {f.asset} | {status_cell} |"
-                )
-            lines.append("")
-
-        for f in findings:
-            status_tag = f" [{f.status}]" if f.status != "open" else ""
-            lines.append(f"## {f.id}: {f.title} ({f.severity}){status_tag}")
-            lines.append("")
-            lines.append(f"**Asset:** {f.asset}")
-            lines.append(f"**CWE:** {f.cwe or '—'}")
-            lines.append(f"**Timestamp:** {f.ts}")
-            if f.memory_ref:
-                lines.append(f"**Memory ref:** {f.memory_ref}")
-            if f.status != "open":
-                lines.append(f"**Status:** {f.status}")
-                if f.superseded_by:
-                    lines.append(f"**Superseded by:** {f.superseded_by}")
-                if f.closed_by:
-                    lines.append(f"**Closed by:** {f.closed_by}")
-                if f.closed_reason:
-                    lines.append(f"**Closure reason:** {f.closed_reason}")
-                if f.closed_ts:
-                    lines.append(f"**Closed at:** {f.closed_ts}")
-            lines.append("")
-
-            if f.evidence:
-                lines.append("### Evidence")
-                lines.append("")
-                for key in ("request", "response", "excerpt"):
-                    val = f.evidence.get(key)
-                    if val:
-                        lines.append(f"**{key.title()}:**")
-                        lines.append(f"```")
-                        lines.append(val)
-                        lines.append("```")
-                        lines.append("")
-
-            if f.repro:
-                lines.append("### Reproduction")
-                lines.append("")
-                for i, step in enumerate(f.repro, 1):
-                    lines.append(f"{i}. {step}")
-                lines.append("")
-
-            if f.tool_chain:
-                lines.append("### Tool Chain")
-                lines.append("")
-                lines.append(" → ".join(f.tool_chain))
-                lines.append("")
-
-            lines.append("---")
-            lines.append("")
-
-        # --- Open questions (unknown ledger) --------------------------------
-        # Findings are conclusions; the ledger holds what the investigation
-        # has NOT answered yet.  An appendix (not inline) so the report stays
-        # a findings report — but unresolved threads are never silently
-        # dropped because render_findings is the canonical handoff document.
-        # ``open_unknowns`` was fetched before the findings block above so it
-        # also renders when there are no findings yet.
-        if open_unknowns:
-            lines.append("## Open questions (unresolved)")
-            lines.append("")
-            lines.append("Threads the investigation has not closed:")
-            lines.append("")
-            for u in open_unknowns:
-                asset_bit = f" — {u.asset}" if u.asset else ""
-                lines.append(f"- **{u.id}** ({u.domain}){asset_bit}: {u.question}")
-                if u.context:
-                    lines.append(f"  - context: {u.context}")
-            lines.append("")
-
-        return "\n".join(lines)
+        return _render.render_findings_markdown(
+            findings,
+            open_unknowns,
+            severity=severity,
+            asset=asset,
+            status=status,
+            include_closed=include_closed,
+        )
 
     def write_markdown(
         self,
@@ -811,12 +435,7 @@ class FindingStore:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        parts = [ts]
-        if severity:
-            parts.append(severity)
-        if asset:
-            parts.append(asset.replace("/", "_").replace(" ", "_"))
-        filename = "findings_" + "-".join(parts) + ".md"
+        filename = _render.report_filename(ts, severity, asset)
         out_path = output_dir / filename
         out_path.write_text(md, encoding="utf-8")
         return out_path
@@ -825,23 +444,7 @@ class FindingStore:
 
     @staticmethod
     def _row_to_finding(row: sqlite3.Row) -> Finding:
-        return Finding(
-            id=row["id"],
-            title=row["title"],
-            severity=row["severity"],
-            cwe=row["cwe"],
-            asset=row["asset"],
-            evidence=json.loads(row["evidence"] or "{}"),
-            repro=json.loads(row["repro"] or "[]"),
-            tool_chain=json.loads(row["tool_chain"] or "[]"),
-            memory_ref=row["memory_ref"],
-            ts=row["ts"],
-            status=row["status"] if "status" in row.keys() else "open",
-            superseded_by=row["superseded_by"] if "superseded_by" in row.keys() else None,
-            closed_by=row["closed_by"] if "closed_by" in row.keys() else None,
-            closed_reason=row["closed_reason"] if "closed_reason" in row.keys() else None,
-            closed_ts=row["closed_ts"] if "closed_ts" in row.keys() else None,
-        )
+        return _store.row_to_finding(row)
 
     def close(self) -> None:
         self.conn.close()

@@ -103,16 +103,22 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from constants import resolve_workspace_root
-
-_DEFAULT_ROOT = resolve_workspace_root()
+from utils._workerqueue_keys import content_key
+from utils._workerqueue_policy import (
+    _evidence_ttl_hours,
+    _max_queued,
+    _queue_ttl_hours,
+    _rss_hwm_mib,
+    _slots,
+    _store_dir,
+    heap_pin_env,
+)
 
 # Decision statuses (queue rows): 'queued' -> 'launching' -> (job store
 # owns running/done/failed from here); terminals: 'cancelled' (operator
@@ -122,44 +128,6 @@ _DEFAULT_ROOT = resolve_workspace_root()
 # code review).
 _QUEUE_STATUS = ("queued", "launching", "launched", "cancelled", "finished",
                  "failed")
-
-_WORKER_SLOTS_DEFAULT = 2
-_WORKER_QUEUE_MAX_DEFAULT = 16
-
-# Queued rows older than this are swept (a queue entry is a REQUEST, not a
-# commitment; the operator re-requests rather than inheriting a stale one).
-_QUEUE_TTL_HOURS_DEFAULT = 24
-
-# Recorded peak-RSS evidence lifetime — this outlives the ledger rows
-# (finished rows age out weekly; the evidence the queue is supposed to
-# LEARN from must not evaporate with them).
-_EVIDENCE_TTL_HOURS_DEFAULT = 720.0
-
-
-def _store_dir() -> Path:
-    override = os.getenv("WORKER_QUEUE_DIR", "").strip()
-    if override:
-        return Path(override)
-    return _DEFAULT_ROOT / "run" / "worker_queue"
-
-
-def _slots() -> int:
-    raw = os.getenv("WORKER_QUEUE_SLOTS", "").strip()
-    try:
-        val = int(raw) if raw else _WORKER_SLOTS_DEFAULT
-    except ValueError:
-        val = _WORKER_SLOTS_DEFAULT
-    return max(1, val)
-
-
-def _max_queued() -> int:
-    raw = os.getenv("WORKER_QUEUE_MAX_Q", "").strip()
-    try:
-        val = int(raw) if raw else _WORKER_QUEUE_MAX_DEFAULT
-    except ValueError:
-        val = _WORKER_QUEUE_MAX_DEFAULT
-    return max(1, val)
-
 
 def _total_ram_mib() -> int:
     """Total physical RAM in MiB (best effort; 0 = unknown)."""
@@ -210,155 +178,6 @@ def _ram_floor_mib() -> int:
     if total <= 0:
         return 2048
     return max(2048, total // 4)
-
-
-def _queue_ttl_hours() -> float:
-    raw = os.getenv("WORKER_QUEUE_TTL_HOURS", "").strip()
-    try:
-        return float(raw) if raw else _QUEUE_TTL_HOURS_DEFAULT
-    except ValueError:
-        return _QUEUE_TTL_HOURS_DEFAULT
-
-
-def _evidence_ttl_hours() -> float:
-    raw = os.getenv("WORKER_QUEUE_EVIDENCE_TTL_HOURS", "").strip()
-    try:
-        return float(raw) if raw else _EVIDENCE_TTL_HOURS_DEFAULT
-    except ValueError:
-        return _EVIDENCE_TTL_HOURS_DEFAULT
-
-
-def _rss_hwm_mib(pid: Any) -> float | None:
-    """Peak resident set (VmHWM) of ONE process, in MiB.
-
-    VmHWM is the kernel's own high-water mark — reading it once answers
-    "worst footprint so far" with zero sampling bias; we never have to
-    track growth ourselves. Only the MAIN pid of the unit's process tree
-    is measured (the JVM that owns the job — its threads share its RSS;
-    transient helpers are noise). Returns None when the pid exited
-    (its /proc entry is gone — this is why the evidence for a fast unit
-    comes from the samples taken WHILE it ran) or the read fails.
-    """
-    try:
-        pid_n = int(pid or 0)
-    except (TypeError, ValueError):
-        return None
-    if pid_n <= 0:
-        return None
-    try:
-        with open(f"/proc/{pid_n}/status", encoding="ascii") as fh:
-            for line in fh:
-                if line.startswith("VmHWM:"):
-                    return int(line.split()[1]) / 1024.0
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
-
-
-def heap_pin_env(memory_budget: int, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Build the launch env that PINS the worker's heap claim.
-
-    ``JAVA_OPTS='-Xms<micromin>m -Xmx<memory_budget>m'`` — appended AFTER
-    the jadx launcher script's ``DEFAULT_JVM_OPTS`` (which carries
-    ``-XX:MaxRAMPercentage=70.0``); the JVM honours the LAST -X flag, so
-    the explicit -Xmx overrides the percentage claim. The budget row and
-    the kernel therefore agree: the pool admits N x budget, and each
-    worker is hard-capped at its own budget. Caller env merges UNDER
-    the pin (the pin wins — that's the point).
-    """
-    merged = dict(extra or {})
-    pin = f"-Xms32m -Xmx{int(memory_budget)}m"
-    existing = merged.get("JAVA_OPTS", "").strip()
-    merged["JAVA_OPTS"] = (existing + " " + pin).strip() if existing else pin
-    return merged
-
-
-# --- canonical key (content-keyed; the snapshot-cache precedent) ----------
-
-
-# Argv tokens naming an OUTPUT LOCATION are not work semantics (where the
-# results live, not what the work IS): their flag + following value are
-# stripped before the argv digest so a rerun pointed at another out-dir
-# dedupes instead of double-launching the same bytes.
-_KEY_LOCATION_FLAGS = ("-d", "--output-dir", "-o", "--output")
-
-
-def _argv_for_key(argv: list[str] | None, path: str) -> list[str]:
-    """Work-semantics residue of an argv, for content-key forking.
-
-    Stripped: argv[0] (the program — the key's tool name owns that axis),
-    any item exactly equal to the target path (the bytes digest owns the
-    target), and a location flag plus its value (output destinations are
-    incidental). What survives — mode/tuning flags like ``--deobf`` — IS
-    the work: two units on identical bytes with different flags are
-    different work (2026-10-30 code review: the old byte-only key deduped
-    a flag-differing rerun that silently skipped that work).
-    """
-    residue: list[str] = []
-    drop_next = False
-    path_s = str(path)
-    items = [str(a) for a in (argv or [])]
-    for item in items[1:]:
-        if drop_next:
-            drop_next = False
-            continue
-        if item in _KEY_LOCATION_FLAGS:
-            drop_next = True
-            continue
-        if item == path_s:
-            continue
-        residue.append(item)
-    return residue
-
-
-def content_key(tool: str, path: str, *, argv: list[str] | None = None) -> str:
-    """Canonical worker-queue key: ``<tool>:c<sha256[:12]>`` of the BYTES
-    plus ``:a<sha256[:12]>`` of the argv's work-semantics residue.
-
-    Content, not path: identical APK bytes at a different filename are the
-    same unit (re-drop with a new name must dedupe, not double-launch) —
-    so the target path and output locations are stripped from the argv
-    before digesting (``_argv_for_key``), and an argv with NO work
-    residue digests to the exact bare key. A flag difference (the same
-    bytes with/without ``--deobf``) forks the key: different work must
-    not be deduped away (2026-10-30 code review). Accounting knobs stay
-    out of the key by principle — ``memory_budget`` is the queue's claim,
-    not the work's meaning, and forking on it would double-launch the
-    same bytes.
-    Unreadable/missing files fall back to a path+size key so the request
-    still resolves (the launch will fail honestly on the missing input —
-    an unhashable blob must not break the request pipeline).
-    """
-    import hashlib
-
-    safe_tool = "".join(
-        c if c.isalnum() or c in "_.-" else "-" for c in (tool or "unit").lower()
-    )
-    argv_digest = ""
-    residue = _argv_for_key(argv, path)
-    if residue:
-        ah = hashlib.sha256()
-        for item in residue:
-            ah.update(item.encode("utf-8", "replace"))
-            ah.update(b"\x00")
-        argv_digest = f":a{ah.hexdigest()[:12]}"
-    digest = None
-    try:
-        h = hashlib.sha256()
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                h.update(chunk)
-        digest = h.hexdigest()[:12]
-    except OSError:
-        pass
-    if digest:
-        return f"{safe_tool}:c{digest}{argv_digest}"
-    try:
-        st = os.stat(path)
-        path_fallback = f"{os.path.basename(path)}:{st.st_size}"
-    except OSError:
-        path_fallback = secrets.token_hex(6)
-    return f"{safe_tool}:p{hashlib.sha1(path_fallback.encode('utf-8', 'replace')).hexdigest()[:12]}{argv_digest}"
 
 
 # --- store ------------------------------------------------------------------
