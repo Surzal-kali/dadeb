@@ -142,7 +142,17 @@ class FunctionRegistry:
 
     def scan_module(self, module):
         for name, obj in inspect.getmembers(module):
-            if inspect.isfunction(obj) and getattr(obj, "_is_framework_tool", False):
+            if (
+                inspect.isfunction(obj)
+                and getattr(obj, "_is_framework_tool", False)
+                # Register a function only in the module that DEFINES it, so a
+                # tool re-exported in a package __init__ (auxiliaries/ and
+                # payloads/ both do this) is not also registered under a phantom
+                # <pkg>.__init__.<name> alias when scan_tools walks __init__.py.
+                # Mirrors the obj.__module__ == module.__name__ guard the class
+                # branch below already uses. (2026-10-30)
+                and obj.__module__ == module.__name__
+            ):
                 tool_id = f"{module.__name__}.{name}"
                 self.register(tool_id, obj, getattr(obj, "_tool_doc", ""))
                 print(f"[+] Registered framework tool: {tool_id}")
