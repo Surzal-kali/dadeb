@@ -154,3 +154,37 @@ def test_nmap_verbatim_on_duplicate(fleet_env, monkeypatch):
     res = nmap_mod.run_nmap("192.168.90.114")
     # run_nmap has NO post-launch decoration — verbatim is automatic
     assert res == dup_env
+
+
+def test_ffuf_passes_target_kwarg(fleet_env, monkeypatch):
+    from payloads import ffuf as ffuf_mod
+
+    wl = fleet_env["state"] / "wl.txt"
+    wl.write_text("backup\nadmin\ndocs\n")
+    seen = {}
+
+    def fake_launch(*args, **kwargs):
+        seen.update(kwargs)
+        return {"job_id": "f1", "status": "running", "log_file": "/tmp/x"}
+
+    monkeypatch.setattr(ffuf_mod, "launch_job", fake_launch)
+    url = "http://192.168.56.106/FUZZ"
+    res = ffuf_mod.run_ffuf(url, wordlist=str(wl))
+    assert seen["tool_name"] == "ffuf"
+    assert seen["target"] == url
+    assert res["status"] == "running"
+
+
+def test_ffuf_verbatim_on_duplicate(fleet_env, monkeypatch):
+    from payloads import ffuf as ffuf_mod
+
+    dup_env = {
+        "status": "duplicate",
+        "job_id": "f-live",
+        "unit_key": "ffuf:192.168.56.106:/FUZZ:<hash>",
+        "message": "unit already running",
+    }
+    monkeypatch.setattr(ffuf_mod, "launch_job", lambda *a, **k: dict(dup_env))
+    res = ffuf_mod.run_ffuf("http://192.168.56.106/FUZZ")
+    # post-launch decoration (note/wordlist keys) must NOT land on it
+    assert res == dup_env

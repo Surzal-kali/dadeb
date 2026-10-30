@@ -459,8 +459,14 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
         command,
         tool_name="ffuf",
         timeout=float(os.getenv("FFUF_TIMEOUT", "1800")),
+        target=url,
         verdict_parser=_verdict,
     )
+    # launch_job(target=...) routes through the fleet scheduler; a
+    # duplicate/refused decision envelope carries NO launched job — return
+    # it verbatim instead of decorating launch-side metadata over it.
+    if job.get("status") in ("duplicate", "refused"):
+        return job
     if _rr_stripped:
         job["note"] = (
             "'-r/--follow-redirects' stripped from options (scope denylist): "
