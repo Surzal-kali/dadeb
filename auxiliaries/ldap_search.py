@@ -56,7 +56,6 @@ import shlex
 import shutil
 import subprocess
 from typing import Any
-#TODO: HOLY CRAP DEPRACATION CENTRAL
 from constants import framework_tool
 from utils.scope_gate import check_scan, ScopeGateError
 

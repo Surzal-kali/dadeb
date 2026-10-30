@@ -857,6 +857,16 @@ live in [`evasion/README.md`](evasion/README.md).
 
 ## Development Guidelines
 
+### Swallowed exceptions
+
+A broad `except Exception:` block never ends in a bare `pass`. When an
+exception is deliberately ignored, log it at debug with the traceback
+(`logging.getLogger(__name__).debug("swallowed exception in <fn>",
+exc_info=True)`) so raising the log level traces it; keep any
+intent comment alongside the call. Narrow, documented best-effort swallows
+(`except OSError/ImportError/NXDOMAIN: ...`) may stay silent when they are
+control flow, not error concealment.
+
 ### Jupyter Kernel (notebook lane)
 
 The Jupyter kernel used in this workspace resolves like the IPython REPL:

@@ -199,7 +199,9 @@ class ScratchStore:
                         check=False, capture_output=True, timeout=5,
                     )
                 except Exception:
-                    pass  # best-effort; projection degrades gracefully
+                    # best-effort; projection degrades gracefully
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in _repair_ownership_if_needed", exc_info=True)
 
         # Also chown the data dir contents (compressed payloads).
         try:
@@ -208,7 +210,8 @@ class ScratchStore:
                 check=False, capture_output=True, timeout=10,
             )
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "swallowed exception in _repair_ownership_if_needed", exc_info=True)
 
         log.info(
             "[scratch] Root guard: chowned scratch DB + WAL + SHM + data dir "

@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import asyncio
 import ipaddress
@@ -805,7 +806,9 @@ class MetasploitClient:
                                     f"payload with RHOST set to the target."
                                 )
                     except Exception:
-                        pass  # the guard must never block a launch
+                        # the guard must never block a launch
+                        logging.getLogger(__name__).debug(
+                            "swallowed exception in _execute_module_impl", exc_info=True)
 
             # The secretary model occasionally drops top-level arguments into
             # the `options` dict because the schema is permissive (additionalProperties
@@ -1086,7 +1089,8 @@ class MetasploitClient:
                     try:
                         self.client.jobs.stop(str(handler_job))
                     except Exception:
-                        pass
+                        logging.getLogger(__name__).debug(
+                            "swallowed exception in _execute_module_impl", exc_info=True)
                 hint = ""
                 if mtype == "exploit":
                     if not payload_name:

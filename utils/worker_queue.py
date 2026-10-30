@@ -100,6 +100,7 @@ Knobs (env, read per call):
 """
 
 from __future__ import annotations
+import logging
 
 import json
 import os
@@ -380,7 +381,8 @@ class WorkerQueue:
 
                 _gs().stop(result["job_id"], force=True)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in _launch_claim", exc_info=True)
             return None
         return result
 
@@ -398,7 +400,8 @@ class WorkerQueue:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in _delete_claim", exc_info=True)
 
     # -- admission ------------------------------------------------------------
 
@@ -776,7 +779,8 @@ class WorkerQueue:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in request_unit", exc_info=True)
                 raise
 
         # --- admitted: launch OUTSIDE the DB tx (the claim row is committed) ---
@@ -930,7 +934,8 @@ class WorkerQueue:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in bind_unit", exc_info=True)
                 raise
         if changed == 0:
             return {"status": "no such claim", "unit_key": unit_key}
@@ -1106,7 +1111,8 @@ class WorkerQueue:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in release_unit", exc_info=True)
                 raise
         if changed == 0:
             return {"status": "already_released", "unit_key": unit_key}
@@ -1167,7 +1173,8 @@ class WorkerQueue:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in cancel_unit", exc_info=True)
                 raise
         if changed == 0:
             return {"status": "already_cancelled", "unit_key": unit_key}
@@ -1241,7 +1248,9 @@ class WorkerQueue:
                     # its /proc entry with it.
                     self._sample_unit_peak(r["unit_key"], poll.get("pid"))
         except Exception:
-            pass  # job store down: promotions can still happen if slots free
+            # job store down: promotions can still happen if slots free
+            logging.getLogger(__name__).debug(
+                "swallowed exception in advance_queue", exc_info=True)
 
         # 1b. TTL sweep of ancient queued rows (a request is not a promise;
         #     the operator re-requests rather than inheriting a stale one).
@@ -1276,7 +1285,7 @@ class WorkerQueue:
             )
             out["evidence_swept"] = cur.rowcount
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in advance_queue", exc_info=True)
 
         # 2. Launch-promote head-of-queue while admission fits (FIFO).
 
@@ -1365,7 +1374,8 @@ class WorkerQueue:
                         try:
                             self._rollback()
                         except Exception:
-                            pass
+                            logging.getLogger(__name__).debug(
+                                "swallowed exception in advance_queue", exc_info=True)
                         raise
                 # TX committed and the claim is durable: launch outside it.
                 result = self._launch_claim(fresh)
@@ -1379,7 +1389,7 @@ class WorkerQueue:
                     break
                 out["promoted"] += 1
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in advance_queue", exc_info=True)
         return out
 
     def sweep_stale(self) -> dict[str, Any]:
@@ -1418,7 +1428,7 @@ class WorkerQueue:
                 if cur.rowcount:
                     reclaimed.append(r["unit_key"])
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in sweep_stale", exc_info=True)
         return {"reclaimed": reclaimed, "count": len(reclaimed)}
 
     def host_pressure(self) -> dict[str, Any]:
@@ -1459,7 +1469,7 @@ class WorkerQueue:
             if c is not None:
                 c.close()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in close", exc_info=True)
 
 
 # --- module-level singleton (scratch-store pattern) ---------------------------

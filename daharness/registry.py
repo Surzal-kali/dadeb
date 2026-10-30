@@ -487,7 +487,8 @@ class ToolRegistry(ExecutorMixin):
             from dacustoms_finder import register_dacustoms_finder
             register_dacustoms_finder()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "swallowed exception in discover_local_tools", exc_info=True)
 
         skip_dirs = {
             "venv",

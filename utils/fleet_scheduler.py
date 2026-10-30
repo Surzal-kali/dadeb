@@ -51,6 +51,7 @@ as the cookie-jar management tools).
 """
 
 from __future__ import annotations
+import logging
 
 import hashlib
 import ipaddress
@@ -681,7 +682,8 @@ class FleetScheduler:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in request_unit", exc_info=True)
                 raise
 
         out = {
@@ -721,7 +723,8 @@ class FleetScheduler:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in bind_job", exc_info=True)
                 raise
         if committed == 0:
             return {"status": "no such unit", "unit_key": unit_key}
@@ -767,7 +770,8 @@ class FleetScheduler:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in release_unit", exc_info=True)
                 raise
         if changed == 0:
             # Already released/stale/done — idempotent, not an error.
@@ -791,7 +795,9 @@ class FleetScheduler:
                 if out.get("status") == "released":
                     released += 1
         except Exception:
-            pass  # bookkeeping must never break the poller
+            # bookkeeping must never break the poller
+            logging.getLogger(__name__).debug(
+                "swallowed exception in release_for_job", exc_info=True)
         return released
 
     # -- batch bookkeeping (any adapter; Phase 2 sqlmap mounts first) ---------
@@ -838,7 +844,8 @@ class FleetScheduler:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in create_batch", exc_info=True)
                 raise
         return batch_id
 
@@ -887,7 +894,8 @@ class FleetScheduler:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in mark_batch_complete", exc_info=True)
                 raise
 
     # -- reclaim + observability -----------------------------------------------------
@@ -948,7 +956,9 @@ class FleetScheduler:
                     if jr is not None and jr.get("exit_code") is not None:
                         suspects.append(r)
             except Exception:
-                pass  # job store down: TTL/grace cases above still apply
+                # job store down: TTL/grace cases above still apply
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in sweep_stale", exc_info=True)
         if not suspects:
             return {"stale_reclaimed": [], "count": 0}
         # The reclaim batch itself is one IMMEDIATE tx (writes + commit
@@ -972,7 +982,8 @@ class FleetScheduler:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in sweep_stale", exc_info=True)
                 raise
         return {"stale_reclaimed": reclaimed, "count": len(reclaimed)}
 

@@ -33,6 +33,7 @@ same as pre-v2). Tools that don't need a verdict simply omit it.
 """
 
 from __future__ import annotations
+import logging
 
 import os
 import re
@@ -249,13 +250,15 @@ def launch_job(
                 try:
                     terminate_job(result["job_id"])
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in launch_job", exc_info=True)
             try:
                 from utils.fleet_scheduler import get_scheduler
 
                 get_scheduler().release_unit(acquired_unit, force=True)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in launch_job", exc_info=True)
         raise
 
 

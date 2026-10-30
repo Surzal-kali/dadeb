@@ -15,6 +15,7 @@ point in a session to verify the harness is alive.
 """
 
 from __future__ import annotations
+import logging
 
 import errno
 import os
@@ -124,7 +125,7 @@ def framework_health() -> dict[str, Any]:
         # → 443 (https) or 80 (http) when the port is not explicit.
         embed_port = _eparsed.port or (443 if _eparsed.scheme == "https" else 80)
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("swallowed exception in framework_health", exc_info=True)
 
     zap_port = int(os.getenv("ZAP_PORT", "8090"))
 

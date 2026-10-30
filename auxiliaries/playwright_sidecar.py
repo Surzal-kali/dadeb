@@ -77,6 +77,7 @@ Honest limits
 """
 
 from __future__ import annotations
+import logging
 
 import asyncio
 import json
@@ -378,7 +379,7 @@ class Sidecar:
             if self.pw:
                 await self.pw.stop()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in stop", exc_info=True)
 
     async def new_page(self):
         page = await self.context.new_page()
@@ -615,13 +616,13 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             writer.write(_json_resp(500, {"error": f"{type(e).__name__}: {e}"}))
             await writer.drain()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in _handle", exc_info=True)
     finally:
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in _handle", exc_info=True)
 #TODO: FIX PASS EXCEPTIONS
 
 async def main() -> None:

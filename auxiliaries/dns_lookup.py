@@ -23,11 +23,11 @@ Tools:
 """
 
 from __future__ import annotations
+import logging
 
 import re
 import socket
 from typing import Any
-#TODO: FIX. depracated code ^
 from constants import framework_tool
 
 _MAX_HOSTS = 32
@@ -119,7 +119,7 @@ def _resolve_one(hostname: str, timeout: float) -> dict[str, Any]:
             ]
             records["CNAME_followed"] = alias
         except Exception:  # noqa: BLE001 - best effort alias chase
-            pass #TODO: log this? --- IGNORE ---
+            logging.getLogger(__name__).debug("swallowed exception in _resolve_one", exc_info=True)
     return {
         "hostname": name,
         "records": records,

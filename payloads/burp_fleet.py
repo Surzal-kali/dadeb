@@ -39,6 +39,7 @@ Replay without an armed scope is refused.
 """
 
 from __future__ import annotations
+import logging
 
 import hashlib
 import json
@@ -547,7 +548,8 @@ def burp_replay_status(fleet_id: str) -> dict[str, Any]:
                 if first:
                     entry["request_line"] = first[0][:120]
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in burp_replay_status", exc_info=True)
             recent = poll.get("recent_lines") or []
             verdict = _parse_burp_verdict("\n".join(str(x) for x in recent))
             if verdict.get("verdict"):

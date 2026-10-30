@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import os
 import socket
@@ -533,7 +534,8 @@ async def start_brain():
             try:
                 writer.close()
             except Exception:
-                pass #TODO: handle exceptions better than "pass and pray"
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in handle_client", exc_info=True)
     # Bind the socket at the lane's trust level: the umask swap lands the
     # permed mode atomically (no race window between bind and chmod).
     # 0777 is reserved for world-writable socket dirs (legacy container
@@ -657,7 +659,9 @@ async def dispatch(event, full_payload=None):
                 if _dis:
                     return json.dumps(disabled_reject_envelope(tool_id, _prefix))
             except Exception:
-                pass  # scope_gate import must never wedge the Brain
+                # scope_gate import must never wedge the Brain
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in dispatch", exc_info=True)
 
             tool = registry.get_tool(tool_id)
             if tool:

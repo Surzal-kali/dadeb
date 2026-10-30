@@ -56,6 +56,7 @@ drivers are installed, db_exec_batch against Metasploitable2 3306 (mysql).
 """
 
 from __future__ import annotations
+import logging
 
 import re
 import time
@@ -148,7 +149,7 @@ class _MssqlConn:
         try:
             self._ms.disconnect()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in close", exc_info=True)
 
 
 class _MysqlConn:
@@ -171,7 +172,7 @@ class _MysqlConn:
         try:
             self._conn.close()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in close", exc_info=True)
 
 
 class _PgConn:
@@ -193,7 +194,7 @@ class _PgConn:
         try:
             self._conn.close()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in close", exc_info=True)
 
 
 def _open_mssql(host, port, username, password, database, domain, hashes, timeout):
@@ -588,7 +589,7 @@ def db_exec_batch(
         try:
             conn.close()
         except Exception:
-            pass #why pass?? #TODO: EXPLAIN OR FIX
+            logging.getLogger(__name__).debug("swallowed exception in db_exec_batch", exc_info=True)
 
     ok = sum(1 for r in results if not r.get("error"))
     return {
@@ -783,8 +784,8 @@ def db_schema_farm(
         try:
             conn.close()
         except Exception:
-            pass
-#TODO: WHY PASS???
+            logging.getLogger(__name__).debug(
+                "swallowed exception in db_schema_farm", exc_info=True)
     if columns_truncated:
         notes.append(f"columns truncated at max_columns={max_columns}")
     return {

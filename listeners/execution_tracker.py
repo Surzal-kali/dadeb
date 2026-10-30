@@ -54,7 +54,7 @@ def _descendants(pid: int) -> set:
         try:
             return {p.pid for p in psutil.Process(pid).children(recursive=True)}
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in _descendants", exc_info=True)
     try:
         ppid: dict[int, int] = {}
         for entry in os.listdir("/proc"):

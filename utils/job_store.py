@@ -412,18 +412,21 @@ class JobStore:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in launch", exc_info=True)
                 _terminate_proc_tree(
                     proc.pid, pid_start=pid_start, started=started
                 )
                 try:
                     proc.wait(timeout=5)  # reap — no zombie, no ghost pid
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in launch", exc_info=True)
                 try:
                     log_fh.close()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in launch", exc_info=True)
                 with _LIVE_CHILDREN_LOCK:
                     _LIVE_CHILD_PROCS.pop(job_id, None)
                     _LIVE_LOG_FHS.pop(job_id, None)
@@ -523,7 +526,8 @@ class JobStore:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in _mark_finished", exc_info=True)
                 raise
         self._close_live_handles(job_id)
 
@@ -535,7 +539,8 @@ class JobStore:
             try:
                 fh.close()
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in _close_live_handles", exc_info=True)
 
     def poll(self, job_id: str, *, tail: int = 20) -> dict[str, Any]:
         """Status poll: running/done/failed/unknown, log tail, parsed verdict."""
@@ -640,7 +645,7 @@ class JobStore:
                 if isinstance(verdict, dict):
                     result.update(verdict)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("swallowed exception in poll", exc_info=True)
 
         if status != "running":
             # Failed jobs' logs are the evidence the model needs most —
@@ -718,7 +723,8 @@ class JobStore:
                         proc.kill()
                         proc.wait(timeout=1)
                     except Exception:
-                        pass
+                        logging.getLogger(__name__).debug(
+                            "swallowed exception in stop", exc_info=True)
                 if proc.poll() is not None:
                     exit_code = int(proc.returncode)
         self._mark_finished(job_id, exit_code=exit_code, timed_out=False)
@@ -811,7 +817,8 @@ class JobStore:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in _enforce_caps", exc_info=True)
                 raise
         # Row collection ran (cap / TTL) — piggyback the log GC. Throttled;
         # never raises; a GC failure cannot break launch/poll.
@@ -909,7 +916,7 @@ class JobStore:
                 try:
                     self._rollback()
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug("swallowed exception in sweep", exc_info=True)
                 raise
 
     # -- reaper -------------------------------------------------------------------

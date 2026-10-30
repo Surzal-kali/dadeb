@@ -88,6 +88,7 @@ shared loop.
 """
 
 from __future__ import annotations
+import logging
 
 import asyncio
 import threading
@@ -223,13 +224,14 @@ class BurpMCPClient:
                     try:
                         await task
                     except (asyncio.CancelledError, Exception):
-                        pass #TODO: shouldn't we be logging instead of passing?
+                        logging.getLogger(__name__).debug(
+                            "swallowed exception in _cancel_task", exc_info=True)
 
             cancel_fut = asyncio.run_coroutine_threadsafe(_cancel_task(), loop)
             try:
                 cancel_fut.result(timeout=5)
             except Exception:
-                pass  # TODO: shouldn't we be logging instead of passing?
+                logging.getLogger(__name__).debug("swallowed exception in _submit", exc_info=True)
             raise
 
     # -- connection lifecycle ----------------------------------------------
@@ -282,7 +284,7 @@ class BurpMCPClient:
             self._connected = True
             # Cache the tool inventory so wrappers can probe availability
             # (e.g. Pro-only Collaborator tools).
-            await self._refresh_tools() #TODO: isn't there a built in timeout error?
+            await self._refresh_tools() 
         except (TimeoutError, asyncio.CancelledError) as e:
             # Timeout: the BApp accepted the SSE connection but did not
             # complete the MCP handshake within BURP_MCP_CONNECT_TIMEOUT.
@@ -295,7 +297,7 @@ class BurpMCPClient:
             try:
                 await stack.aclose()
             except Exception:
-                pass #TODO: ANOTHER OPPORTUNITY FOR LOGGING BUT WE PASSED?!
+                logging.getLogger(__name__).debug("swallowed exception in _connect", exc_info=True)
             self._session = None
             self._cm_stack = None
             self._connected = False
@@ -325,7 +327,7 @@ class BurpMCPClient:
             try:
                 await stack.aclose()
             except Exception:
-                pass #TODO: FIX
+                logging.getLogger(__name__).debug("swallowed exception in _connect", exc_info=True)
             self._session = None
             self._cm_stack = None
             self._connected = False
@@ -342,7 +344,8 @@ class BurpMCPClient:
             try:
                 await self._cm_stack.aclose()
             except Exception:
-                pass #TODO: FIX...i mean. shouldn't we do more for the end user than *pass* on error?
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in _disconnect", exc_info=True)
         self._cm_stack = None
         self._session = None
         self._connected = False
@@ -523,7 +526,7 @@ class BurpMCPClient:
         try:
             self._submit(self._disconnect(), timeout=BURP_MCP_CONNECT_TIMEOUT + 5)
         except Exception:
-            pass  # TODO: why pass when can log or do something else? why pass at all?
+            logging.getLogger(__name__).debug("swallowed exception in reconnect", exc_info=True)
         try:
             self._submit(self._connect(), timeout=BURP_MCP_CONNECT_TIMEOUT + 5)
         except BurpMCPError as e:

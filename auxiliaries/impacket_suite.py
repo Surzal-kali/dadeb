@@ -34,6 +34,7 @@
 
 
 
+import logging
 import os
 import shlex
 import shutil
@@ -186,7 +187,8 @@ def smb_enum_shares(target, username="", password="", domain=""):
                 access = "read"
                 conn.disconnectTree(tid)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in smb_enum_shares", exc_info=True)
             lines.append(f"{name}\tremark={remark!r}\t[{access}]")
         conn.logoff()
         return "\n".join(lines) if lines else f"No shares enumerated on {target}."

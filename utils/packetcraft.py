@@ -30,6 +30,7 @@ Design notes
   source IP is unknown, ASK THE OPERATOR — never guess or auto-derive it.
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -136,7 +137,7 @@ def _packet_from_hex(hex_string: str) -> scapy.Packet:
         if IP in frame or IPv6 in frame or ARP in frame or DHCP in frame or Dot1Q in frame:
             return frame
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("swallowed exception in _packet_from_hex", exc_info=True)
     # Bare L3: an IPv6 header always starts with version nibble 6 — after the
     # Ether attempt failed to recognise a layer, route on the version nibble.
     # This is safe where the old MAC-nibble test was not: the ambiguous

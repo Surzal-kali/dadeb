@@ -35,6 +35,7 @@ reports the timeout with the partial log.
 """
 
 from __future__ import annotations
+import logging
 
 import os
 import re
@@ -219,7 +220,9 @@ def _release_unit_for_job(job_id: str) -> None:
 
         get_scheduler().release_for_job(job_id)
     except Exception:
-        pass  # scheduling bookkeeping must never break a status poll
+        # scheduling bookkeeping must never break a status poll
+        logging.getLogger(__name__).debug(
+            "swallowed exception in _release_unit_for_job", exc_info=True)
 
 
 def _read_log(path: str) -> str:

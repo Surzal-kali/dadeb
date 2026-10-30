@@ -41,6 +41,7 @@ frame restart, and each capture also lands in namespaced vector memory
 (`remember_text`, namespace 'responder') so the secretary recalls it.
 """
 from __future__ import annotations
+import logging
 
 import json
 import os
@@ -383,7 +384,7 @@ def _store_capture(entry: dict[str, Any]) -> None:
             fh.write(line)
         os.chmod(path, 0o600)
     except Exception:  # noqa: BLE001 - persistence must never kill the engine #TODO: BUT SURELY WE CAN DO SOMETHING OTHER THAN PASSING
-        pass
+        logging.getLogger(__name__).debug("swallowed exception in _store_capture", exc_info=True)
     try:
         from utils.memory_tools import remember_text
 
@@ -396,7 +397,7 @@ def _store_capture(entry: dict[str, Any]) -> None:
             important=True,
         )
     except Exception:  # noqa: BLE001 - memory write degrades, never blocks
-        pass
+        logging.getLogger(__name__).debug("swallowed exception in _store_capture", exc_info=True)
 
 
 # --- engines -----------------------------------------------------------------
@@ -577,7 +578,7 @@ class SMB2CaptureSink:
 
                 self.on_error(traceback.format_exc())
             except Exception: #TODO: fix amibious pass in functions
-                pass
+                logging.getLogger(__name__).debug("swallowed exception in _serve", exc_info=True)
             return
         finally:
             try:
@@ -704,7 +705,7 @@ def run_job_process(argv: list[str]) -> int:
                     p, f, 0o600)) as fh:
                 fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
         except Exception:
-            pass #TODO: log the exception or handle it in a more meaningful way
+            logging.getLogger(__name__).debug("swallowed exception in fh_log", exc_info=True)
 
     iface_ip = _pick_ip(args.iface)
 

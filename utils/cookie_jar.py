@@ -383,7 +383,8 @@ class CookieJarStore:
                         check=False, capture_output=True, timeout=5,
                     )
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in _repair_ownership_if_needed", exc_info=True)
         log.info(
             "[cookie_jar] Root guard: chowned cookie_jar DB + WAL + SHM "
             "back to uid=%d (workspace owner). A prior root run had "
@@ -776,7 +777,7 @@ class CookieJarStore:
             try:
                 self._conn.close()
             except Exception:  # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("swallowed exception in close", exc_info=True)
 
 
 # -- singleton ---------------------------------------------------------------
@@ -797,7 +798,8 @@ def get_jar() -> CookieJarStore:
                 try:
                     _JAR.close()
                 except Exception:  # noqa: BLE001
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in get_jar", exc_info=True)
             _JAR = CookieJarStore(path)
         return _JAR
 

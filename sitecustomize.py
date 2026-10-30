@@ -7,6 +7,7 @@
 # closure is an exact-pinned, internally-consistent set rebuilt with every
 # deb; the import floor arbitrates any skew it creates. Inert when vendor/
 # is absent (every dev-tree lane keeps pristine behavior).
+import logging
 import sys
 from pathlib import Path
 
@@ -53,4 +54,4 @@ try:
     from dacustoms_finder import register_dacustoms_finder
     register_dacustoms_finder()
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)

@@ -175,7 +175,8 @@ def write_dispatch(
         try:
             conn.rollback()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "swallowed exception in write_dispatch", exc_info=True)
         return None
 
     if _should_sweep():
@@ -250,7 +251,7 @@ def what_touched(
         try:
             conn.rollback()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in what_touched", exc_info=True)
         return f"Journal query failed: {exc}"
 
     if not rows:

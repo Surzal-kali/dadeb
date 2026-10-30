@@ -46,6 +46,7 @@ Argument parsing uses the tool's own parameter schema (from the manifest
 discovered at startup) for type coercion — no hardcoded type maps.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -91,7 +92,7 @@ try:
     from dacustoms_finder import register_dacustoms_finder
     register_dacustoms_finder()
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # Load .env (same as bootstrap.py) so env-tunable knobs are visible.
 # tool_repl.py is a standalone entry point — without this, os.getenv() only
@@ -119,7 +120,7 @@ try:
     if _pg_env.is_file():
         _ld(_pg_env, override=False)
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # ── Re-exports: public API + load-bearing privates ──────────────────────────
 #

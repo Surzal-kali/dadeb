@@ -131,7 +131,8 @@ class SnapshotStore:
                             check=False, capture_output=True, timeout=5,
                         )
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in _repair_ownership_if_needed", exc_info=True)
         else:
             logger.warning(
                 "[snapshots] %s is root-owned but the framework runs as "

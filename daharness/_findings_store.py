@@ -192,7 +192,8 @@ def repair_db_ownership(db_path: str) -> None:
                     check=False, capture_output=True, timeout=5,
                 )
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in repair_db_ownership", exc_info=True)
     logger.info(
         "[findings] Root guard: chowned ids.db + WAL + SHM back to "
         "uid=%d (workspace owner). A prior root run had root-owned "

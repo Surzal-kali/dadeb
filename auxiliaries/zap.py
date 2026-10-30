@@ -31,6 +31,7 @@ anyway, so we don't pay the async tax.
 """
 
 from __future__ import annotations
+import logging
 
 import json
 import re
@@ -330,7 +331,9 @@ class ZAPClient:
             try:
                 self._get("replacer/action/removeRule", description=desc)
             except Exception:
-                pass  # rule doesn't exist yet — fine (i guess..)
+                # rule doesn't exist yet — fine (i guess..)
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in configure_scan_config", exc_info=True)
             try:
                 self._get(
                     "replacer/action/addRule",
@@ -357,7 +360,8 @@ class ZAPClient:
             try:
                 self._get("network/action/removeRateLimitRule", description=rl_desc)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in configure_scan_config", exc_info=True)
             try:
                 self._get(
                     "network/action/addRateLimitRule",
@@ -578,7 +582,9 @@ class ZAPClient:
             try:
                 self._get("spider/action/setOptionMaxDepth", Integer=str(max_depth))
             except Exception:
-                pass  # non-fatal: scan still runs with the previous depth
+                # non-fatal: scan still runs with the previous depth
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in spider", exc_info=True)
         return self._get(
             "spider/action/scan", url=url,
             recurse=str(recurse).lower(),

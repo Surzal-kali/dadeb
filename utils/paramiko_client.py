@@ -34,6 +34,7 @@ paramiko legacy handling is attempted here.
 The one-shot ``paramiko_client`` is kept for backward compatibility.
 """
 
+import logging
 import os
 import time
 
@@ -204,13 +205,15 @@ def _run_ssh_command(client, command: str, timeout: float = None,
         try:
             chan.close()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "swallowed exception in _run_ssh_command", exc_info=True)
         raise
     except Exception:
         try:
             chan.close()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "swallowed exception in _run_ssh_command", exc_info=True)
         raise
 
 

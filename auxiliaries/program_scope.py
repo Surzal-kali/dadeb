@@ -41,6 +41,7 @@ the ``updated_at`` filter for incremental refreshes.
 """
 
 from __future__ import annotations
+import logging
 
 import re
 from pathlib import Path
@@ -60,7 +61,9 @@ try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 except Exception:
-    pass  # dotenv not installed or .env missing — silently degrade
+    # dotenv not installed or .env missing — silently degrade
+    logging.getLogger(__name__).debug(
+        "swallowed exception at module scope", exc_info=True)
 
 # --- carved guts (tool surface never moves; plain-helper shims are lane-legal)
 from auxiliaries._program_scope_feeds import (

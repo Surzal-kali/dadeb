@@ -39,6 +39,7 @@ COLLAB_HTTP_PORT=8080).
 """
 
 from __future__ import annotations
+import logging
 
 import asyncio
 import json
@@ -163,7 +164,7 @@ class CallbackStore:
             with hits.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, default=str) + "\n")
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in _append_jsonl", exc_info=True)
 
     def poll(self, since: float = 0.0) -> list[dict[str, Any]]:
         with self._lock:
@@ -199,7 +200,9 @@ class _DNSProtocol(asyncio.DatagramProtocol):
             if self._transport:
                 self._transport.sendto(response, addr)
         except Exception:
-            pass  # malformed query — log what we can, don't crash
+            # malformed query — log what we can, don't crash
+            logging.getLogger(__name__).debug(
+                "swallowed exception in datagram_received", exc_info=True)
 
 
 # --- collaborator listener ---------------------------------------------------
@@ -350,7 +353,7 @@ class CollaboratorListener:
             try:
                 await writer.wait_closed()
             except Exception:
-                pass #TODO: discuss possibility of logging here instead of just passing --- IGNORE ---
+                pass
 
     # -- lifecycle ------------------------------------------------------------
 

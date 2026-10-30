@@ -17,7 +17,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # Load the engagement-cobweb Postgres lane env (/etc/daharness/pg.env on the
 # deb). The systemd units pick this up via EnvironmentFile=-, but a non-
@@ -29,7 +29,7 @@ try:
     if _pg_env.is_file():
         _ld(_pg_env, override=False)
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -122,7 +122,7 @@ def _scope_headers(scope) -> dict[str, str]:
             lowered = name.decode("latin-1").lower() if isinstance(name, bytes) else str(name).lower()
             out[lowered] = value.decode("latin-1") if isinstance(value, bytes) else str(value)
     except Exception:  # noqa: BLE001, S110 - never a fault source
-        pass
+        logging.getLogger(__name__).debug("swallowed exception in _scope_headers", exc_info=True)
     return out
 
 
@@ -197,7 +197,7 @@ def _mcp_text(payload) -> list:
     try:
         _disp_result_len_var.set(len(text.encode("utf-8", "replace")))
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("swallowed exception in _mcp_text", exc_info=True)
     return [mcp_types.TextContent(type="text", text=text)]
 
 # MCP transport (low-level server + streamable-HTTP session manager).  The

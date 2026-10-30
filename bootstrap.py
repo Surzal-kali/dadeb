@@ -44,7 +44,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # Load the engagement-cobweb Postgres lane env (/etc/daharness/pg.env on the
 # deb). The systemd units pick this up via EnvironmentFile=-, but a non-
@@ -56,7 +56,7 @@ try:
     if _pg_env.is_file():
         _ld(_pg_env, override=False)
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # dacustoms finder: register explicitly so the dacustoms.* import prefix
 # resolves in the bootstrap lane (sitecustomize may not auto-load).
@@ -64,7 +64,7 @@ try:
     from dacustoms_finder import register_dacustoms_finder
     register_dacustoms_finder()
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -781,7 +781,8 @@ class FrameworkLoader:
                                 BURP_MCP_HOST, BURP_MCP_PORT)
                     return True
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in wait_for_burp_mcp", exc_info=True)
             await asyncio.sleep(1)
         logger.warning("[!] Burp MCP server did not respond within %ss; "
                        "burp_* tools will return a not-reachable error until "
@@ -845,7 +846,8 @@ class FrameworkLoader:
                                 host, port)
                     return True
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in wait_for_playwright", exc_info=True)
             await asyncio.sleep(1)
         logger.warning("[!] Playwright sidecar did not respond within %ss; "
                        "playwright_* tools will return a not-reachable error "
@@ -907,7 +909,9 @@ class FrameworkLoader:
             except asyncio.CancelledError:
                 pass
             except Exception:
-                pass  # serve() may raise on forced exit; the task is done either way
+                # serve() may raise on forced exit; the task is done either way
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in stop", exc_info=True)
 
         # Cancel any remaining asyncio tasks (API task may already be done now)
         for t in tasks:
@@ -937,7 +941,8 @@ class FrameworkLoader:
             try:
                 await p.wait()
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in _reap_proc", exc_info=True)
 
         async def _reap():
             if tasks:
@@ -956,7 +961,8 @@ class FrameworkLoader:
                     try:
                         fd.close()
                     except Exception:
-                        pass
+                        logging.getLogger(__name__).debug(
+                            "swallowed exception in _reap", exc_info=True)
             self._child_log_fds = log_fds
 
         # Shield so a task cancellation (asyncio.run's KeyboardInterrupt path)
@@ -981,7 +987,8 @@ class FrameworkLoader:
                 except ProcessLookupError:
                     pass
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug(
+                        "swallowed exception in _hard_kill_children", exc_info=True)
 
     def _preflight_wordlists(self):
         """Launch-time wordlist sanity check for ffuf/hydra.
@@ -1401,7 +1408,7 @@ async def run_framework():
             with open("/tmp/framework_error.log", "w") as f:
                 f.write(str(e))
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in run_framework", exc_info=True)
     finally:
         try:
             await loader.stop()

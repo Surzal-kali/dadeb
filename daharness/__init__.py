@@ -11,6 +11,7 @@ This package init re-exports the public surface for callers that import from
 shim so ``python3 daharness/core.py`` keeps working.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -35,7 +36,7 @@ try:
 
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 except Exception:
-    pass
+    logging.getLogger(__name__).debug("swallowed exception at module scope", exc_info=True)
 
 # Re-export httpx so callers (and tests) can monkeypatch the shared module
 # object via `daharness.httpx`. registry.py imports the same `httpx` module, so

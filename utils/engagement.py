@@ -307,7 +307,8 @@ def _ensure_engagement_row(slug: str, roe_note: str) -> None:
         try:
             conn.rollback()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "swallowed exception in _ensure_engagement_row", exc_info=True)
 
 
 # ─── Operator actions (run under harness_operator) ───────────────────────────
@@ -360,7 +361,7 @@ def sweep() -> int:
         try:
             conn.rollback()
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("swallowed exception in sweep", exc_info=True)
         return -1
 
 

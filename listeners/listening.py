@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import argparse
 import functools
@@ -472,7 +473,8 @@ class TCPListener:
                 server.close()
                 await server.wait_closed()
             except Exception:
-                pass #TODO: print or do *something*, if a listener isn't reaping properly thats bad
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in close_listener", exc_info=True)
         _sm.close(sid)
         if getattr(self, "_handle", None) == handle:
             self._handle = None
