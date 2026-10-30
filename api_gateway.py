@@ -55,6 +55,12 @@ _TRACE_PATH = "/tmp/gw_http_trace.log"
 _trace_lock = threading.Lock()
 _in_flight = 0                       # current accepted-but-not-completed requests
 _op_id_var: contextvars.ContextVar = contextvars.ContextVar("gw_op_id", default=None)
+#: The resolved initialize-time MCP client identity for THIS request (set
+#: only when the request was an announcing `initialize`; read by the response
+#: wrapper to stamp the id back so a wired client can adopt it).
+_mcp_init_agent_id: contextvars.ContextVar = contextvars.ContextVar(
+    "gw_mcp_init_agent", default=None
+)
 _disp_result_len_var: contextvars.ContextVar = contextvars.ContextVar(
     "gw_disp_result_len", default=0
 )
@@ -82,6 +88,105 @@ def _get_nested(d, dotted: str):
         else:
             return None
     return cur
+
+
+def _parse_rpc_body(body) -> tuple[dict | None, int | None]:
+    """Best-effort JSON-RPC parse of a request body chunk.
+
+    Returns ``(first_message_dict, batch_size)`` — single objects parse as
+    themselves with ``batch_size=None``; batches parse as the FIRST message
+    with the batch length. Never raises (identity/trace instrumentation must
+    not become a fault source).
+    """
+    rpc = json.loads(body) if body else None
+    batch_n = None
+    if isinstance(rpc, dict):
+        cand = rpc
+    elif isinstance(rpc, list) and rpc and isinstance(rpc[0], dict):
+        cand = rpc[0]
+        batch_n = len(rpc)
+    else:
+        cand = None
+    return cand, batch_n
+
+
+def _scope_headers(scope) -> dict[str, str]:
+    """Lowercased ASGI scope header dict for the identity/trace read path.
+
+    Best-effort like every /mcp instrument here — a malformed scope must
+    not fault the request; the identity lane just stays unpinned."""
+    out = {}
+    try:
+        raw = list(scope.get("headers") or [])
+        for name, value in raw:
+            lowered = name.decode("latin-1").lower() if isinstance(name, bytes) else str(name).lower()
+            out[lowered] = value.decode("latin-1") if isinstance(value, bytes) else str(value)
+    except Exception:  # noqa: BLE001, S110 - never a fault source
+        pass
+    return out
+
+
+def _mcp_initialize_identity(scope, cand: dict | None) -> str | None:
+    """Phase 0.5 — resolve + pin the initialize-time client identity.
+
+    Reads the handshake announcement from, in precedence: the
+    ``X-Daharness-Agent-Id`` request header, ``params._meta`` extras, then
+    ``params.clientInfo`` extras. Only an announced handshake registers:
+    the resolved id (announce-or-mint, same chain as every lane — an
+    announce-but-unusable name resolves to a pinned mint) registers under
+    the client fingerprint so later ``tools/call`` requests WITHOUT their
+    own announcement resolve to it. The returned id is stamped on the
+    initialize response header so a wired client can learn (and adopt)
+    what it now resolves to.
+
+    Returns the resolved agent_id, or None when this POST was not an
+    initialized-announcing request (no registration, no header — zero
+    behavior change).
+    """
+    if not isinstance(cand, dict) or cand.get("method") != "initialize":
+        return None
+    from utils.agent_identity import (
+        MCP_AGENT_ID_HEADER,
+        mcp_fingerprint,
+        register_mcp_handshake,
+        resolve_agent_id,
+    )
+
+    params = cand.get("params") if isinstance(cand.get("params"), dict) else {}
+    client_info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+    headers = _scope_headers(scope)
+    announcement = (
+        headers.get(MCP_AGENT_ID_HEADER)
+        or _safe_announcement(params.get("_meta"))
+        or _safe_announcement(client_info)
+    )
+    if not announcement:
+        # No announcement at the handshake -> NO pin.  A client that opted
+        # out of identity keeps today's exact behavior on every later call
+        # (per-call mint, or the "0" tail on the scratch lane); the register
+        # below is reserved for clients that engaged the identity lane,
+        # including announce-but-unusable (which resolve to a pinned mint).
+        return None
+    agent_id, provenance = resolve_agent_id(announcement)
+    fingerprint = mcp_fingerprint(
+        (scope.get("client") or [None])[0] if scope.get("client") else None,
+        headers.get("user-agent"),
+    )
+    register_mcp_handshake(fingerprint, agent_id, provenance)
+    _trace(
+        "MCP_IDENTIFY",
+        agent_id=agent_id,
+        provenance=provenance,
+        fingerprint=f"{fingerprint[0]}|{fingerprint[1][:64]}",
+        client_info=json.dumps(client_info, default=str),
+    )
+    return agent_id
+
+
+def _safe_announcement(meta) -> str | None:
+    from utils.agent_identity import extract_meta_agent_id
+
+    return extract_meta_agent_id(meta)
 
 
 def _mcp_text(payload) -> list:
@@ -153,6 +258,16 @@ class _MCPEndpoint:
             try:
                 if message.get("type") == "http.response.start":
                     resp_status = message.get("status")
+                    # Initialize-time adoption channel (Phase 0.5): when this
+                    # POST was an announcing initialize, echo the resolved id
+                    # as a response header so a wired client learns what it
+                    # now resolves to — and can replay it per call without
+                    # the tool-argument lane.
+                    init_id = _mcp_init_agent_id.get()
+                    if init_id:
+                        headers = list(message.get("headers") or [])
+                        headers.append((b"x-daharness-agent-id", str(init_id).encode("utf-8")))
+                        message = {**message, "headers": headers}
                 elif message.get("type") == "http.response.body":
                     resp_bytes += len(message.get("body") or b"")
                 await send(message)
@@ -180,15 +295,13 @@ class _MCPEndpoint:
             if msg.get("type") == "http.request":
                 body = msg.get("body") or b""
                 try:
-                    rpc = json.loads(body) if body else None
-                    cand = None
-                    batch_n = None
-                    if isinstance(rpc, dict):
-                        cand = rpc
-                    elif isinstance(rpc, list) and rpc and isinstance(rpc[0], dict):
-                        cand = rpc[0]
-                        batch_n = len(rpc)
+                    cand, batch_n = _parse_rpc_body(body)
                     if cand is not None:
+                        # Phase 0.5 — initialize-time client identity: resolve
+                        # + pin (and remember the id for the response header).
+                        init_id = _mcp_initialize_identity(scope, cand)
+                        if init_id:
+                            _mcp_init_agent_id.set(init_id)
                         _trace(
                             "REQUEST_PARSED",
                             op_id=op_id,
@@ -322,7 +435,18 @@ _MCP_TOOL_EXECUTE_SCHEMA = {
         "arguments": {"type": "object"},
         "agent_id": {
             "type": "string",
-            "description": "Identity of the running model/agent. Used as the Brain session id so concurrent agents get isolated tool state (e.g. separate msfconsole handles). Omit to use the shared default session.",
+            "description": (
+                "Identity of the running model/agent. Used as the Brain "
+                "session id so concurrent agents get isolated tool state "
+                "(e.g. separate msfconsole handles). Backwards-compat "
+                "per-call lane — always wins over the initialize-time "
+                "pin. Preferred: announce once on the /mcp initialize "
+                "handshake (X-Daharness-Agent-Id header, params._meta, or "
+                "clientInfo extra); later calls resolve through that pin "
+                "(and the initialize response echoes the resolved id in "
+                "X-Daharness-Agent-Id). Omit both to get a minted "
+                "anon-<hex> per call from the shared default behavior."
+            ),
         },
         "result_mode": {
             "type": "string",
@@ -996,14 +1120,13 @@ class APIGateway:
                             f"'{manifest.module_id}' schema: {unknown}. "
                             f"Accepted keys: {sorted(self._manifest_param_names(manifest))}"
                         )
-                    # Phase 0 identity (announce-or-mint) — the MCP lane
-                    # accepts agent_id as a tool argument (documented
-                    # client contract); an unusable announcement mints
+                    # Phase 0/0.5 identity (announce-or-mint) — the MCP lane
+                    # resolves in precedence: agent_id tool argument
+                    # (documented contract, backwards compat — always wins),
+                    # the call's params._meta, the X-Daharness-Agent-Id
+                    # header, the initialize-time handshake pin, then mint
                     # anon-<8hex> exactly like the REST lane.
-                    from utils.agent_identity import resolve_agent_id
-                    session_id, identity_provenance = resolve_agent_id(
-                        arguments.get("agent_id")
-                    )
+                    session_id, identity_provenance = self._mcp_call_identity(arguments)
                     # Per-turn tool budget — same rules as the REST path.
                     budget_decision, budget_meta = self.tool_budget.pre_dispatch(
                         session_id, arguments.get("turn_key"), manifest.module_id
@@ -1056,10 +1179,12 @@ class APIGateway:
                             "provenance": identity_provenance,
                             **(
                                 {"hint": (
-                                    f"No agent_id was announced; this call ran as minted "
-                                    f"identity '{session_id}'. Adopt this id on your "
-                                    "next calls (agent_id argument) for scratch/job "
-                                    "continuity."
+                                    f"No agent_id was announced on this call; it ran as "
+                                    f"minted identity '{session_id}'. Pin once on the "
+                                    "initialize handshake (agent_id inside params._meta, "
+                                    "in clientInfo, or the X-Daharness-Agent-Id header) "
+                                    "— or adopt this id on your next calls (agent_id "
+                                    "argument) — for scratch/job continuity."
                                 )}
                                 if identity_provenance == "minted" else {}
                             ),
@@ -1110,7 +1235,9 @@ class APIGateway:
                     # Without this the model could make 20+ scratch_searches
                     # in a turn, each delivering up to 16KB, and the budget
                     # counter would never move.
-                    scratch_agent = arguments.get("agent_id") or "0"
+                    scratch_agent, _scratch_prov = self._mcp_call_identity(
+                        arguments, fallback_shared=True
+                    )
                     budget_decision, budget_meta = self.tool_budget.pre_dispatch(
                         scratch_agent, arguments.get("turn_key"), SCRATCH_SEARCH
                     )
@@ -1182,6 +1309,38 @@ class APIGateway:
                 )
 
     # --- Arg validation helpers (mirror _normalize_args_against_manifest) -----
+
+    def _mcp_call_identity(self, arguments: dict, fallback_shared: bool = False):
+        """Phase 0.5 identity chain for the /mcp call lane (announce-or-mint).
+
+        Precedence: the ``agent_id`` TOOL ARGUMENT (backwards compat — always
+        wins), the call's ``params._meta`` ``agent_id`` extra, the
+        ``X-Daharness-Agent-Id`` header, the initialize-time handshake pin
+        (this client's fingerprint), then mint — or the legacy shared ``"0"``
+        bucket on the scratch lane (``fallback_shared=True``), which a
+        pre-pin client can still address. Degrades to the pre-0.5 behavior
+        (argument-only resolution) whenever the request context is missing.
+        """
+        from utils.agent_identity import resolve_mcp_call_identity
+
+        http_request = None
+        call_meta = None
+        try:
+            _ctx = self.mcp_server.request_context
+            http_request = getattr(_ctx, "request", None)
+            call_meta = getattr(_ctx, "meta", None)
+        except Exception:  # noqa: BLE001 - degrade to argument-only on SDK drift
+            http_request = call_meta = None
+        headers = getattr(http_request, "headers", None)
+        client = getattr(http_request, "client", None)
+        return resolve_mcp_call_identity(
+            announced=arguments.get("agent_id"),
+            call_meta=call_meta,
+            http_headers=headers,
+            client_ip=getattr(client, "host", None) if client else None,
+            user_agent=headers.get("user-agent") if headers is not None else None,
+            fallback_shared=fallback_shared,
+        )
 
     @staticmethod
     def _manifest_param_names(manifest) -> list:

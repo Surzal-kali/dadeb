@@ -191,7 +191,13 @@ FastAPI server (port 5000; 6000 on the container profile):
 - `GET /scratch/stats` — scratch store statistics
 - `POST /memory/search` — keyword memory search
 - `POST /memory/recall` — vector similarity recall
-- `POST /mcp` — streamable-HTTP MCP endpoint (tools/list + tools/call)
+- `POST /mcp` — streamable-HTTP MCP endpoint (tools/list + tools/call).
+  Phase 0.5 client identity: an announcing client declares once on the
+  `initialize` handshake (`X-Daharness-Agent-Id` header, `params._meta`,
+  or `clientInfo` extra) and later calls resolve through the pin; the
+  initialize response echoes the resolved id in `X-Daharness-Agent-Id`.
+  The `agent_id` tool argument still wins when present (backwards compat);
+  non-announcing clients keep per-call mint / `"0"` scratch-tail behavior.
 
 ### Result Projection (`utils/result_projection.py`)
 

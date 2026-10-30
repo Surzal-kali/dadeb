@@ -59,13 +59,26 @@ are distinct per agent there too (as ``s<int>`` — the wire protocol
 carries the executor's resolved int, not the string; the authoritative
 string id is journaled by the dispatching executor's own journal row).
 
-Scope note (Phase 0): the MCP wire still accepts ``agent_id`` as a tool
-argument for backwards compat; a client-identity field on the MCP
-``initialize`` handshake is the Phase 0.5 follow-up.
+Scope note (Phase 0.5, shipped 2026-10-30): the MCP wire still accepts
+``agent_id`` as a tool argument for backwards compatibility (explicit
+per-call announcement wins, always). The MCP ``initialize`` handshake now
+also carries identity: ``X-Daharness-Agent-Id`` header, or ``agent_id``
+inside the request's ``params._meta`` (or ``params.clientInfo``) extras.
+A handshake announcement is registered per client fingerprint
+(``client_ip, user_agent``) and pins later ``tools/call`` requests that
+carry NO announcement of their own — an operator-wired client announces
+once on connect instead of on every call. Handshake entries are TTL'd
+(``MCP_HANDSHAKE_TTL_HOURS``) and bounded; the registry is process-local
+diagnostic state, like everything in this module. Clients that never
+announce keep today's exact behavior (per-call mint, or the ``"0"`` tail
+on the scratch lane). Note: a pinned identity also makes the per-turn
+budget accrue per connection instead of per mint-never-repeating call —
+that brake is now effective for announcing MCP clients, as intended.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import threading
@@ -213,3 +226,141 @@ REPL_AGENT_ID = "repl"
 #: Brain-side workers set the contextvar from the wire session int under
 #: this prefix (the wire carries the executor's resolved int, not the string).
 BRAIN_AGENT_PREFIX = "s"
+
+
+# --- MCP lane: initialize-time client identity (Phase 0.5) ----------------------
+
+#: Per-call announcement header on /mcp POSTs (initialize + tools/call).
+MCP_AGENT_ID_HEADER = "x-daharness-agent-id"
+
+#: Key this framework reads inside MCP ``params._meta`` (and inside
+#: ``params.clientInfo``) extras on ``initialize``. Pydantic allows extra
+#: keys, so a client can announce without any schema change.
+MCP_META_AGENT_ID_KEY = "agent_id"
+
+_MCP_HANDSHAKE: dict[tuple[str, str], tuple[str, str, float]] = {}
+_MCP_HANDSHAKE_LOCK = threading.Lock()
+#: Bounded like the mint registry — one entry per live MCP client connection.
+_MCP_HANDSHAKE_MAX = 1024
+
+
+def _mcp_handshake_ttl_hours() -> float:
+    try:
+        return float(os.getenv("MCP_HANDSHAKE_TTL_HOURS", "24"))
+    except (TypeError, ValueError):
+        return 24.0
+
+
+def mcp_fingerprint(client_ip, user_agent) -> tuple[str, str]:
+    """Correlation fingerprint shared by the initialize + call sides.
+
+    Deliberately coarse ``(client_ip, user_agent)`` — best-effort continuity
+    for announcing clients, never an authenticity claim (the /mcp lane is
+    already API-key authenticated; identity here is accounting).
+    """
+    return (str(client_ip or ""), str(user_agent or "")[:256])
+
+
+def register_mcp_handshake(fingerprint, agent_id: str, provenance: str) -> None:
+    """Pin a resolved initialize-time identity to a client fingerprint.
+
+    Only the gateway's initialize handler registers — per-connection state,
+    resolved once through ``resolve_agent_id`` (announce-or-mint), never
+    second-guessed here."""
+    if not fingerprint or not agent_id:
+        return
+    with _MCP_HANDSHAKE_LOCK:
+        _MCP_HANDSHAKE[fingerprint] = (agent_id, provenance, time.time())
+        if len(_MCP_HANDSHAKE) > _MCP_HANDSHAKE_MAX:
+            for k in sorted(_MCP_HANDSHAKE, key=lambda k: _MCP_HANDSHAKE[k][2])[
+                : _MCP_HANDSHAKE_MAX // 2
+            ]:
+                _MCP_HANDSHAKE.pop(k, None)
+
+
+def lookup_mcp_handshake(fingerprint) -> tuple[str, str] | None:
+    """The initialize-time identity for this fingerprint, or None.
+
+    TTL'd (swept on access) and refreshed on hit, so a live connection stays
+    pinned while dead clients age out under the same 24h convention as
+    scratch. No match (never-announcing clients) means the caller falls
+    through to per-call mint/``"0"`` — today's exact behavior.
+    """
+    if not fingerprint:
+        return None
+    cutoff = time.time() - _mcp_handshake_ttl_hours() * 3600
+    with _MCP_HANDSHAKE_LOCK:
+        entry = _MCP_HANDSHAKE.get(fingerprint)
+        if entry is None:
+            return None
+        agent_id, provenance, registered_at = entry
+        if registered_at < cutoff:
+            _MCP_HANDSHAKE.pop(fingerprint, None)
+            return None
+        _MCP_HANDSHAKE[fingerprint] = (agent_id, provenance, time.time())
+        return agent_id, provenance
+
+
+def extract_meta_agent_id(meta) -> str | None:
+    """Read the announcement from a request's ``_meta``, or None.
+
+    The MCP SDK parses ``params._meta`` into ``RequestParams.Meta`` with
+    ``extra='allow'``, so client-added keys arrive as model extras; raw
+    dict payloads arrive dict-shaped. Duck-typed so this module never
+    imports mcp.
+    """
+    if meta is None:
+        return None
+    if isinstance(meta, dict):
+        raw = meta.get(MCP_META_AGENT_ID_KEY)
+    else:
+        raw = getattr(meta, MCP_META_AGENT_ID_KEY, None)
+        if raw is None:
+            extra = getattr(meta, "model_extra", None)
+            raw = extra.get(MCP_META_AGENT_ID_KEY) if isinstance(extra, dict) else None
+    if raw is None:
+        return None
+    return str(raw).strip() or None
+
+
+def resolve_mcp_call_identity(
+    announced: str | None = None,
+    call_meta=None,
+    http_headers=None,
+    client_ip=None,
+    user_agent=None,
+    fallback_shared: bool = False,
+    fingerprint=None,
+) -> tuple[str, str]:
+    """One resolution chain for the gateway's /mcp call lane.
+
+    Precedence:
+      1. ``announced`` — the ``agent_id`` TOOL ARGUMENT (backwards compat,
+         explicit per-call, wins over everything).
+      2. ``params._meta`` ``agent_id`` extra on the call itself.
+      3. the ``X-Daharness-Agent-Id`` HTTP header on the call.
+      4. the initialize-time handshake pin for this client fingerprint.
+      5. mint (``anon-<8hex>``) — or, when ``fallback_shared`` (the scratch
+         lane), the legacy shared ``"0"`` bucket a ref-less retrieval can
+         still address.
+
+    Returns ``(agent_id, provenance)`` like ``resolve_agent_id``; lanes
+    that pass no context at all resolve exactly like the pre-Phase-0.5
+    argument-only lane did.
+    """
+    announcement = announced
+    if announcement is None:
+        announcement = extract_meta_agent_id(call_meta)
+    if announcement is None and http_headers is not None:
+        getter = getattr(http_headers, "get", None)
+        announcement = getter(MCP_AGENT_ID_HEADER) if getter else None
+    if announcement is not None and str(announcement).strip():
+        return resolve_agent_id(str(announcement))
+    if fingerprint is None:
+        fingerprint = mcp_fingerprint(client_ip, user_agent)
+    pinned = lookup_mcp_handshake(fingerprint)
+    if pinned is not None:
+        return pinned
+    if fallback_shared:
+        return SHARED_AGENT_ID, _PROVENANCE_SHARED
+    return resolve_agent_id(None)
