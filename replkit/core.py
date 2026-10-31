@@ -73,6 +73,11 @@ def _make_executor() -> ToolRegistry:
     """Create a bare ToolRegistry instance for tool execution without a vector store client."""
     reg = ToolRegistry.__new__(ToolRegistry)
     reg._tool_instances = {}
+    # Phase-0 brain-session mapping: run_tool announces the 'repl' identity,
+    # and a session id != "0" resolves through _resolve_brain_session, which
+    # reads _brain_sessions/_brain_session_lock unconditionally.
+    from daharness.executor import _init_brain_session_state
+    _init_brain_session_state(reg)
     return reg
 
 

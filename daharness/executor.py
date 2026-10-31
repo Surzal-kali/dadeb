@@ -16,6 +16,7 @@ import os
 import struct
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -712,6 +713,25 @@ class ExecutorMixin:
 # ---------------------------------------------------------------------------
 
 
+def _init_brain_session_state(registry) -> None:
+    """Initialize the Phase-0 brain-session mapping on a registry instance.
+
+    Every construction path (the full ``ToolRegistry.__init__`` AND the bare
+    ``__new__`` instances of the standalone/REPL helpers) must carry the same
+    state: for any session id other than ``"0"``, the dispatch path resolves
+    through ``_resolve_brain_session``, which reads these attributes
+    unconditionally. The bare ``__new__`` builders used to set only
+    ``_tool_instances`` — the REPL announces ``repl`` (``REPL_AGENT_ID``), so
+    every REPL dispatch died with
+    ``AttributeError: 'ToolRegistry' object has no attribute
+    '_brain_session_lock'`` before the Brain socket was even consulted.
+    One helper so the two paths cannot drift again.
+    """
+    from utils.brain_sessions import BrainSessionMap
+    registry._brain_sessions = BrainSessionMap()
+    registry._brain_session_lock = threading.Lock()
+
+
 def _new_registry():
     # Lazy import avoids a circular import with daharness.registry, which mixes
     # ExecutorMixin into ToolRegistry at class-definition time.
@@ -719,6 +739,7 @@ def _new_registry():
 
     registry = ToolRegistry.__new__(ToolRegistry)
     registry._tool_instances = {}
+    _init_brain_session_state(registry)
     return registry
 
 

@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import sys
-import threading
 
 from pathlib import Path
 from typing import Any
@@ -212,9 +211,8 @@ class ToolRegistry(ExecutorMixin):
         # and short-circuits to 0 before the store is consulted. When the
         # store is unavailable the BrainSessionMap degrades to a
         # process-local mapping (pre-Phase-0 behavior).
-        from utils.brain_sessions import BrainSessionMap
-        self._brain_sessions = BrainSessionMap()
-        self._brain_session_lock = threading.Lock()
+        from .executor import _init_brain_session_state
+        _init_brain_session_state(self)
 
         # Removed automatic background bootstrap to avoid race conditions
         # and duplicate indexing when called explicitly from bootstrap.py
