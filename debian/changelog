@@ -2,6 +2,23 @@ daharness (0.2.0) kali; urgency=medium
 
   [ 0.2.0 — the release of record ]
 
+  * Scope-gate spec hotfix (tagged into 0.2.0, 2026-10-30): two stacked
+    target-spec intake breaks kept refusing newly blessed hosts (the
+    cctv.htb / 10.129.244.156 loop). First, the spec reducer never
+    parsed the host:port form tools build from a known open port —
+    'cctv.htb:8080' fell through as a literal bare hostname, missed the
+    operator allowlist and blessed-host tiers, and was refused as an
+    unmanifestable host; _spec_to_checkable now strips a trailing :port
+    (hostname:port, IPv4:port, bracketed [v6]:port — unbracketed IPv6
+    literals untouched). Second, string-typed target params a driving
+    model emitted as a real JSON array arrive preflight-coerced as the
+    literal '["cctv.htb"]' text, which no tier could match either;
+    check_scan and probe_web intake now unwrap one level via
+    utils._scope_gate_net.unwrap_list_shaped_target (json.loads then
+    ast.literal_eval; anything unparseable returns verbatim,
+    fail-closed). Regression tests pin the loop end-to-end
+    (tests/test_scope_gate.py: TestHostPortSpecs, TestListShapedTargets).
+
   * Executor dispatch hotfix (tagged into 0.2.0, 2026-10-30): the
     bare-instance builders of the standalone lane
     (daharness.executor._new_registry, replkit.core._make_executor)

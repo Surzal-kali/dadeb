@@ -216,7 +216,16 @@ def probe_web(
         wall_cap: Wall-clock cap in seconds; probes past the deadline are
             reported as ``skipped_deadline``.
     """
-    from utils.scope_gate import check_scan, ScopeGateError
+    from utils.scope_gate import (
+        ScopeGateError,
+        check_scan,
+        unwrap_list_shaped_target,
+    )
+
+    # List-typed model args arrive preflight-coerced as '["cctv.htb"]';
+    # normalize before splitting so entries, gate check, and jobs all see
+    # the same clean host/URL specs.
+    targets = unwrap_list_shaped_target(targets)
 
     entries = _split_targets(targets)
     if not entries:

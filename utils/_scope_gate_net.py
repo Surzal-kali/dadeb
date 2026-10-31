@@ -12,12 +12,42 @@ verdict functions.
 """
 from __future__ import annotations
 
+import ast
 import ipaddress
+import json
 import re
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlparse
+
+
+def unwrap_list_shaped_target(raw: str) -> str:
+    """Unwrap a stringified list back to a plain space-joined spec list.
+
+    Driving models sometimes emit a string-typed target param as a real
+    JSON array (``["cctv.htb"]``); the preflight string-coercion then hands
+    downstream tools the literal ``'["cctv.htb"]'`` text. The gate and the
+    target-consuming tools unwrap one level — specs stay hosts/URLs/ranges,
+    never JSON plumbing. Unparseable input is returned unchanged
+    (fail-closed exactly as before).
+    """
+    raw = (raw or "").strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        try:
+            parsed = ast.literal_eval(raw)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return raw
+    if isinstance(parsed, str):
+        return parsed.strip() or raw
+    if not isinstance(parsed, (list, tuple)):
+        return raw
+    items = [str(item).strip() for item in parsed if str(item).strip()]
+    return " ".join(items) if items else raw
 
 
 def _is_ip(s: str) -> bool:
@@ -201,6 +231,22 @@ def _spec_to_checkable(spec: str) -> tuple[str | None, bool]:
         return (None, True)
     if _is_hyphen_range(spec):
         return (None, True)
+    if spec.startswith("[") and "]" in spec:
+        # Bracketed spec: [v6] or [v6]:port — unbracket, drop a trailing :port.
+        addr, _, rest = spec[1:].partition("]")
+        rest = rest.strip()
+        if not rest or (rest.startswith(":") and rest[1:].isdigit()):
+            return (addr, False)
+        return (None, False)
+    if ":" in spec:
+        # host:port with no scheme (e.g. tools that build 'cctv.htb:8080'
+        # targets from a known open port): the port is not part of the
+        # checkable — stripping it lets the host hit its blessed tier.
+        # Unbracketed IPv6 literals (2001:db8::1) keep their colons, so the
+        # host side contains ':' and is never stripped.
+        host, _, port = spec.rpartition(":")
+        if port.isdigit() and host and ":" not in host:
+            return (host, False)
     if _is_ip(spec):
         return (spec, False)
     return (spec, False)  # bare hostname

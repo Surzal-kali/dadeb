@@ -109,6 +109,7 @@ from utils._scope_gate_net import (
     _resolved_ips,
     _reverse_dns,
     _spec_to_checkable,
+    unwrap_list_shaped_target,
 )
 
 
@@ -498,6 +499,10 @@ def check_scan(target: str | None) -> tuple[bool, str]:
             "empty target; cannot confirm scope (scope armed). Pass an "
             "explicit in-scope target, or 'scope off' for lab mode.",
         )
+    # Driving models emit list-typed targets the preflight coerces to a
+    # stringified JSON array — unwrap one level so the specs below see
+    # hosts/URLs, not '["cctv.htb"]' plumbing (cctv.htb incident 2026-10-31).
+    raw = unwrap_list_shaped_target(raw)
 
     # Keep a URL whole (it may contain characters that look like separators);
     # otherwise split nmap/masscan-style "host1 host2,10.0.0.0/24" lists,
@@ -840,6 +845,7 @@ __all__ = [
     "check_send",
     "check_scan",
     "ScopeGateError",
+    "unwrap_list_shaped_target",
     "arm",
     "disarm",
     "add_ip",

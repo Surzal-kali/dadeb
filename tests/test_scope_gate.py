@@ -220,3 +220,97 @@ class TestBroadRanges:
         finally:
             scope_gate.disarm()
             scope_gate._CACHE.clear()
+
+
+# --- host:port specs (no scheme) ------------------------------------------- #
+# Tools build 'cctv.htb:8080'-shaped targets from a known open port; the
+# port is not part of the checkable — the spec must resolve to its host
+# tier (blessed host / allowlist IP), not fall through as a literal
+# hostname and miss every tier (cctv.htb incident, 2026-10-31).
+
+
+class TestHostPortSpecs:
+    def test_blessed_host_with_port_passes(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.55", "cctv box")["ok"]
+        assert scope_gate.add_host("cctv.htb", "10.0.0.55")["ok"]
+        for spec in ("cctv.htb:8080", "https://cctv.htb:8443"):
+            ok, reason = scope_gate.check_scan(spec)
+            assert ok, f"{spec} should pass: {reason}"
+        # The checkable reached the blessed-host tier (attribution mentions
+        # it), while the raw spec never does — port-reduction is the spec
+        # reducer's job, same as the URL branch.
+        ok, reason = scope_gate._check_one(
+            scope_gate._spec_to_checkable("cctv.htb:8080")[0],
+            scope_gate._load_state(),
+        )
+        assert ok and "blessed-host" in reason
+
+    def test_allowlisted_ip_with_port_passes(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.7", "web box")["ok"]
+        for spec in ("10.0.0.7:8080", "10.0.0.7:443"):
+            ok, reason = scope_gate.check_scan(spec)
+            assert ok, f"{spec} should pass: {reason}"
+
+    def test_unblessed_host_with_port_stays_refused(self, armed_scope):
+        ok, reason = scope_gate.check_scan("nope.lab:8080")
+        assert not ok, "unblessed host:port must stay refused (strict)"
+        assert "scope add" in reason  # remediation hint survives
+
+    def test_ipv6_specs_not_corrupted_by_port_strip(self, armed_scope):
+        # Unbracketed IPv6 with a digits suffix is an invalid literal, not
+        # host:port — stays refused, never mis-stripped to a bare host.
+        ok, _ = scope_gate.check_scan("2001:db8::1:8080")
+        assert not ok
+        for spec, want in (
+            ("2001:db8::1", "2001:db8::1"),
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("[2001:db8::1]:8080", "2001:db8::1"),
+            ("cctv.htb", "cctv.htb"),
+        ):
+            checkable, broad = scope_gate._spec_to_checkable(spec)
+            assert (checkable, broad) == (want, False), spec
+
+
+# --- stringified-list targets (preflight-coerced model args) ---------------- #
+# Driving models emit string-typed target params as JSON arrays; the
+# preflight string-coercion hands tools the literal '["cctv.htb"]' text.
+# The gate and target tools unwrap one level (cctv.htb loop 2026-10-31).
+
+
+class TestListShapedTargets:
+    def test_json_list_string_passes_gate(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.55", "cctv box")["ok"]
+        assert scope_gate.add_host("cctv.htb", "10.0.0.55")["ok"]
+        for target in ('["cctv.htb"]', '["cctv.htb:8080"]', "['cctv.htb']"):
+            ok, reason = scope_gate.check_scan(target)
+            assert ok, f"{target!r} should pass: {reason}"
+
+    def test_json_list_multi_item(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.55", "")["ok"]
+        assert scope_gate.add_host("cctv.htb", "10.0.0.55")["ok"]
+        ok, reason = scope_gate.check_scan('["cctv.htb", "10.0.0.55"]')
+        assert ok, reason
+
+    def test_unwraps_to_clean_specs(self, armed_scope):
+        assert scope_gate.unwrap_list_shaped_target('["cctv.htb"]') == "cctv.htb"
+        assert (
+            scope_gate.unwrap_list_shaped_target('["cctv.htb:8080"]')
+            == "cctv.htb:8080"
+        )
+        # URLs inside the list keep their scheme; malformed stays verbatim.
+        assert (
+            scope_gate.unwrap_list_shaped_target('["http://cctv.htb:8080/x"]')
+            == "http://cctv.htb:8080/x"
+        )
+        assert (
+            scope_gate.unwrap_list_shaped_target("cctv.htb:8080")
+            == "cctv.htb:8080"
+        )
+        assert scope_gate.unwrap_list_shaped_target("['garbage") == "['garbage"
+
+    def test_unblessed_list_member_still_refused(self, armed_scope):
+        assert scope_gate.add_ip("10.0.0.55", "")["ok"]
+        assert scope_gate.add_host("cctv.htb", "10.0.0.55")["ok"]
+        ok, reason = scope_gate.check_scan('["cctv.htb", "nope.lab"]')
+        assert not ok, "one out-of-scope member refuses the whole list"
+        assert "nope.lab" in reason
