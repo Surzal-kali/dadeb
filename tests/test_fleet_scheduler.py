@@ -32,6 +32,28 @@ def sched(tmp_path, monkeypatch):
 # --- canonical keys (rule 4 + §4a body-shape rule) ------------------------------
 
 
+def test_fleet_db_heals_tight_umask_modes(tmp_path):
+    """2026-10-31: fleet.db minted 0644 group-read-only (tight-umask
+    process) — fleet rows are cross-actor BY DESIGN ('dedupe is the
+    point'), so the other actor's write would die with SQLITE_READONLY.
+    The store __init__ reconciles db + sidecars group-rw (state_perms)."""
+    import os
+    import sqlite3
+
+    base = tmp_path / "fleet"
+    base.mkdir()
+    db = base / "fleet.db"
+    _c = sqlite3.connect(str(db))  # mint under THIS test's umask
+    _c.close()
+    os.chmod(str(db), 0o644)
+    assert not os.stat(str(db)).st_mode & 0o020
+
+    s = FleetScheduler(store_dir=base)
+    assert os.stat(str(db)).st_mode & 0o060 == 0o060
+    # The WAL sidecars minted inside __init__ inherit the healed mode.
+    assert os.stat(str(base / "fleet.db-wal")).st_mode & 0o060 == 0o060
+
+
 def test_key_ignores_query_values_but_not_param_names():
     a = canonical_unit_key("sqlmap", "http://h/x?id=1&tok=ABCD")
     b = canonical_unit_key("sqlmap", "http://h/x?id=999&tok=ZZZZ")

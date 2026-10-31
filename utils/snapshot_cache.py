@@ -92,6 +92,10 @@ class SnapshotStore:
             except sqlite3.OperationalError:
                 time.sleep(0.05 * (_attempt + 1))
         self._init_table()
+        # Cross-lane mode heal (state_perms docstring): the WAL pragma
+        # above minted the sidecars under this process's umask.
+        from utils.state_perms import reconcile_sqlite_modes
+        reconcile_sqlite_modes(self.db_path)
 
     def _repair_ownership_if_needed(self) -> None:
         """Best-effort chown of a root-owned DB back to the workspace owner.

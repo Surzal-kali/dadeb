@@ -110,9 +110,25 @@ find "$STATE_ROOT" -maxdepth 1 -type f ! -perm -g+w \
 # VectorStore.__init__ now self-heals at open time, but this sweep is the
 # offline backstop for an upgrade that restarts the service before any
 # index/gateway open touches the DB — so the first WAL write doesn't die.
-# Pattern: any *.db, *.db-wal, *.db-shm, *.db-journal in the state root.
+# Pattern: any *.db, *.db-wal, *.db-shm, *.db-journal in the state root,
+# PLUS the depth-2 shared stores under run/ (live 2026-10-31: a brain
+# session store minted 0640 under a tighter umask was invisible to the
+# top-level sweep and degraded every operator-lane dispatch with
+# "attempt to write a readonly database" — the durable agent->Brain-
+# session mapping fell back to per-process mints; run/fleet/fleet.db and
+# run/analysis_snapshots.db carried the same defect). The run/ sub-dirs
+# minted deliberately PRIVATE per scratch-store conventions (run/jobs/,
+# run/worker_queue/, 0700) are NOT matched — only files directly under
+# run/ and run/fleet/ (group-shared by design). utils.state_perms
+# .reconcile_sqlite_modes is the per-store in-process layer going
+# forward; this sweep is the offline backstop + the heal for already-
+# unwritable existing files (a non-owner lane cannot chmod them itself).
 for _dbpat in "$STATE_ROOT"/*.db "$STATE_ROOT"/*.db-wal "$STATE_ROOT"/*.db-shm \
-              "$STATE_ROOT"/*.db-journal; do
+              "$STATE_ROOT"/*.db-journal \
+              "$STATE_ROOT"/run/*.db "$STATE_ROOT"/run/*.db-wal "$STATE_ROOT"/run/*.db-shm \
+              "$STATE_ROOT"/run/*.db-journal \
+              "$STATE_ROOT"/run/fleet/*.db "$STATE_ROOT"/run/fleet/*.db-wal \
+              "$STATE_ROOT"/run/fleet/*.db-shm "$STATE_ROOT"/run/fleet/*.db-journal; do
     [ -f "$_dbpat" ] 2>/dev/null || continue
     chmod g+rw "$_dbpat" 2>/dev/null || true
 done

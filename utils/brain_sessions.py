@@ -122,6 +122,15 @@ class BrainSessionMap:
             self.conn = None
             self.degraded = True
             self.degraded_reason = f"brain session store unavailable: {exc}"
+        else:
+            # Cross-lane mode heal after the WAL pragma minted the
+            # -wal/-shm sidecars: a db created under a tighter umask lands
+            # 0640/0644 and every non-owner lane's first write dies with
+            # "attempt to write a readonly database" (2026-10-31, deb
+            # kernel lane). Best-effort; non-owner callers and the owner
+            # lane/postinst heal layering are documented in state_perms.
+            from utils.state_perms import reconcile_sqlite_modes
+            reconcile_sqlite_modes(self.db_path)
 
     def _init_table(self) -> None:
         self.conn.execute(
@@ -247,6 +256,7 @@ class BrainSessionMap:
         return {
             "degraded": False,
             "db": self.db_path,
+            "writable": os.access(self.db_path, os.W_OK),
             "agents": [
                 {
                     "agent_id": r["agent_id"],

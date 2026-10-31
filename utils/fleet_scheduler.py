@@ -394,6 +394,11 @@ class FleetScheduler:
         self._bootstrap.execute("PRAGMA busy_timeout=30000")
         _set_wal(self._bootstrap)
         self._init_table()
+        # Cross-lane fleet rows are cross-actor by design ("dedupe is the
+        # point") — heal the WAL trio if a tighter-umask mint left the
+        # other actor group-read-only (2026-10-31: fleet.db minted 0644).
+        from utils.state_perms import reconcile_sqlite_modes
+        reconcile_sqlite_modes(self.db_path)
 
     @property
     def conn(self):

@@ -370,6 +370,74 @@ def test_doctor_snapshot_probe_degrades_on_permission(monkeypatch):
     assert "usermod -aG daharness" in rec["remediation"]
 
 
+def test_doctor_brain_sessions_probe_readonly_lane(monkeypatch):
+    """A lane that can read but not write the brain-session db (2026-10-31
+    kernel lane: db minted 0640 by the service user) gets the read-only
+    record — dispatch-works-but-degraded, with the mode fix as
+    remediation — instead of a green 'ok' hiding the degrade."""
+    import auxiliaries.framework_status as fstat
+
+    class FakeMap:
+        @staticmethod
+        def list_sessions():
+            return {"degraded": False, "db": "/var/lib/daharness/run/brain_sessions.db",
+                    "writable": False, "agents": []}
+
+    monkeypatch.setattr(fstat, "get_brain_session_map", lambda: FakeMap())
+    from auxiliaries.framework_status import framework_doctor
+    rec = framework_doctor(provider="brain_sessions")["providers"]["brain_sessions"]
+    assert rec["available"] is False
+    assert "READ-ONLY" in rec["reason"]
+    assert "chmod g+rw" in rec["remediation"]
+
+
+def test_doctor_brain_sessions_probe_available_and_degraded(monkeypatch, tmp_path):
+    """Healthy store → available; a store that cannot even open degrades
+    into a report (never a traceback)."""
+    import auxiliaries.framework_status as fstat
+
+    blocker = tmp_path / "blocker.txt"
+    blocker.write_text("not a dir")
+
+    class HealthyMap:
+        @staticmethod
+        def list_sessions():
+            return {"degraded": False, "writable": True,
+                    "db": str(tmp_path / "bs.db"), "agents": [{"agent_id": "repl"}]}
+
+    monkeypatch.setenv("BRAIN_SESSIONS_DB", str(blocker / "bs.db"))
+    from auxiliaries.framework_status import framework_doctor
+    rec = framework_doctor(provider="brain_sessions")["providers"]["brain_sessions"]
+    assert rec["available"] is False
+    assert "degraded" in rec["reason"]
+
+    monkeypatch.setenv("BRAIN_SESSIONS_DB", str(tmp_path / "ok.db"))
+    monkeypatch.setattr(fstat, "get_brain_session_map", lambda: HealthyMap())
+    rec = framework_doctor(provider="brain_sessions")["providers"]["brain_sessions"]
+    assert rec["available"] is True
+    assert "1 mapped agents" in rec["reason"]
+
+
+def test_snapshot_store_heals_tight_umask_modes(tmp_path):
+    """Snapshot cache shares the deb state root with operator lanes; a db
+    minted group-read-only under a tighter umask must self-heal g+rw at
+    open (same state_perms layer the brain-session + fleet stores use)."""
+    import os
+    import sqlite3
+
+    from utils.snapshot_cache import SnapshotStore
+
+    db = tmp_path / "snapshots.db"
+    _c = sqlite3.connect(str(db))
+    _c.close()
+    os.chmod(str(db), 0o640)
+
+    store = SnapshotStore(db_path=str(db))
+    for suffix in ("", "-wal", "-shm"):
+        st = os.stat(str(db) + suffix)
+        assert st.st_mode & 0o060 == 0o060, f"{db.name}{suffix} not group-rw"
+
+
 def test_doctor_sweep_survives_store_failure(monkeypatch):
     """The full sweep keeps a shaped report when the store blows up."""
     import auxiliaries.framework_status as fstat

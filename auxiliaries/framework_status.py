@@ -27,6 +27,7 @@ from typing import Any
 
 from constants import framework_tool, resolve_workspace_root, brain_socket_path
 from daharness.embedding import resolve_embed_url, embed_model
+from utils.brain_sessions import get_brain_session_map
 from utils.snapshot_cache import get_snapshot_store
 
 
@@ -692,7 +693,8 @@ def _check_postgres() -> dict[str, Any]:
 
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
-                 "snapshot_cache", "postgres", "registry", "customs")
+                 "snapshot_cache", "brain_sessions", "postgres",
+                 "registry", "customs")
 
 # Tier model: a lane is "required" (the framework expects it on every
 # install — missing = degrade) or "optional" (the framework genuinely
@@ -846,7 +848,8 @@ def _doctor_gate_error() -> str:
     "Run capability probes for the framework's analysis and attack tooling "
     "lanes (REA-style doctor): r2 + r2ghidra plugin, jadx + java, masscan + "
     "raw-socket capability, msfconsole/msfvenom + RPC port, the scanner "
-    "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the tool registry "
+    "tools (nmap/ffuf/hydra/sqlmap), the snapshot cache stats, the durable "
+    "agent→Brain-session store (writable on this lane?), the tool registry "
     "(SQLite vector store), the engagement-cobweb Postgres lane, and the "
     "operator-authored .dacustoms modules (tier-1 syntax check). Each probe "
     "returns available/reason/remediation plus a deployed flag for optional "
@@ -854,8 +857,8 @@ def _doctor_gate_error() -> str:
     "Optional lanes (postgres) that were never deployed are NEUTRAL in the "
     "aggregate — a box without postgresql is 'ok', not 'degraded'; a "
     "deployed optional lane that's down IS degraded. Pass provider to drill "
-    "into one lane (r2|jadx|masscan|msf|scanners|snapshot_cache|postgres|"
-    "registry|customs). doctor refuses lanes that do not share the framework "
+    "into one lane (r2|jadx|masscan|msf|scanners|snapshot_cache|"
+    "brain_sessions|postgres|registry|customs). doctor refuses lanes that do not share the framework "
     "state root (root, its owner, or a member of its group) — a non-privileged "
     "lane probes blind and reports false downs, so it gets the refusal and the "
     "remediation instead of a lying report."
@@ -865,7 +868,7 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
 
     Args:
         provider: Optional single lane to probe
-            (r2|jadx|masscan|msf|scanners|snapshot_cache|
+            (r2|jadx|masscan|msf|scanners|snapshot_cache|brain_sessions|
             postgres|registry|customs).  Empty = full sweep.
 
     The aggregate verdict is **tier-aware**: required lanes (everything
@@ -895,6 +898,72 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
     if p in ("", "scanners"):
         for rec in _check_scan_tools():
             providers[rec["provider"]] = rec
+    if p in ("", "brain_sessions"):
+        try:
+            bs = get_brain_session_map().list_sessions()
+        except Exception as exc:
+            # A doctor probe must degrade into a report, never a traceback.
+            providers["brain_sessions"] = {
+                "available": False, "provider": "brain_sessions",
+                "reason": f"store probe failed on this lane: "
+                          f"{type(exc).__name__}: {exc}",
+                "remediation": "sudo daharness doctor",
+            }
+        else:
+            if bs.get("degraded"):
+                providers["brain_sessions"] = {
+                    "available": False, "provider": "brain_sessions",
+                    "reason": (
+                        f"agent→Brain-session store degraded on this lane "
+                        f"({bs.get('degraded_reason') or 'unavailable'}) — "
+                        "dispatch still works, but Brain session ints resolve "
+                        "process-locally, so stateful Brain-side sessions do "
+                        "not persist across restarts or attach across lanes"
+                    ),
+                    "remediation": (
+                        "restore group-rw on the store: sudo chmod g+rw on "
+                        "brain_sessions.db (+ -wal/-shm) in the state root's "
+                        "run/ — or rerun the package install/upgrade so the "
+                        "postinst sweep heals it (utils.state_perms"
+                        ".reconcile_sqlite_modes heals at the next owner-lane "
+                        "open)"
+                    ),
+                }
+            elif not bs.get("writable", False):
+                # The db opened — but read-only (a tighter-umask mint left
+                # it group-read-only and this lane is neither its owner nor
+                # root: live 2026-10-31, kernel lane). Dispatch still
+                # works, but Brain session ints fall back to per-process
+                # mints.
+                _bs_db = bs.get("db", "")
+                providers["brain_sessions"] = {
+                    "available": False, "provider": "brain_sessions",
+                    "reason": (
+                        f"agent→Brain-session store opened READ-ONLY on this "
+                        f"lane ({_bs_db}) — session ints resolve "
+                        "process-locally, so stateful Brain-side sessions do "
+                        "not persist across restarts or attach across lanes"
+                    ),
+                    "remediation": (
+                        f"sudo chmod g+rw on {_bs_db} (+ -wal/-shm) — or "
+                        "rerun the package install/upgrade so the postinst "
+                        "sweep heals it (utils.state_perms"
+                        ".reconcile_sqlite_modes heals at the next "
+                        "owner-lane open)"
+                    ),
+                }
+            else:
+                agents = bs.get("agents", {})
+                _bs_db = bs.get("db", "")
+                providers["brain_sessions"] = {
+                    "available": True,
+                    "provider": "brain_sessions",
+                    "reason": (
+                        f"{len(agents)} mapped agents "
+                        f"({_bs_db or 'process-local'})"
+                    ),
+                    "remediation": "",
+                }
     if p in ("", "snapshot_cache"):
         try:
             snap = get_snapshot_store().stats()
@@ -955,7 +1024,8 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
             "available": False, "provider": p, "deployed": True,
             "reason": f"unknown provider {p!r}",
             "remediation": "pick one of: r2, jadx, masscan, msf, scanners, "
-                           "snapshot_cache, postgres, registry, customs",
+                           "snapshot_cache, brain_sessions, postgres, "
+                           "registry, customs",
         }
 
     # Tier-aware verdict: in a full sweep, an optional lane the operator

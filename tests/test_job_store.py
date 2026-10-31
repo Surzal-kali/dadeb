@@ -282,6 +282,61 @@ def test_brain_session_map_shared_zero_shortcircuits(tmp_path):
     assert m.resolve("0") == 0
 
 
+def test_brain_session_store_heals_tight_umask_modes(tmp_path):
+    """2026-10-31 deb incident: brain_sessions.db minted 0640 under a
+    tighter umask; every non-owner lane's first resolve write died with
+    'attempt to write a readonly database' and the mapping silently fell
+    back per-process. The open-time heal (state_perms) adds g+rw on the
+    main db + WAL sidecars so the store is cross-lane-writable on the
+    first owner-lane open."""
+    import os
+    import sqlite3
+
+    from utils.brain_sessions import BrainSessionMap
+
+    db = tmp_path / "bs.db"
+    _c = sqlite3.connect(str(db))  # mint the file under THIS test's umask
+    _c.execute("PRAGMA journal_mode=WAL")
+    _c.commit()
+    _c.close()
+    os.chmod(str(db), 0o640)
+    assert not os.stat(str(db)).st_mode & 0o020  # group-read-only premise
+
+    m = BrainSessionMap(db_path=str(db))
+    slot = m.resolve("repl")
+    assert slot == 1
+    for suffix in ("", "-wal", "-shm"):
+        st = os.stat(str(db) + suffix)
+        assert st.st_mode & 0o060 == 0o060, f"{db.name}{suffix} not group-rw"
+    # A second connection (restart/cross-lane lane) resolves durably now.
+    assert BrainSessionMap(db_path=str(db)).resolve("repl") == slot
+
+
+def test_state_perms_reconcile_missing_sidecars_and_owner_only_db(tmp_path):
+    """The reconcile handles a -journal sidecar, skips absent suffixes,
+    and never raises on an exotic mode; it only widens group bits."""
+    import os
+    import sqlite3
+
+    from utils.state_perms import reconcile_sqlite_modes
+
+    db = tmp_path / "s.db"
+    _c = sqlite3.connect(str(db))
+    _c.execute("PRAGMA journal_mode=DELETE")  # keep sidecars absent
+    _c.commit()
+    _c.close()
+    journal = tmp_path / "s.db-journal"
+    journal.write_bytes(b"")  # a stale hot-journal artifact
+    os.chmod(str(db), 0o600)
+    os.chmod(str(journal), 0o600)
+
+    reconcile_sqlite_modes(str(db))  # must not raise
+
+    assert os.stat(str(db)).st_mode & 0o060 == 0o060
+    assert os.stat(str(journal)).st_mode & 0o060 == 0o060
+    assert not (tmp_path / "s.db-wal").exists()  # absent suffix skipped
+
+
 # --- log-file garbage collect (2026-10-29) ------------------------------------------
 
 

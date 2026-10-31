@@ -345,7 +345,7 @@ r2 + r2ghidra plugin + drop dir, jadx + java + apk dir, masscan + raw-socket
 (CAP_NET_RAW) capability, msfconsole/msfvenom + RPC port, PATH probes for
 nmap/ffuf/hydra/sqlmap, snapshot cache stats, and the engagement-cobweb
 Postgres lane. Drill down with `provider=` (r2|jadx|masscan|msf|scanners|
-snapshot_cache|postgres). The remediation strings agree with the
+snapshot_cache|brain_sessions|postgres). The remediation strings agree with the
 tools' own error paths (e.g. pdg's "run: r2pm -ci r2ghidra"), so the model
 reads the same fix from either side. Probes reuse existing module helpers
 (`_r2ghidra_available` etc.) so doctor and tools cannot drift.
@@ -449,7 +449,13 @@ Brain session ints (`agent_id → stable int` for the C wire protocol)
 resolve through `utils/brain_sessions.py` (SQLite, keyed by workspace+
 agent) so the same agent re-resolves identically across restarts and
 lanes; in-process fallback when the store is down. `"0"` short-circuits
-to the shared session. The degraded-fallback int space is NAMESPACED
+to the shared session. The store's db + WAL sidecars self-heal group-rw
+at every open (`utils/state_perms.py:reconcile_sqlite_modes` — shared
+with the snapshot cache + fleet scheduler stores; a db minted under a
+tighter umask otherwise leaves every non-owner lane readonly with
+"attempt to write a readonly database", 2026-10-31 deb kernel-lane
+incident — the snapshot store carries the identical heal, and the deb
+postinst sweep covers run/ depth-2 stores offline). The degraded-fallback int space is NAMESPACED
 (2026-10-29): fallback ints come from a high per-instance-random band
 (≈100M+) that durable ints (ascending from 1) can't realistically
 reach, so a degraded lane's calls can never land in another agent's

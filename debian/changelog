@@ -1,3 +1,25 @@
+daharness (0.2.0+pkg1) kali; urgency=medium
+
+  * Cross-lane state-mode hotfix (2026-10-31): run/brain_sessions.db was
+    minted 0640 (group-read-only, tighter-umask process) — every
+    non-owner lane's first dispatch died with "attempt to write a
+    readonly database" resolving its durable Brain session int, and the
+    kernel lane silently fell back to per-process mints (stateful
+    Brain-side sessions stopped attaching across calls). The 0.2.0-1
+    postinst sweep only covered depth-1 state files, and the Phase-0
+    stores post-dated the VectorStore._reconcile_db_modes precedent.
+    New utils/state_perms.reconcile_sqlite_modes is the in-process heal
+    called at every open by the three cross-lane stores (brain sessions,
+    snapshot cache, fleet scheduler — the fleet db minted 0644 the same
+    batch, latent for operator-lane fleet requests); the postinst g+rw
+    sweep now also descends into run/ and run/fleet/ (the private
+    scratch-convention sub-dirs stay untouched), and framework_doctor
+    gained the brain_sessions probe (READ-ONLY store = shaped degrade
+    record with the chmod remediation — this is the visibility that was
+    missing: doctor never probed the store it was documented to).
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 31 Oct 2026 01:40:00 -0600
+
 daharness (0.2.0) kali; urgency=medium
 
   [ 0.2.0 — the release of record ]
