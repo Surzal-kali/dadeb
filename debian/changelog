@@ -2,6 +2,18 @@ daharness (0.2.0) kali; urgency=medium
 
   [ 0.2.0 — the release of record ]
 
+  * Executor dispatch hotfix (tagged into 0.2.0, 2026-10-30): the
+    bare-instance builders of the standalone lane
+    (daharness.executor._new_registry, replkit.core._make_executor)
+    never gained the Phase-0 brain-session state, so every REPL
+    dispatch — which announces the 'repl' identity — died with
+    "AttributeError: 'ToolRegistry' object has no attribute
+    '_brain_session_lock'" before the Brain socket was even consulted.
+    The init is centralized in daharness.executor
+    ._init_brain_session_state and every construction path (full
+    __init__ + both bare builders) rides it; regression tests in
+    tests/test_executor_standalone.py pin the lane.
+
   * Version 0.2.0: the +pkgNN build counter retires. The submission of
     record remains v0.1.0-submitted (0.1.0, 2026-10-22); every delta from
     there is the pkg1..pkg18 diary below, plus the two arcs that postdate
