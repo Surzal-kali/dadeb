@@ -533,7 +533,8 @@ impl ScratchStore {
             "result": result,
         });
         if let Some(note) = fields_note {
-            envelope.as_object_mut()
+            envelope
+                .as_object_mut()
                 .expect("envelope is an object literal")
                 .insert("_scratch_fields_selected".to_string(), note);
         }
