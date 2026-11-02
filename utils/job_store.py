@@ -47,6 +47,7 @@ Design facts:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -994,8 +995,6 @@ class JobStore:
         try:
             self._advance_worker_queue()
         except Exception:
-            import logging
-
             logging.getLogger(__name__).debug(
                 "[jobs] worker-queue advance failed", exc_info=True
             )

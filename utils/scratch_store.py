@@ -484,9 +484,27 @@ class ScratchStore:
             }
 
         # Apply field selection first (reduces work for filter/regex).
+        fields_note = None
         if fields:
             wanted = {f.strip() for f in fields.split(",") if f.strip()}
+            # Sorted cross-impl: serde_json (no preserve_order) iterates
+            # alphabetically, so both implementations agree byte-for-byte.
+            all_fields = sorted(result.keys())
             result = {k: v for k, v in result.items() if k in wanted}
+            dropped = sorted(k for k in all_fields if k not in wanted)
+            if dropped:
+                fields_note = {
+                    "fields": sorted(wanted),
+                    "available_fields": all_fields,
+                    "dropped_fields": dropped,
+                    "note": (
+                        "fields= selection kept "
+                        f"{len(wanted & set(all_fields))} of {len(all_fields)} "
+                        "top-level keys under this scratch_ref. The full payload "
+                        "is still stored — re-query without 'fields' (or with a "
+                        "different fields= list) to pull the remaining fields."
+                    ),
+                }
 
         # Apply paging / filtering / regex if requested.
         if offset or limit or filter_pattern or regex_pattern:
@@ -496,12 +514,15 @@ class ScratchStore:
                 context_lines=context_lines,
             )
 
-        return {
+        envelope = {
             "status": "ok",
             "scratch_ref": scratch_ref,
             "tool_id": row["tool_id"],
             "result": result,
         }
+        if fields_note is not None:
+            envelope["_scratch_fields_selected"] = fields_note
+        return envelope
 
     # -- metadata (for listing / cleanup) -----------------------------------
 

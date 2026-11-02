@@ -1,3 +1,32 @@
+daharness (0.2.0+pkg2) kali; urgency=medium
+
+  * Logging-campaign NameError hotfix (2026-11-01): the debug logging
+    that landed with the worker-queue / log-GC work added bare
+    `logging.getLogger` call sites in modules whose only `import
+    logging` sat function-local inside one except block — every swallow
+    branch elsewhere in the module raised NameError instead of logging
+    (utils/job_store.py: 9 bare sites, import buried at line 997;
+    utils/cookie_jar.py close-swallow the same). Live-confirmed on the
+    ffuf poll path: ffuf_status of a done job returned "Execution
+    failed: name 'logging' is not defined" (the verdict-parse swallow
+    in poll), killing the whole tool call. Both now import logging at
+    module level and the misleading function-local import is removed.
+
+  * Scratch fields= self-describing envelope (2026-11-01): a fields=
+    retrieval that drops top-level keys collapsed silently — in the
+    wild a rich 93 KB ffuf result surfaced to the model as
+    {"status": "done"} with no hint anything else lived in the entry.
+    retrieve() now stamps `_scratch_fields_selected` ({fields,
+    available_fields, dropped_fields, note — re-query without 'fields'})
+    on the ok envelope when keys are dropped, mirroring the
+    `_scratch_search_capped` convention; mirrored in the rust scratch
+    crate (field lists sorted on both sides so python and rust agree
+    byte-for-byte). Regression tests: a raising verdict parser yields a
+    clean done poll (the pre-fix NameError would fail the test), and
+    fields-note stamping on both implementations.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Sun, 01 Nov 2026 18:58:55 -0700
+
 daharness (0.2.0+pkg1) kali; urgency=medium
 
   * Cross-lane state-mode hotfix (2026-10-31): run/brain_sessions.db was

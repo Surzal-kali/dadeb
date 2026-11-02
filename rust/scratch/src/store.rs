@@ -442,6 +442,7 @@ impl ScratchStore {
         };
 
         // Apply field selection first (reduces work for filter/regex).
+        let mut fields_note: Option<Value> = None;
         if let Some(fields) = &opts.fields {
             let wanted: std::collections::HashSet<&str> = fields
                 .split(',')
@@ -450,7 +451,38 @@ impl ScratchStore {
                 .collect();
             if let Some(map) = result.as_object_mut() {
                 // Unknown field names are silently dropped.
+                let all_fields: Vec<String> = map.keys().cloned().collect();
+                let kept = all_fields
+                    .iter()
+                    .filter(|k| wanted.contains(k.as_str()))
+                    .count();
                 map.retain(|k, _| wanted.contains(k.as_str()));
+                let dropped: Vec<String> = all_fields
+                    .iter()
+                    .filter(|k| !wanted.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+                if !dropped.is_empty() {
+                    let mut notes: Vec<String> = wanted
+                        .iter()
+                        .filter(|w| all_fields.iter().any(|k| k == *w))
+                        .map(|w| w.to_string())
+                        .collect();
+                    notes.sort();
+                    fields_note = Some(json!({
+                        "fields": notes,
+                        "available_fields": all_fields,
+                        "dropped_fields": dropped,
+                        "note": format!(
+                            "fields= selection kept {} of {} top-level keys under \
+                             this scratch_ref. The full payload is still stored — \
+                             re-query without 'fields' (or with a different fields= \
+                             list) to pull the remaining fields.",
+                            kept,
+                            all_fields.len()
+                        ),
+                    }));
+                }
             }
             // Non-object payloads pass through (python would raise; guard
             // documented in the crate divergences).
@@ -494,12 +526,18 @@ impl ScratchStore {
             }
         }
 
-        Ok(json!({
+        let mut envelope = json!({
             "status": "ok",
             "scratch_ref": scratch_ref,
             "tool_id": tool_id,
             "result": result,
-        }))
+        });
+        if let Some(note) = fields_note {
+            envelope.as_object_mut()
+                .expect("envelope is an object literal")
+                .insert("_scratch_fields_selected".to_string(), note);
+        }
+        Ok(envelope)
     }
 
     /// List recent scratch entries for an agent (metadata only, no payloads).
@@ -1376,6 +1414,53 @@ mod tests {
         assert_eq!(res.len(), 2);
         assert!(res.contains_key("a") && res.contains_key("c"));
         assert!(!res.contains_key("b") && !res.contains_key("zzz"));
+    }
+
+    #[test]
+    fn fields_selection_stamps_note_on_envelope() {
+        // python parity: a fields= selection that drops keys stamps
+        // `_scratch_fields_selected` on the ok envelope; lists sorted on
+        // both sides (serde_json here iterates alphabetically).
+        let (_d, store) = test_store(cfg(24.0, 1024, 1024));
+        let r = store
+            .store(
+                &json!({"status": "done", "b": 2, "c": 3}),
+                "agent-a",
+                "t",
+                None,
+            )
+            .unwrap();
+        let env = store
+            .retrieve(
+                &r.scratch_ref,
+                "agent-a",
+                RetrieveOpts {
+                    fields: Some("status".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let note = &env["_scratch_fields_selected"];
+        assert_eq!(note["fields"], json!(["status"]));
+        assert_eq!(note["available_fields"], json!(["b", "c", "status"]));
+        assert_eq!(note["dropped_fields"], json!(["b", "c"]));
+
+        // No dropped keys -> no note.
+        let env = store
+            .retrieve(&r.scratch_ref, "agent-a", RetrieveOpts::default())
+            .unwrap();
+        assert!(env.get("_scratch_fields_selected").is_none());
+        let env = store
+            .retrieve(
+                &r.scratch_ref,
+                "agent-a",
+                RetrieveOpts {
+                    fields: Some("b, status, c".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(env.get("_scratch_fields_selected").is_none());
     }
 
     #[test]

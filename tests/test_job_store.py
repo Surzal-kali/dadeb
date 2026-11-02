@@ -227,6 +227,26 @@ def test_verdict_parser_applied(store, tmp_path):
     assert poll.get("hello_seen") is True
 
 
+def test_raising_verdict_parser_poll_survives(store, tmp_path):
+    # Regression (2026-11-02): the parser-swallow branch in poll() called
+    # `logging.getLogger` with no module-level `import logging`, so a raising
+    # parser surfaced as NameError instead of a clean done poll.
+    def explode(text):
+        raise RuntimeError("bad parser day")
+
+    store.register_parser("vpx", explode)
+    j = store.launch(_quick_cmd(tmp_path), tool_name="vpx", agent_id="vpxa", timeout=60)
+    poll = {"status": "running"}
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        poll = store.poll(j["job_id"])
+        if poll["status"] == "done":
+            break
+        time.sleep(0.1)
+    assert poll["status"] == "done"
+    assert "hello_seen" not in poll  # parse failed -> no verdict merged
+
+
 # --- compat wrapper ---------------------------------------------------------------
 
 
