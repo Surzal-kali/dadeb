@@ -384,10 +384,73 @@ class PacketCraft:
         recv_fn = sr1 if isinstance(packet, (IP, IPv6)) else srp1
         return recv_fn(packet, iface=self.interface, timeout=timeout, verbose=False)
 
-    def sniff_packets(self, filter: str = "", count: int = 10, timeout: int = 30):
-        """Sniff packets on the specified interface."""
-        packets = sniff(iface=self.interface, filter=filter, count=count, timeout=timeout)
-        return packets
+    def sniff_packets(
+        self,
+        filter: str = "",
+        count: "int | None" = None,
+        timeout: "int | None" = None,
+        options: "str | None" = None,
+    ):
+        """Sniff packets on the bound interface.
+
+        ``options`` is a tcpdump-style option string parsed for the subset
+        scapy's ``sniff`` honours natively:
+
+        * ``count=N`` / ``-cN``    — packet-count stop condition (bounded capture)
+        * ``timeout=N``            — wall-clock stop condition (seconds)
+        * ``store=False``          — don't retain a second copy in
+          ``scapy.conf.store`` (the bounded list is kept locally either way)
+        * ``store=True``           — force retention even when count-bounded
+
+        ``count``/``timeout`` use None sentinels ONLY so the engine can
+        distinguish "caller left it unset" from "caller explicitly chose it" —
+        the @framework_tool wrapper materializes its schema defaults as ints
+        and forwards None for any axis a token in ``options`` claims (tokens
+        win; kwarg values fill only token-unclaimed axes; count<=0 forwards
+        None → scapy unbounded). Everything else in the options string is
+        rejected loudly (ValueError) rather than silently ignored — scapy
+        has no argv parser, so we do not pretend to speak full tcpdumpese
+        here.
+        """
+        count_set = count is not None
+        timeout_set = timeout is not None
+        sniff_kwargs: dict = {
+            "filter": filter,
+            "count": 0 if count is None else int(count),   # 0 = scapy unbounded
+            "timeout": None if timeout is None else int(timeout),
+            "store": False,
+        }
+        for tok in (options or "").split():
+            if tok in ("-c", "--count", "-t", "--timeout", "-s", "-i"):
+                raise ValueError(f"sniff options: {tok!r} requires a value"
+                                 " — use attached forms 'count=N' ('-cN')"
+                                 " / 'timeout=N'; interface= is a real kwarg")
+            if tok.startswith("-c") and tok[2:].isdigit() \
+                    or tok.startswith("count="):
+                val = tok[2:] if tok.startswith("-c") else tok.split("=", 1)[1]
+                if not count_set:
+                    sniff_kwargs["count"] = int(val)
+            elif tok.startswith("timeout="):
+                if not timeout_set:
+                    sniff_kwargs["timeout"] = int(tok.split("=", 1)[1])
+            elif tok == "store=True":
+                sniff_kwargs["store"] = True
+            elif tok == "store=False":
+                sniff_kwargs["store"] = False
+            elif tok in ("-nn", "-q", "-q-", "-U", "-e"):
+                continue  # presentation/verbosity flags scapy doesn't honour
+            else:
+                raise ValueError(
+                    f"sniff options: unsupported token {tok!r} — scapy's "
+                    "sniff() is not tcpdump; supported: 'count=N' (-cN), "
+                    "'timeout=N', 'store=True/False'"
+                )
+
+        # store=False still returns every packet: AsyncSniffer keeps its own
+        # lst and sets self.results=PacketList(lst) at teardown regardless
+        # (verified on scapy 2.7.0) — it just skips the second, unbounded copy
+        # in scapy.conf.store that count-bounded captures otherwise accumulate
+        return sniff(iface=self.interface, **sniff_kwargs)
 
     def save_packet(self, packet: scapy.Packet, filename: str):
         """Save a packet to a file."""
@@ -812,21 +875,52 @@ def send_and_receive_packet(hex: str, timeout: int = 5, interface: str = ""):
 @framework_tool(
     "Sniff packets on an interface with an optional BPF filter. Returns a "
     "text summary of each captured packet (with its hex for dissection). "
-    "Requires root.",
+    "Requires root/raw-socket capability on the executing lane (Brain "
+    "dispatch: systemd AmbientCapabilities=CAP_NET_RAW drop-in). options "
+    "accepts a small tcpdump-style subset: 'count=N' (-cN), 'timeout=N', "
+    "'store=True/False'; unsupported tcpdump flags are rejected with a "
+    "helpful error. Capture is always count+timeout bounded.",
     next_hints=["dissect_packet with a captured hex to inspect a packet fully"],
 )
-def sniff_packets(filter: str = "", count: int = 10, timeout: int = 30, interface: str = ""):
+def sniff_packets(filter: str = "", count: int = 10, timeout: int = 30, interface: str = "", options: str = ""):
     """Sniff packets and return a readable summary list.
 
     Args:
         filter: BPF filter string (e.g. 'tcp port 80', 'icmp').
-        count: Number of packets to capture.
-        timeout: Capture timeout in seconds.
+        count: Number of packets to capture (0 or less = unbounded — pair
+               with timeout or an options-stop token). A 'count=' / '-cN'
+               token in options overrides this value.
+        timeout: Capture timeout in seconds (0 or less = no timeout). A
+                 'timeout=N' token in options overrides this value.
         interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback eth0).
+        options: Optional tcpdump-style subset: 'count=N' (-cN), 'timeout=N',
+                 'store=True/False'. Presentation flags like -nn/-q/-U are
+                 accepted and ignored; anything else errors loudly. Same-sense
+                 option tokens win over the bare kwargs.
     """
     try:
         iface = interface or _default_interface()
-        pkts = _craft(iface).sniff_packets(filter=filter, count=int(count), timeout=int(timeout))
+        # Precedence between schema-default int kwargs and options tokens:
+        # the JSON layer can't distinguish "caller passed 10" from "schema
+        # default 10" — a sentinel is impossible for ints — so the tokens
+        # are applied WHOLESALE at the wrapper: any count/timeout token in
+        # the options string wins, and the bare kwargs fill only what the
+        # tokens didn't set. A caller who wants kwarg-driven control simply
+        # omits the token. (count<=0 → unbounded scapy semantics are kept:
+        # engine treats None/0 as unbounded + timeout=None.)
+        sniff_opts = options or ""
+        has_count_tok = any(
+            t.startswith("-c") or t.startswith("count=")
+            for t in sniff_opts.split()
+        )
+        has_timeout_tok = any(
+            t.startswith("timeout=") for t in sniff_opts.split()
+        )
+        fwd_count = None if has_count_tok or int(count) <= 0 else int(count)
+        fwd_timeout = None if has_timeout_tok or int(timeout) <= 0 else int(timeout)
+        pkts = _craft(iface).sniff_packets(
+            filter=filter, count=fwd_count, timeout=fwd_timeout, options=sniff_opts
+        )
         if not pkts:
             return f"No packets captured on {iface} (filter={filter!r})."
         lines = [f"Captured {len(pkts)} packet(s) on {iface}:"]
@@ -834,7 +928,18 @@ def sniff_packets(filter: str = "", count: int = 10, timeout: int = 30, interfac
             lines.append(f"  [{i}] {p.summary()}  hex={_packet_to_hex(p)}")
         return "\n".join(lines)
     except PermissionError as e:
-        return f"sniff_packets requires root/raw-socket capability: {e}."
+        return (
+            f"sniff_packets requires root/raw-socket capability: {e}. "
+            "Fix (choose one): grant the executing lane CAP_NET_RAW via "
+            "systemd AmbientCapabilities (drop-in: "
+            "/etc/systemd/system/{daharness,daharness-kernel}.service.d/"
+            "privileged.conf → AmbientCapabilities=CAP_NET_RAW "
+            "CAP_NET_BIND_SERVICE, then `systemctl daemon-reload && "
+            "systemctl restart daharness daharness-kernel`) — or run the "
+            "Brain worker as root. Craft/dissect tools stay unprivileged."
+        )
+    except ValueError as e:
+        return f"sniff_packets error: {e}"
     except Exception as e:
         return f"sniff_packets error: {e}"
 
@@ -959,7 +1064,13 @@ def wait_for_packet(filter: str = "", timeout: int = 30, interface: str = ""):
             return f"No packet matched filter={filter!r} within {timeout}s on {iface}."
         return _craft_result(pkt)
     except PermissionError as e:
-        return f"wait_for_packet requires root/raw-socket capability: {e}."
+        return (
+            f"wait_for_packet requires root/raw-socket capability: {e}. "
+            "Fix: grant the executing lane CAP_NET_RAW via systemd "
+            "AmbientCapabilities (drop-in "
+            "/etc/systemd/system/{daharness,daharness-kernel}.service.d/"
+            "privileged.conf) or run the Brain worker as root."
+        )
     except Exception as e:
         return f"wait_for_packet error: {e}"
 
@@ -1067,6 +1178,7 @@ def sniff_to_pcap(
     timeout: int = 60,
     interface: str = "",
     filename: str = "",
+    options: str = "",
 ):
     """Sniff packets and save the whole capture to a pcap file.
 
@@ -1077,13 +1189,16 @@ def sniff_to_pcap(
         interface: Interface to capture on; defaults to PACKET_CRAFT env (fallback eth0).
         filename: Output filename (no path separators — lands in PCAP_DIR).
                   If omitted, auto-generates a timestamped name.
+        options: Optional tcpdump-style subset ('count=N' (-cN), 'timeout=N',
+                 'store=True/False') handed straight to the engine; explicit
+                 count/timeout kwargs win over same-sense option tokens.
     """
     try:
         iface = interface or _default_interface()
         max_pkts = _pcap_max_packets()
         cap_count = min(int(count), max_pkts)
         pkts = _craft(iface).sniff_packets(
-            filter=filter, count=cap_count, timeout=int(timeout)
+            filter=filter, count=cap_count, timeout=int(timeout), options=options
         )
         if not pkts:
             return (

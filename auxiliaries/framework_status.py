@@ -471,6 +471,53 @@ def _masscan_launch_capability(euid: int, lane_raw: bool,
         "(sudo daharness doctor)")
 
 
+def _check_packetcraft() -> dict[str, Any]:
+    """Scapy packetcraft family (send/sniff) capability graded on THIS lane.
+
+    Unlike masscan, the scapy tools execute IN-PROCESS: there is no binary
+    for a file capability to ride — the privilege decision is purely
+    root-uid or ambient CAP_NET_RAW on the lane itself. A denied SOCK_RAW
+    here means every sniff/send tool returns its EPERM envelope regardless
+    of how the caller was launched, which is why the remediation names the
+    systemd drop-in (the shipped .service units document but don't apply
+    it, an operator opt-in by design).
+    """
+    euid = os.geteuid()
+    lane_raw = _process_raw_socket_ok()
+    extra = {"euid": euid, "lane_sock_raw": lane_raw,
+             "executes": "in-process (scapy) — file caps don't apply",
+             "scapy": None}
+    try:
+        import scapy
+        extra["scapy"] = getattr(scapy, "VERSION", "?")
+    except Exception:  # pragma: no cover — scapy is a hard dep, belt-and-braces
+        return {"available": False, "provider": "packetcraft",
+                "reason": "scapy not importable on this lane",
+                "remediation": "pip install -r requirements.txt",
+                "extra": extra}
+    if lane_raw or euid == 0:
+        verdict = "raw-socket capable" if lane_raw else "root (uid 0)"
+        return {"available": True, "provider": "packetcraft",
+                "reason": (f"sniff/send craft family runnable: {verdict}; "
+                           f"scapy {extra['scapy']}"),
+                "remediation": "", "extra": extra}
+    return {"available": False, "provider": "packetcraft",
+            "reason": (f"sniff/send craft family will fail with EPERM: "
+                       f"uid {euid} can't create SOCK_RAW and these tools "
+                       "execute in-process (scapy) — file capabilities on a "
+                       "binary don't apply, unlike the masscan lane"),
+            "remediation": ("grant the lane CAP_NET_RAW via systemd "
+                            "AmbientCapabilities (drop-in e.g. "
+                            "/etc/systemd/system/daharness.service.d/"
+                            "privileged.conf: AmbientCapabilities=CAP_NET_RAW "
+                            "CAP_NET_BIND_SERVICE, then `systemctl "
+                            "daemon-reload && systemctl restart "
+                            "daharness daharness-kernel`) — or run the lane "
+                            "as root; setcap on the interpreter is NOT advised "
+                            "(grants raw sockets to every python program)"),
+            "extra": extra}
+
+
 def _check_masscan() -> dict[str, Any]:
     """masscan + raw-socket capability, graded on the LAUNCH path.
 
@@ -694,7 +741,7 @@ def _check_postgres() -> dict[str, Any]:
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
                  "snapshot_cache", "brain_sessions", "postgres",
-                 "registry", "customs")
+                 "registry", "customs", "packetcraft")
 
 # Tier model: a lane is "required" (the framework expects it on every
 # install — missing = degrade) or "optional" (the framework genuinely
@@ -903,7 +950,7 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
     Args:
         provider: Optional single lane to probe
             (r2|jadx|masscan|msf|scanners|snapshot_cache|brain_sessions|
-            postgres|registry|customs).  Empty = full sweep.
+            postgres|registry|customs|packetcraft).  Empty = full sweep.
 
     The aggregate verdict is **tier-aware**: required lanes (everything
     except postgres) always count toward ``overall``; optional lanes
@@ -1039,6 +1086,8 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
             }
     if p in ("", "registry"):
         providers["registry"] = _check_registry()
+    if p in ("", "packetcraft"):
+        providers["packetcraft"] = _check_packetcraft()
     if p in ("", "postgres"):
         providers["postgres"] = _check_postgres()
     if p in ("", "customs"):

@@ -154,7 +154,13 @@ binary and keep it on `PATH` (the deb `Recommends` covers most):
 | **john / hashcat** | `payloads/hash_crack.py` | Cracking (background-job pattern) |
 
 Python-library lanes (Paramiko SSH, Scapy packetcraft, curl-impersonate
-web-session identity) need no extra CLI installs.
+web-session identity) need no extra CLI installs. The Scapy lane's
+online-facing tools (sniff_packets, send_packet, wait_for_packet,
+sniff_to_pcap) execute in-process — no setcap can grant them; the lane
+itself needs CAP_NET_RAW (or root). Opt in via the systemd drop-in the
+shipped units document: `/etc/systemd/system/daharness.service.d/privileged.conf`
+with `AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE`, then restart the
+services. Probe with `framework_doctor(provider="packetcraft")`.
 
 ## Safety notes
 

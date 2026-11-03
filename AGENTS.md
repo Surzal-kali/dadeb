@@ -343,9 +343,12 @@ registry/ZAP/ids.db up/down). `framework_doctor` answers "can I actually run X" 
 REA-style per-provider probes returning `{available, reason, remediation}`:
 r2 + r2ghidra plugin + drop dir, jadx + java + apk dir, masscan + raw-socket
 (CAP_NET_RAW) capability, msfconsole/msfvenom + RPC port, PATH probes for
-nmap/ffuf/hydra/sqlmap, snapshot cache stats, and the engagement-cobweb
-Postgres lane. Drill down with `provider=` (r2|jadx|masscan|msf|scanners|
-snapshot_cache|brain_sessions|postgres). The remediation strings agree with the
+nmap/ffuf/hydra/sqlmap, snapshot cache stats, the engagement-cobweb
+Postgres lane, and the scapy packetcraft lane's raw-socket capability
+(`packetcraft` — in-process execution means no setcap path; the only levers
+are ambient CAP_NET_RAW on the lane or root). Drill down with `provider=`
+(r2|jadx|masscan|msf|scanners|snapshot_cache|brain_sessions|postgres|
+packetcraft). The remediation strings agree with the
 tools' own error paths (e.g. pdg's "run: r2pm -ci r2ghidra"), so the model
 reads the same fix from either side. Probes reuse existing module helpers
 (`_r2ghidra_available` etc.) so doctor and tools cannot drift.
