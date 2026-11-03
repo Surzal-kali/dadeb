@@ -763,14 +763,32 @@ def _check_customs() -> dict[str, Any]:
         }
 
     import ast
+    # The customs dir may carry version-control noise — a venv the
+    # operator built in place (its stdlib-shipped .gitignore says '*'),
+    # node_modules, editor droppings. The doctor speaks the operator's
+    # gitignore dialect via dacustoms_ignore: whatever the operator chose
+    # to stop tracking is what the syntax check also skips (fail-open:
+    # untranslatable patterns leave files CHECKED, never silently hidden).
+    from dacustoms_ignore import load_ignore_matcher
+    try:
+        ignore_match, ignore_sources, ignore_unsupported = load_ignore_matcher(d)
+    except Exception as exc:
+        _log = logging.getLogger(__name__)
+        _log.debug("swallowed exception loading customs ignore spec", exc_info=True)
+        ignore_match, ignore_sources, ignore_unsupported = (lambda *_a, **_k: False), [], []
+
     files_checked: list[dict[str, Any]] = []
     syntax_errors: list[str] = []
     ok_count = 0
+    skipped_count = 0
 
     for py in sorted(d.rglob("*.py")):
         if "__pycache__" in py.parts:
             continue
         rel = py.relative_to(d)
+        if ignore_match(rel.as_posix(), is_dir=False):
+            skipped_count += 1
+            continue
         try:
             source = py.read_text(errors="replace")
             ast.parse(source, filename=str(py))
@@ -795,10 +813,24 @@ def _check_customs() -> dict[str, Any]:
     available = init_present and not syntax_errors
     if available:
         reason = f"{ok_count} module{'s' if ok_count != 1 else ''} checked, all clean"
+        if skipped_count:
+            reason += (
+                f" ({skipped_count} gitignored skipped: "
+                + ", ".join(ignore_sources)
+                + ")"
+            )
         remediation = ""
     else:
         reason = f"{ok_count} ok, {len(syntax_errors)} issue{'s' if len(syntax_errors) != 1 else ''}"
         remediation = "; ".join(syntax_errors)
+    if ignore_unsupported:
+        # Patterns the pragmatic translator refused (e.g. '**'): surface
+        # them so the operator knows those layers aren't shaping the check.
+        note = (
+            f"ignore dialect not understood (still checked): "
+            + ", ".join(ignore_unsupported)
+        )
+        remediation = f"{remediation}; {note}" if remediation else note
 
     return {
         "available": available, "provider": "customs", "deployed": True,
@@ -807,6 +839,8 @@ def _check_customs() -> dict[str, Any]:
         "files": files_checked,
         "init_present": init_present,
         "dir": str(d),
+        "ignore_sources": ignore_sources,
+        "ignored_files_skipped": skipped_count,
     }
 
 
