@@ -706,3 +706,32 @@ proprietary applications with the library.  If this is what you want
 to do, use the GNU Lesser General Public License instead of this
 License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+
+----------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+----------------------------------------------------------------------
+
+This notice is additional information about third-party components;
+it does not modify, and cannot override, the license terms above.
+
+The fork source file
+
+    scripts/pyright_typeshed_builtins.pyi
+
+is a copy of the builtins.pyi stub from the python/typeshed project
+as distributed inside pyright/Pylance's typeshed-fallback bundle
+(copy taken from Pylance 2026.4.1 for the deb --stubs lane; see
+debian/changelog and scripts/gen_repl_stubs.py).  Typeshed's stdlib
+stubs are derived from the CPython standard library and carry the
+Python Software Foundation License Version 2 (PSF-2.0), not
+GPL-3.0-or-later.
+
+    Copyright (C) 2001-2026 Python Software Foundation; typeshed
+    contributors.  All rights reserved.
+
+    PSF-2.0 full text: https://spdx.org/licenses/PSF-2.0.html
+    Typeshed source:   https://github.com/python/typeshed
+
+Typeshed grants use and redistribution with the copyright notice
+preserved; this package makes no further modification to the stub's
+license terms.

@@ -143,7 +143,7 @@ def _cleanup_after_exit(proc: subprocess.Popen, path: str) -> None:
     its own); nothing races the child's file open."""
     try:
         proc.wait()
-    except Exception:  # noqa: BLE001 - a cleanup watcher must never raise #TODO: BUT IT SHOULD ATLEAST SAY SOMETHING
+    except Exception:  # noqa: BLE001 - a cleanup watcher must never raise 
         print("Error occurred while waiting for the cracker process to exit.")
         print(f"Process: {proc}")
         print(f"Hashfile: {path}")

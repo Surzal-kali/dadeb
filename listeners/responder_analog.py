@@ -383,7 +383,7 @@ def _store_capture(entry: dict[str, Any]) -> None:
                 p, f, 0o600)) as fh:
             fh.write(line)
         os.chmod(path, 0o600)
-    except Exception:  # noqa: BLE001 - persistence must never kill the engine #TODO: BUT SURELY WE CAN DO SOMETHING OTHER THAN PASSING
+    except Exception:  # noqa: BLE001 - persistence must never kill the engine 
         logging.getLogger(__name__).debug("swallowed exception in _store_capture", exc_info=True)
     try:
         from utils.memory_tools import remember_text
@@ -577,7 +577,7 @@ class SMB2CaptureSink:
                 import traceback
 
                 self.on_error(traceback.format_exc())
-            except Exception: #TODO: fix amibious pass in functions
+            except Exception: 
                 logging.getLogger(__name__).debug("swallowed exception in _serve", exc_info=True)
             return
         finally:

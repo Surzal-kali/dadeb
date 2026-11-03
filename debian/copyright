@@ -2,6 +2,14 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: daharness
 Source: privately maintained research tree
 
+Files: scripts/pyright_typeshed_builtins.pyi
+Copyright: 2001-2026 Python Software Foundation; typeshed contributors
+License: PSF-2.0
+ This file is a copy of the typeshed builtins.pyi stub (Pylance 2026.4.1
+typeshed-fallback copy), consumed by scripts/gen_repl_stubs.py as the
+deb fallback fork source for daharness-index --stubs.
+ PSF-2.0 full text: https://spdx.org/licenses/PSF-2.0.html
+
 Files: *
 Copyright: 2026 daharness operators
 License: GPL-3.0-or-later

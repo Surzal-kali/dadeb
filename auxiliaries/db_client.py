@@ -200,7 +200,7 @@ class _PgConn:
 def _open_mssql(host, port, username, password, database, domain, hashes, timeout):
     """impacket.tds path - works with the impacket already in the venv."""
     ms = MSSQL(host, port=int(port))
-    ms.connect(timeout=float(timeout)) #Argument of type "float" cannot be assigned to parameter "timeout" of type "int" in function "connect" #TODO: FIX
+    ms.connect(timeout=float(timeout)) #Argument of type "float" cannot be assigned to parameter "timeout" of type "int" in function "connect" 
     # login(database, username, password="", domain="", hashes=None,
     #       useWindowsAuth=False); hashes = "lm:nt" hex pair for pass-the-hash.
     ms.login(

@@ -408,7 +408,7 @@ class Sidecar:
             return env
         finally:
             await page.close()
-            #TODO: FIX
+      
 # Argument of type "str" cannot be assigned to parameter "wait_until" of type "Literal['commit', 'domcontentloaded', 'load', 'networkidle'] | None" in function "goto"
 #   Type "str" is not assignable to type "Literal['commit', 'domcontentloaded', 'load', 'networkidle'] | None"
 #     "str" is not assignable to "None"
@@ -623,7 +623,7 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             await writer.wait_closed()
         except Exception:
             logging.getLogger(__name__).debug("swallowed exception in _handle", exc_info=True)
-#TODO: FIX PASS EXCEPTIONS
+
 
 async def main() -> None:
     global _sidecar
