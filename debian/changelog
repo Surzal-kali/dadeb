@@ -1,3 +1,25 @@
+daharness (0.2.0+pkg3) kali; urgency=medium
+
+  * Licensing carve-out: typeshed stub fork attribution (2026-11-03):
+    - debian/copyright gained a narrow Files stanza for
+      scripts/pyright_typeshed_builtins.pyi — the Pylance 2026.4.1
+      typeshed-fallback builtins.pyi copy consumed by
+      scripts/gen_repl_stubs.py as the deb's --stubs fork source —
+      credited to the Python Software Foundation + typeshed
+      contributors under PSF-2.0 (typeshed stdlib stubs derive from
+      CPython and cannot be relicensed GPL-3; the tree-wide Files: *
+      stanza now applies to everything else).
+    - LICENSE gained a THIRD-PARTY COMPONENTS appendix recording the
+      same attribution (PSF-2.0 + SPDX link + typeshed repo pointer),
+      phrased as an additional-notice appendix that does not modify
+      the GPL-3 terms for the rest of the tree.
+    - No code, packaging, or install-path changes: debian/rules
+      already ships the .pyi copy; this is the attribution lint
+      (lintian license-override shape) catching up to a file that
+      shipped with pkg19's stubs lane.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Tue, 03 Nov 2026 11:17:22 -0700
+
 daharness (0.2.0+pkg2) kali; urgency=medium
 
   * Logging-campaign NameError hotfix (2026-11-01): the debug logging
