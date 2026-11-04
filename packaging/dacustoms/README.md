@@ -37,6 +37,61 @@ This prefix means your tools **can never collide** with upstream tool_ids, even
 after a framework reorg or rename. The model sees the prefix and knows these
 are your tools, not shipped ones.
 
+## Pip extras — one `.pth` file
+
+A customs module that needs a pip package the deb freeze doesn't carry
+drops it in a folder and adds one line to a `.pth` file in the system
+site dir (create both if absent — the framework ships nothing here):
+
+```bash
+sudo mkdir -p /var/lib/daharness/dacustoms/pylibs
+pip install --target /var/lib/daharness/dacustoms/pylibs --break-system-packages <pkg>
+echo "/var/lib/daharness/dacustoms/pylibs" | sudo tee /usr/local/lib/python3.14/dist-packages/dacustoms_pylibs.pth
+python3 -c "import <pkg>; print(<pkg>.__file__)"   # should say pylibs
+```
+
+```bash
+pip freeze --path /var/lib/daharness/dacustoms/pylibs
+```
+
+Why this shape: `.pth` entries are **appended** to `sys.path`, after
+dist-packages — a pylibs copy of anything the system already ships can
+never win an import, so pip's full dependency resolution inside `--target`
+is harmless (its duplicate copies of system-owned transitives are dead
+weight that never loads). One file, one folder; no PYTHONPATH lanes, no
+constraints mirror, no venv. Two known edges:
+
+- The `.pth` is pinned to the interpreter version (`python3.14` in the
+  path) — after a python upgrade, recreate it or imports fail loudly
+  with `ModuleNotFoundError`. C-extension wheels also ride this fine
+  (the `--target` folder installs per-interpreter wheels normally).
+- `.pth` is global to every python3.14 process on the box. On a dedicated
+  framework host that's the same set of processes that would import the
+  extra anyway; on a multi-tenant box prefer a suffixed name and keep
+  the folder extras-only.
+
+A second project (e.g. dabooks) needing its own deps is just a second
+folder + a second `.pth` file — same one-line recipe.
+
+### Maintenance loop (capture / restore)
+
+The folder's working set is *captured into* `requirements.txt`, so the
+file is regenerated, never maintained by hand:
+
+```bash
+# capture the exact working set (only what's in the folder — pip freeze
+# --path does NOT dump the system)
+pip freeze --path /var/lib/daharness/dacustoms/pylibs \
+    > /var/lib/daharness/dacustoms/requirements.txt
+
+# restore/rebuild the folder anywhere (new box, python upgrade)
+pip install --target /var/lib/daharness/dacustoms/pylibs \
+    --break-system-packages -r /var/lib/daharness/dacustoms/requirements.txt
+```
+
+Keep a comment at the top of `requirements.txt` naming the hand-picked
+extras — everything else in the freeze is their support tree.
+
 ## Two ways to add a tool
 
 ### Option A — `@framework_tool` function (recommended)
