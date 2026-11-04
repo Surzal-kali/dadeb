@@ -137,7 +137,8 @@ daharness (0.2.0) kali; urgency=medium
       /usr/share/daharness/rust/ (target/ + crate-internal run/ excluded).
     - daharness-rust(1): the python/c -> python/rust upgrade lane —
       status probes offline, toolchain/build/smoke are explicit network
-      steps (crate sources + Cargo.locks ship; builds land in the state
+      steps (crate sources ship; missing Cargo.locks auto-generate on
+      the first build; builds land in the state
       root, never the package tree), brain runs the rust sidecar + its
       python tool-worker. Install stays isolated; nothing replaces the
       shipped python lanes.

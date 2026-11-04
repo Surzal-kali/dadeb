@@ -8,17 +8,18 @@
 # paste-bomb:
 #
 #   daharness-rust status            offline: what is provisioned, what is missing
-#   sudo daharness-rust toolchain    apt rustc/cargo + libpcap-dev           (network)
-#   sudo daharness-rust build        cargo build --release --locked         (network, first run)
-#   sudo daharness-rust smoke        cargo test --release --locked          (network, first run)
+#   sudo daharness-rust toolchain    apt rustc cargo gcc pkg-config libpcap-dev  (network)
+#   sudo daharness-rust build        cargo build --release --locked     (network, first run)
+#   sudo daharness-rust smoke        cargo test --release --locked      (network, first run)
 #   sudo daharness-rust all          toolchain && build && smoke
 #   daharness-rust brain             run the rust sidecar lane (worker + brain)
 #
 # Network contract: `status` and `brain` never touch the network;
 # toolchain/build/smoke are deliberate fetches (crates.io, first run only —
-# Cargo.lock ships inside each crate and `--locked` pins the resolve). That
-# is the upgrade shape the package policy wants: install stays isolated,
-# the rust upgrade is an explicit step.
+# build/smoke auto-generate any missing Cargo.lock per crate and --locked
+# then pins every later resolve verbatim). That is the upgrade shape the
+# package policy wants: install stays isolated, the rust upgrade is an
+# explicit step.
 #
 # Lane overrides (dev checkouts, tests):
 #   DAHARNESS_RUST_SRC    crate sources root (default /usr/share/daharness/rust)
@@ -68,6 +69,23 @@ fix_owner() {
     fi
 }
 
+# One-time lockfile bootstrap. --locked refuses to CREATE a Cargo.lock (it
+# only verifies an existing one), so a source-only checkout or deb built
+# from a lockfile-free tree dead-ends on the first --locked build. Generate
+# whatever is missing, then let the --locked build verify it as usual.
+ensure_locks() {
+    for c in $CRATES; do
+        [ -f "$DAHARNESS_RUST_SRC/$c/Cargo.lock" ] && continue
+        say "$c: no Cargo.lock — generating (one-time crates.io resolve)"
+        if ! CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo generate-lockfile \
+            --manifest-path "$DAHARNESS_RUST_SRC/$c/Cargo.toml"; then
+            return 1
+        fi
+        ok "$c: Cargo.lock generated ($(grep -c 'name = ' "$DAHARNESS_RUST_SRC/$c/Cargo.lock" 2>/dev/null || echo '?') resolved packages)"
+    done
+    return 0
+}
+
 crt_ver() {
     # Crate's self-declared version (manifest grep — no cargo needed).
     sed -n 's/^version *= *"\(.*\)"$/\1/p' "$1/Cargo.toml" 2>/dev/null | head -1
@@ -94,6 +112,22 @@ cmd_status() {
         ok "libpcap dev: present (pcap crate builds with the capture feature)"
     else
         no "libpcap dev: absent — pcap crate needs it, or build with DAHARNESS_RUST_NO_PCAP=1 (codec core builds dependency-free)"
+    fi
+
+    if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
+        ok "C compiler: present (scratch's bundled sqlite needs it)"
+    else
+        no "C compiler: missing — scratch (bundled sqlite3.c) will fail; run 'sudo daharness-rust toolchain'"
+    fi
+
+    if [ -d "$DAHARNESS_RUST_SRC" ] && [ -d "$SCRATCH_SRC" ]; then
+        for c in $CRATES; do
+            if [ -f "$DAHARNESS_RUST_SRC/$c/Cargo.lock" ]; then
+                ok "lockfile: $c ($(grep -c 'name = ' "$DAHARNESS_RUST_SRC/$c/Cargo.lock" 2>/dev/null || echo '?') resolved pkgs)"
+            else
+                no "lockfile: $c absent — auto-generated on first build (or: cargo generate-lockfile)"
+            fi
+        done
     fi
 
     if [ -d "$DAHARNESS_RUST_TARGET" ]; then
@@ -130,12 +164,22 @@ cmd_status() {
 cmd_toolchain() {
     if [ "$(id -u)" != "0" ]; then err "toolchain needs root (apt-get install) — re-run with sudo"; exit 1; fi
     if ! command -v apt-get >/dev/null 2>&1; then
-        err "no apt-get on this box; install rustc+cargo+pkg-config+libpcap-dev with your package manager, then re-run: daharness-rust build"
+        err "no apt-get on this box; install rustc+cargo+gcc+pkg-config+libpcap-dev with your package manager, then re-run: daharness-rust build"
         exit 1
     fi
-    say "installing rustc cargo pkg-config libpcap-dev (network step; kali-rolling, noninteractive)"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        rustc cargo pkg-config libpcap-dev >/dev/null
+    _pkgs=
+    # Idempotent: only install what is actually missing (safe to re-run).
+    command -v rustc >/dev/null 2>&1 || _pkgs="$_pkgs rustc"
+    command -v cargo >/dev/null 2>&1 || _pkgs="$_pkgs cargo"
+    command -v gcc  >/dev/null 2>&1 || _pkgs="$_pkgs gcc"
+    command -v pkg-config >/dev/null 2>&1 || _pkgs="$_pkgs pkg-config"
+    pkg-config --exists libpcap 2>/dev/null || _pkgs="$_pkgs libpcap-dev"
+    if [ -z "$_pkgs" ]; then
+        say "toolchain already complete: rustc $(rustc --version | sed 's/^rustc //'), cargo $(cargo --version | cut -d' ' -f2) — nothing to install"
+        return 0
+    fi
+    say "installing apt packages:$_pkgs (network step; kali-rolling, noninteractive)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $_pkgs >/dev/null
     if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then
         err "toolchain install did not land rustc/cargo — check apt output above"; exit 1
     fi
@@ -147,9 +191,23 @@ cmd_toolchain() {
 cmd_build() {
     [ -d "$SCRATCH_SRC" ] || { err "crate sources not found at $DAHARNESS_RUST_SRC — this is not a 0.2.0+ deb; set DAHARNESS_RUST_SRC on dev checkouts"; exit 1; }
     if ! command -v cargo >/dev/null 2>&1; then
+        if [ -x "${HOME:-/root}/.cargo/bin/cargo" ]; then
+            err "cargo exists at ${HOME:-/root}/.cargo/bin but is not on PATH (sudo drops ~/.cargo/bin)"
+            err "    re-run with: PATH=\"${HOME:-/root}/.cargo/bin:\$PATH\" sudo -E daharness-rust build"
+        fi
         err "no cargo — run 'sudo daharness-rust toolchain' first (or install rustc/cargo yourself)"; exit 1
     fi
+    if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+        err "no C compiler — scratch compiles bundled sqlite3.c (rusqlite) and needs gcc"
+        err "    fix: sudo daharness-rust toolchain    (installs gcc alongside the rest)"
+        exit 1
+    fi
+    _rminor=$(rustc --version 2>/dev/null | sed -n 's/^rustc 1\.\([0-9]*\).*/\1/p')
+    if [ -n "$_rminor" ] && [ "$_rminor" -lt 70 ] 2>/dev/null; then
+        say "WARNING: rustc 1.$_rminor is old for these crates (tokio 1.x, rusqlite 0.32) — expect compile errors; rustup gives a current toolchain (see daharness-rust(1) NOTES)"
+    fi
     ensure_dirs
+    ensure_locks || { err "lockfile generation failed — crates.io unreachable from this box?"; exit 1; }
     _no_pcap=${DAHARNESS_RUST_NO_PCAP:-0}
     for _a in "$@"; do case "$_a" in --no-pcap) _no_pcap=1 ;; esac; done
 
@@ -185,16 +243,30 @@ cmd_build() {
 cmd_smoke() {
     command -v cargo >/dev/null 2>&1 || { err "no cargo — run 'sudo daharness-rust toolchain' first"; exit 1; }
     ensure_dirs
+    ensure_locks || { err "lockfile generation failed — crates.io unreachable from this box?"; exit 1; }
+    _no_pcap=${DAHARNESS_RUST_NO_PCAP:-0}
+    for _a in "$@"; do case "$_a" in --no-pcap) _no_pcap=1 ;; esac; done
     _failed=0
     say "running crate test suites (target dir: $DAHARNESS_RUST_TARGET)"
     for c in $CRATES; do
         say "testing $c"
-        if CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo test --release --locked \
-            --manifest-path "$DAHARNESS_RUST_SRC/$c/Cargo.toml" >/dev/null 2>&1; then
+        set -- --manifest-path "$DAHARNESS_RUST_SRC/$c/Cargo.toml"
+        if [ "$c" = "pcap" ] && [ "$_no_pcap" = "1" ]; then
+            set -- "$@" --no-default-features
+            say "testing $c (no capture feature — codec core only)"
+        fi
+        if CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo test --release --locked "$@" >/dev/null 2>&1; then
             ok "$c test suite passed"
         else
             no "$c test suite FAILED (rerun verbose for the log:"
             no "  CARGO_TARGET_DIR=$DAHARNESS_RUST_TARGET cargo test --release --locked --manifest-path $DAHARNESS_RUST_SRC/$c/Cargo.toml )"
+            if [ "$c" = "scratch" ]; then
+                # Known box-shape: on proot/fake-root userlands (phone Kai,
+                # some containers) geteuid()==0 is faked but the kernel still
+                # EPERMs chown-to-foreign-uid — only store::chown_walk
+                # can fail for that reason; a real deb target passes it.
+                no "  scratch note: a lone store::chown_walk failure on a fake-root (proot/container) box is the kernel denying foreign-uid chown — box-shape, not the port; on real installs this suite greens"
+            fi
             _failed=1
         fi
     done
@@ -274,6 +346,7 @@ case "$cmd" in
         cmd_toolchain && cmd_build && cmd_smoke ;;
     brain) cmd_brain "$@" ;;
     --help|-h|help)
-        sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//' ;;
+        # Whole header comment block, robust to header edits (no hardcoded line range).
+        sed -n '1,/^set -u$/p' "$0" | grep '^# ' | sed 's/^# \{0,1\}//' ;;
     *) err "unknown command: $cmd (status|toolchain|build|smoke|all|brain)"; exit 1 ;;
 esac

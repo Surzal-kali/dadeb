@@ -35,8 +35,9 @@ contract is explicit:
 
 - **status** and **brain** never touch the network.
 - **toolchain**, **build**, and **smoke** are deliberate fetches —
-  crates.io on the first run only: `Cargo.lock` ships inside every
-  crate and **--locked** pins the resolve.
+  crates.io on the first run only: `build` and `smoke` generate any
+  missing `Cargo.lock` per crate, and **--locked** then pins every
+  later resolve verbatim.
 
 Installing stays offline; the rust upgrade is explicit. That is the
 shape the package policy wants, and why nothing here is automatic.

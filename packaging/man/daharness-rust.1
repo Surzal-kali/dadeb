@@ -34,8 +34,9 @@ The network contract is explicit:
 \f[B]status\f[R] and \f[B]brain\f[R] never touch the network.
 .IP \(bu 2
 \f[B]toolchain\f[R], \f[B]build\f[R], and \f[B]smoke\f[R] are deliberate
-fetches \(em crates.io on the first run only: \f[CR]Cargo.lock\f[R]
-ships inside every crate and \f[B]\(enlocked\f[R] pins the resolve.
+fetches \(em crates.io on the first run only: \f[B]build\f[R] and
+\f[B]smoke\f[R] generate any missing \f[CR]Cargo.lock\f[R] per
+crate, and \f[B]\(enlocked\f[R] pins every later resolve verbatim.
 .PP
 Installing stays offline; the rust upgrade is explicit.
 That is the shape the package policy wants, and why nothing here is
