@@ -934,8 +934,10 @@ def sniff_packets(filter: str = "", count: int = 10, timeout: int = 30, interfac
             "systemd AmbientCapabilities (drop-in: "
             "/etc/systemd/system/{daharness,daharness-kernel}.service.d/"
             "privileged.conf → AmbientCapabilities=CAP_NET_RAW "
-            "CAP_NET_BIND_SERVICE, then `systemctl daemon-reload && "
-            "systemctl restart daharness daharness-kernel`) — or run the "
+            "CAP_NET_BIND_SERVICE and CapabilityBoundingSet=CAP_NET_RAW "
+            "CAP_NET_BIND_SERVICE CAP_NET_ADMIN, then `systemctl "
+            "daemon-reload && systemctl restart daharness "
+            "daharness-kernel`) — or run the "
             "Brain worker as root. Craft/dissect tools stay unprivileged."
         )
     except ValueError as e:
@@ -1069,7 +1071,9 @@ def wait_for_packet(filter: str = "", timeout: int = 30, interface: str = ""):
             "Fix: grant the executing lane CAP_NET_RAW via systemd "
             "AmbientCapabilities (drop-in "
             "/etc/systemd/system/{daharness,daharness-kernel}.service.d/"
-            "privileged.conf) or run the Brain worker as root."
+            "privileged.conf; its CapabilityBoundingSet must also carry "
+            "CAP_NET_ADMIN so setcap'd binaries like nmap don't refuse to "
+            "exec with EPERM) or run the Brain worker as root."
         )
     except Exception as e:
         return f"wait_for_packet error: {e}"

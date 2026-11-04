@@ -388,6 +388,26 @@ _VFS_CAP_REVISIONS = (1, 2, 3)
 _CAP_NET_RAW_BIT = 13
 _CAP_EFFECTIVE_FLAG = 0x000001
 
+# Canonical capability numbering (uapi/linux/capability.h — bit == value;
+# capsh --decode cross-verified on the Kali kernel, 2026-11-04). Names the
+# bits the doctor reports; unknown bits stay in the hex mask, never dropped.
+_CAP_NAMES = {
+    0: "cap_chown", 1: "cap_dac_override", 2: "cap_dac_read_search",
+    3: "cap_fowner", 4: "cap_fsetid", 5: "cap_kill", 6: "cap_setgid",
+    7: "cap_setuid", 8: "cap_setpcap", 9: "cap_linux_immutable",
+    10: "cap_net_bind_service", 11: "cap_net_broadcast",
+    12: "cap_net_admin", 13: "cap_net_raw", 14: "cap_ipc_lock",
+    15: "cap_ipc_owner", 16: "cap_sys_module", 17: "cap_sys_rawio",
+    18: "cap_sys_chroot", 19: "cap_sys_ptrace", 20: "cap_sys_pacct",
+    21: "cap_sys_admin", 22: "cap_sys_boot", 23: "cap_sys_nice",
+    24: "cap_sys_resource", 25: "cap_sys_time", 26: "cap_sys_tty_config",
+    27: "cap_mknod", 28: "cap_lease", 29: "cap_audit_write",
+    30: "cap_audit_control", 31: "cap_setfcap",
+    32: "cap_mac_override", 33: "cap_mac_admin", 34: "cap_syslog",
+    35: "cap_wake_alarm", 36: "cap_block_suspend", 37: "cap_audit_read",
+    38: "cap_perfmon", 39: "cap_bpf", 40: "cap_checkpoint_restore",
+}
+
 
 def _parse_cap_xattr(blob: bytes) -> dict[str, Any]:
     """Decode a security.capability blob into exec-time-relevant facts.
@@ -408,10 +428,18 @@ def _parse_cap_xattr(blob: bytes) -> dict[str, Any]:
                 "decode_error": f"unrecognized revision {revision}"}
     net_raw = bool(words[1] & (1 << _CAP_NET_RAW_BIT))
     effective = bool(magic_etc & _CAP_EFFECTIVE_FLAG)
+    permitted_mask = int(words[1])
+    permitted_names = [name for bit, name in _CAP_NAMES.items()
+                       if permitted_mask & (1 << bit)]
     return {"size": len(blob), "revision": revision,
             "effective_flag": effective,
             "cap_net_raw_in_permitted": net_raw,
-            "cap_net_raw": net_raw and effective}
+            "cap_net_raw": net_raw and effective,
+            # Full exec-relevant permitted set — names for the bits this
+            # doctor can name; raw hex mask always rides along so an
+            # unrecognized bit is never silently dropped from the report.
+            "permitted_mask": f"0x{permitted_mask:04x}",
+            "permitted": permitted_names}
 
 
 def _read_file_cap_net_raw(path: str) -> dict[str, Any]:
@@ -510,7 +538,11 @@ def _check_packetcraft() -> dict[str, Any]:
                             "AmbientCapabilities (drop-in e.g. "
                             "/etc/systemd/system/daharness.service.d/"
                             "privileged.conf: AmbientCapabilities=CAP_NET_RAW "
-                            "CAP_NET_BIND_SERVICE, then `systemctl "
+                            "CAP_NET_BIND_SERVICE and "
+                            "CapabilityBoundingSet=CAP_NET_RAW "
+                            "CAP_NET_BIND_SERVICE CAP_NET_ADMIN — bounding "
+                            "only, so setcap'd binaries like Kali's nmap exec "
+                            "— then `systemctl "
                             "daemon-reload && systemctl restart "
                             "daharness daharness-kernel`) — or run the lane "
                             "as root; setcap on the interpreter is NOT advised "
@@ -566,12 +598,170 @@ def _check_msf() -> dict[str, Any]:
             "remediation": "start the framework (python bootstrap.py) or msfrpcd manually"}
 
 
+def _lane_bounding_mask() -> int:
+    """This lane's capability bounding set as a bitmask (0 = unknown).
+
+    Read from /proc/self/status (CapBnd line) — the actual kernel state,
+    not an env guess. 0 means the read failed (procfs unmounted, masked
+    lane): callers treat 0 as "cannot honestly grade a bounding-set
+    constraint" and skip the check rather than fail closed on a probe.
+    """
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("CapBnd:"):
+                    return int(line.split()[1], 16)
+    except (OSError, ValueError, IndexError):
+        logging.getLogger(__name__).debug(
+            "bounding set unreadable on this lane", exc_info=True)
+    return 0
+
+
+def _parse_cap_xattr_or_none(path: str) -> dict[str, Any] | None:
+    """Full file-capability decode for the scanners probe (None = no xattr).
+
+    Unlike ``_read_file_cap_net_raw`` (which folds ENODATA into a dict for
+    the masscan boolean), the exec-grade probe needs the tri-state: a
+    no-xattr binary means "no capability constraint at exec" — grade it
+    True and keep a clean report.
+    """
+    try:
+        return _parse_cap_xattr(os.getxattr(path, "security.capability"))
+    except OSError as exc:
+        if exc.errno == errno.ENODATA:
+            return None
+        logging.getLogger(__name__).debug(
+            "cap xattr read failed on %s", path, exc_info=True)
+        return None
+
+
+def _exec_capability_grade(file_caps: dict[str, Any],
+                           bounding_mask: int) -> tuple[bool, str]:
+    """Can THIS lane execve() a binary carrying these file capabilities?
+
+    capabilities(7) execve rule: the file permitted set is ANDed with the
+    launcher's bounding set, and exec fails with EPERM when the process
+    "did not obtain the full set of file permitted capabilities" — i.e.
+    ANY file-cap capability outside the bounding set refuses the exec
+    entirely (the binary's own setcap'd privileges never even matter).
+    Observed 2026-11-04: Kali's nmap ships cap_net_admin in its xattr; a
+    Brain lane bounded to RAW+BIND_SERVICE (0x2400) could not exec the
+    0x3400-cap'd binary — wrapper died ":8: exec: Operation not permitted",
+    exit 126, before nmap ran a single probe. Returns ``(capable, reason)``.
+    """
+    if not file_caps or "permitted" not in file_caps:
+        # Not setcap'd (or undecodable xattr): exec capability is then the
+        # mundane path/mode question the caller already answered — no
+        # capability constraint to grade here.
+        return True, ""
+    if bounding_mask == 0:
+        return True, ""   # unreadable bounding set: grade nothing
+    bit_by_name = {name: bit for bit, name in _CAP_NAMES.items()}
+    missing = [name for name in file_caps["permitted"]
+               if name in bit_by_name
+               and not bounding_mask & (1 << bit_by_name[name])]
+    if not missing:
+        return True, ""
+    missing_s = ", ".join(missing)
+    return False, (
+        f"binary carries file capabilities outside this lane's bounding "
+        f"set: {missing_s} (file permitted "
+        f"{file_caps['permitted_mask']} = "
+        f"{', '.join(file_caps['permitted']) or 'none'} vs lane bounding "
+        f"0x{bounding_mask:x}) — execve() refuses with EPERM "
+        "(capabilities(7): the file permitted set is ANDed with the "
+        "bounding set; an unobtainable bit fails the exec), so scans die "
+        "at the wrapper's exec line (exit 126, 'Operation not permitted') "
+        "before the scanner runs")
+
+
+def _exec_targets(path: str) -> list[str]:
+    """Binaries whose file capabilities decide this tool's exec privilege.
+
+    The PATH hit may be a wrapper SCRIPT: stock Kali nmap resolves to
+    /usr/bin/nmap, a plain ``sh`` script whose own exec succeeds — the
+    capability-carrying binary is the ``exec /usr/lib/nmap/nmap`` target
+    inside it. Grading the wrapper alone reproduces the exact bug this
+    probe exists to catch, one directory deeper. Handles the honest
+    common case: ELF on PATH → itself; text script → every absolute
+    ``exec <abs-path>`` target it references (relative targets and
+    variable-mangled lines are skipped — never guessed).
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(2)
+        if head != b"#!":
+            return [path]   # ELF (or raw binary): its own xattr decides
+        text = open(path, errors="replace").read()
+    except OSError:
+        return [path]
+    targets = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("exec "):
+            continue
+        tok = line.split()[1]
+        if tok.startswith("/") and os.path.isfile(tok):
+            targets.append(tok)
+    return targets or [path]
+
+
 def _check_scan_tools() -> list[dict[str, Any]]:
-    """Pure-PATH probes for the scanner lane (nmap/ffuf/hydra/sqlmap)."""
+    """Exec-capability probes for the scanner lane (nmap/ffuf/hydra/sqlmap).
+
+    The old probe was a bare PATH check and reported a green doctor while
+    the lane physically could not exec the binary (bounds-vs-file-caps
+    EPERM, observed live 2026-11-04: the Brain lane's bounding set lacked
+    cap_net_admin that Kali's stock nmap carries, so every scan died at
+    '/usr/bin/nmap: 8: exec: Operation not permitted', exit 126). Now the
+    probe decodes the binary's security.capability xattr (full permitted
+    set) and grades it against THIS lane's CapBnd — the same arithmetic
+    the kernel runs at execve.
+    """
     out = []
+    bounding = _lane_bounding_mask()
     for cmd in ("nmap", "ffuf", "hydra", "sqlmap"):
         rec = _check_path(cmd)
         rec["provider"] = cmd
+        if rec["available"]:
+            import shutil
+            path = shutil.which(cmd) or cmd
+            # Grade every exec target (wrapper + real binaries): a setcap'd
+            # target whose file cap set leaves the lane's bounding set
+            # refuses execve — the kernel EPERMs before the tool runs.
+            graded: list[tuple[str, dict[str, Any] | None]] = []
+            failure: str = ""
+            for tgt in _exec_targets(path):
+                caps = _parse_cap_xattr_or_none(tgt)
+                ok, why = _exec_capability_grade(caps, bounding)
+                graded.append((tgt, caps))
+                if not ok and not failure:
+                    failure = f"{tgt}: {why}"
+            if any(c is not None for _, c in graded):
+                rec["extra"] = {
+                    "path": path,
+                    "exec_targets": [
+                        {"path": tgt, "file_caps": caps}
+                        for tgt, caps in graded
+                    ],
+                    "lane_bounding": f"0x{bounding:x}" if bounding else None,
+                }
+            if failure:
+                rec["available"] = False
+                rec["reason"] = (f"{cmd} on PATH at {path} but NOT EXECUTABLE "
+                                 f"from this lane — {failure}")
+                rec["remediation"] = (
+                    "add the missing capabilities to the LANE's bounding "
+                    "set — systemd drop-in (e.g. /etc/systemd/system/"
+                    "daharness.service.d/privileged.conf):\n"
+                    "    [Service]\n"
+                    "    AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_NET_ADMIN\n"
+                    "    CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_NET_ADMIN\n"
+                    "  (NET_ADMIN bounding-only is what Kali's stock nmap "
+                    "needs to exec), then `systemctl daemon-reload && "
+                    "systemctl restart daharness daharness-kernel` — or "
+                    "strip the binary's xattr to match the lane: sudo setcap "
+                    f"'-r' {path}")
         out.append(rec)
     return out
 

@@ -74,7 +74,11 @@ TimeoutStopSec=30
 #   /etc/systemd/system/daharness.service.d/privileged.conf
 #     [Service]
 #     AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
-#     CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
+#     CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+# NET_ADMIN is bounding-only (never Ambient): capabilities(7) execve rule —
+# a file-caps binary (Kali's nmap ships cap_net_admin) execs only when its
+# whole file permitted set sits inside the launcher's bounding set, else
+# execve fails with EPERM ("exec: Operation not permitted", exit 126).
 
 [Install]
 WantedBy=multi-user.target

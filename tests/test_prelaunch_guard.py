@@ -612,6 +612,173 @@ def test_parse_cap_xattr_rev1_and_junk():
     assert "decode_error" in junk
 
 
+# ---------------------------------------------------------------------------
+# Scanners exec-capability probe (bound-vs-file-caps EPERM, 2026-11-04)
+# ---------------------------------------------------------------------------
+#
+# Live incident: the Brain lane's CapabilityBoundingSet was
+# RAW+BIND_SERVICE (0x2400) while Kali's stock nmap package setcaps the
+# binary cap_net_bind_service,cap_net_admin,cap_net_raw+eip (0x3400).
+# capabilities(7): during execve the file permitted set is ANDed with the
+# bounding set, and exec fails EPERM when the process "did not obtain the
+# full set of file permitted capabilities" — so every scan died at the
+# /usr/bin/nmap wrapper's exec line (":8: exec: Operation not permitted",
+# exit 126) while the doctor's bare-PATH nmap probe stayed green.
+
+KALI_NMAP_CAPS = {
+    "size": 20, "revision": 2, "effective_flag": True,
+    "cap_net_raw_in_permitted": True, "cap_net_raw": True,
+    "permitted_mask": "0x3400",
+    "permitted": ["cap_net_bind_service", "cap_net_admin", "cap_net_raw"],
+}
+
+
+def test_exec_grade_blocks_cap_outside_bounding_set():
+    """The live incident, replayed: file permitted 0x3400 (Kali nmap) vs a
+    lane bounded to 0x2400 (raw+bind) must fail the grade — cap_net_admin
+    outside the bounding set EPERMs the exec before nmap runs."""
+    from auxiliaries.framework_status import _exec_capability_grade
+    ok, why = _exec_capability_grade(KALI_NMAP_CAPS, 0x2400)
+    assert ok is False
+    assert "cap_net_admin" in why
+    assert "bounding" in why and "EPERM" in why
+
+
+def test_exec_grade_passes_when_bounding_covers_file_set():
+    """A lane whose bounding set covers the whole file permitted set execs
+    fine — euid 0 / full-bounding login shells, the control arm."""
+    from auxiliaries.framework_status import _exec_capability_grade
+    ok, why = _exec_capability_grade(KALI_NMAP_CAPS, 0x3400)
+    assert ok is True and why == ""
+    ok, why = _exec_capability_grade(KALI_NMAP_CAPS, (1 << 41) - 1)
+    assert ok is True
+
+
+def test_exec_grade_skips_unset_and_unknown_bounding():
+    """No xattr (ffuf/hydra/sqlmap, plain ELF) → no capability constraint;
+    unreadable bounding set (0) → grade nothing rather than fail closed."""
+    from auxiliaries.framework_status import _exec_capability_grade
+    ok, why = _exec_capability_grade(None, 0x2400)
+    assert ok is True and why == ""
+    ok, why = _exec_capability_grade(KALI_NMAP_CAPS, 0)
+    assert ok is True and why == ""
+
+
+def test_parse_cap_xattr_full_permitted_set_decodes():
+    """Kali nmap's rev-2 blob: the full permitted set (bind+admin+raw) must
+    decode to NAMES, not just the raw bit — the report grades the union."""
+    from auxiliaries.framework_status import _parse_cap_xattr
+    # words: magic(rev2|effective), permitted=0x3400, inheritable=0,
+    # then rev-2 padding pair (the 20-byte size)
+    blob = struct.pack("<5I", 0x02000001, 0x3400, 0, 0, 0)
+    dec = _parse_cap_xattr(blob)
+    assert dec["permitted"] == ["cap_net_bind_service",
+                                "cap_net_admin", "cap_net_raw"]
+    assert dec["permitted_mask"] == "0x3400"
+    assert dec["cap_net_raw"] is True
+
+
+def test_scan_tools_probe_catches_narrow_bounding_lane(monkeypatch, tmp_path):
+    """The doctor replay: on a 0x2400-bounded lane, the probe that used to
+    be a bare PATH check must red-flag nmap (wrapper → real binary graded
+    through it) with the drop-in remediation — and keep plain-ELF
+    scanners green."""
+    import os as os_mod
+    import auxiliaries.framework_status as fstat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # The stock-Kali shape: /usr/bin/nmap = sh wrapper exec'ing the setcap'd
+    # binary; ffuf = plain ELF, no xattr.
+    (bin_dir / "nmap").write_text(
+        "#!/usr/bin/env sh\nset -e\n"
+        "exec /usr/lib/nmap/nmap --privileged \"$@\"\n")
+    (bin_dir / "ffuf").write_bytes(b"\x7fELF-not-really-but-path-only")
+    real_nmap = tmp_path / "real-nmap"
+    real_nmap.write_bytes(b"MAGIC")
+    monkeypatch.setattr(fstat.shutil, "which",
+                        lambda cmd: str(bin_dir / cmd))
+    monkeypatch.setattr(fstat.os, "getxattr",
+                        lambda path, attr: (
+                            struct.pack("<5I", 0x02000001, 0x3400, 0, 0, 0)
+                            if os_mod.fsencode(path)
+                            == os_mod.fsencode(str(real_nmap))
+                            else (_ for _ in ()).throw(OSError(61, "no data"))))
+    monkeypatch.setattr(fstat, "_exec_targets", lambda p: (
+        [str(real_nmap)] if p.endswith("nmap") else [p]))
+    monkeypatch.setattr(fstat, "_lane_bounding_mask", lambda: 0x2400)
+
+    recs = {r["provider"]: r for r in fstat._check_scan_tools()}
+    nmap = recs["nmap"]
+    assert nmap["available"] is False
+    assert "NOT EXECUTABLE" in nmap["reason"]
+    assert "cap_net_admin" in nmap["reason"]
+    assert "CapabilityBoundingSet" in nmap["remediation"]
+    assert "CAP_NET_ADMIN" in nmap["remediation"]
+    assert "lane_bounding" in nmap["extra"]     # evidence rides the report
+    # Plain ELF without xattr stays green on the very same narrow lane.
+    assert recs["ffuf"]["available"] is True
+
+
+def test_scan_tools_probe_green_on_full_bounding_lane(monkeypatch, tmp_path):
+    """Control arm: the same box probed from a full-bounding lane (operator
+    shell) grades nmap green with the exec-target evidence attached."""
+    import auxiliaries.framework_status as fstat
+
+    monkeypatch.setattr(fstat.shutil, "which",
+                        lambda cmd: "/usr/bin/nmap" if cmd == "nmap" else None)
+    monkeypatch.setattr(fstat, "_exec_targets",
+                        lambda p: ["/usr/lib/nmap/nmap"])
+    monkeypatch.setattr(
+        fstat, "_parse_cap_xattr_or_none",
+        lambda path: dict(KALI_NMAP_CAPS))
+    monkeypatch.setattr(fstat, "_lane_bounding_mask",
+                        lambda: (1 << 41) - 1)
+    rec = [r for r in fstat._check_scan_tools() if r["provider"] == "nmap"][0]
+    assert rec["available"] is True
+    assert rec["extra"]["exec_targets"][0]["file_caps"]["permitted"] == [
+        "cap_net_bind_service", "cap_net_admin", "cap_net_raw"]
+
+
+def test_exec_targets_follows_wrapper_to_real_binary(tmp_path):
+    """The wrapper-vs-binary trap: stock Kali nmap's PATH hit is a sh
+    script with TWO exec targets (root / --resume branch and unprivileged
+    branch) — both references to the same setcap'd ELF must be graded, so
+    the probe collects every absolute exec target in order."""
+    from auxiliaries.framework_status import _exec_targets
+    wrapper = tmp_path / "nmap"
+    target = tmp_path / "real" / "nmap.real"
+    target.parent.mkdir()
+    target.write_bytes(b"\x7fELF")
+    wrapper.write_text(
+        "#!/usr/bin/env sh\nset -e\n"
+        "if [ \"$1\" = \"--resume\" ]; then\n"
+        f"  exec {target} \"$@\"\n"
+        "else\n"
+        f"  exec {target} --privileged \"$@\"\n"
+        "fi\n")
+    targets = _exec_targets(str(wrapper))
+    assert targets == [str(target), str(target)]
+
+
+def test_lane_bounding_mask_parses_procfs(monkeypatch):
+    """CapBnd is parsed from /proc/self/status (the live kernel state on
+    this lane); a failed read grades 0 (skip-the-check), never a false
+    refusal."""
+    import auxiliaries.framework_status as fstat
+
+    # Live read: this lane's bounding set parses to a sane non-negative int
+    # (a kali login shell = 0x1ffffffffff; a systemd-bounded lane — narrow).
+    real = fstat._lane_bounding_mask()
+    assert isinstance(real, int) and real >= 0
+
+    def broken_open(*a, **k):
+        raise OSError("procfs gone")
+
+    monkeypatch.setattr("builtins.open", broken_open)
+    assert fstat._lane_bounding_mask() == 0
+
+
 def test_print_doctor_sudo_hint_on_permission_error(monkeypatch, capsys):
     """`daharness doctor` on a locked state root prints the sudo fix,
     exits 77 — not a raw traceback (the operator ask, VM 2026-10-20)."""

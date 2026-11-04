@@ -159,7 +159,11 @@ online-facing tools (sniff_packets, send_packet, wait_for_packet,
 sniff_to_pcap) execute in-process — no setcap can grant them; the lane
 itself needs CAP_NET_RAW (or root). Opt in via the systemd drop-in the
 shipped units document: `/etc/systemd/system/daharness.service.d/privileged.conf`
-with `AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE`, then restart the
+with `AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE` and
+`CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_NET_ADMIN`
+(NET_ADMIN is a bounding-only requirement — Kali's nmap binary carries
+`cap_net_admin` as a file capability, and the kernel refuses `execve` with
+EPERM when the launcher's bounding set lacks it), then restart the
 services. Probe with `framework_doctor(provider="packetcraft")`.
 
 ## Safety notes
