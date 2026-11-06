@@ -111,28 +111,29 @@ find "$STATE_ROOT" -maxdepth 1 -type f ! -perm -g+w \
 # offline backstop for an upgrade that restarts the service before any
 # index/gateway open touches the DB — so the first WAL write doesn't die.
 # Pattern: any *.db, *.db-wal, *.db-shm, *.db-journal in the state root,
-# PLUS the depth-2 shared stores under run/ (live 2026-10-31: a brain
-# session store minted 0640 under a tighter umask was invisible to the
-# top-level sweep and degraded every operator-lane dispatch with
-# "attempt to write a readonly database" — the durable agent->Brain-
-# session mapping fell back to per-process mints; run/fleet/fleet.db and
-# run/analysis_snapshots.db carried the same defect). The run/ sub-dirs
-# minted deliberately PRIVATE per scratch-store conventions (run/jobs/,
-# run/worker_queue/, 0700) are NOT matched — only files directly under
-# run/ and run/fleet/ (group-shared by design). utils.state_perms
+# PLUS the same shapes under run/ to depth 2. The run/ sweep was
+# originally ENUMERATED (run/*.db, run/fleet/*.db) — exhausted itself:
+# every new run/ store required hand-editing this list, and the miss was
+# live 2026-11-05 (run/budget/budget.db minted 0644 by a 022-umask lane;
+# not in the enumerate list; every operator-lane `budget` dispatch died
+# with "attempt to write a readonly database"). Generalized instead.
+# The run/ sub-dirs minted deliberately PRIVATE per scratch-store
+# conventions (run/jobs/, run/worker_queue/, 0700) are excluded — every
+# other .db* under run/ is group-shared by design. utils.state_perms
 # .reconcile_sqlite_modes is the per-store in-process layer going
 # forward; this sweep is the offline backstop + the heal for already-
 # unwritable existing files (a non-owner lane cannot chmod them itself).
 for _dbpat in "$STATE_ROOT"/*.db "$STATE_ROOT"/*.db-wal "$STATE_ROOT"/*.db-shm \
-              "$STATE_ROOT"/*.db-journal \
-              "$STATE_ROOT"/run/*.db "$STATE_ROOT"/run/*.db-wal "$STATE_ROOT"/run/*.db-shm \
-              "$STATE_ROOT"/run/*.db-journal \
-              "$STATE_ROOT"/run/fleet/*.db "$STATE_ROOT"/run/fleet/*.db-wal \
-              "$STATE_ROOT"/run/fleet/*.db-shm "$STATE_ROOT"/run/fleet/*.db-journal; do
+              "$STATE_ROOT"/*.db-journal; do
     [ -f "$_dbpat" ] 2>/dev/null || continue
     chmod g+rw "$_dbpat" 2>/dev/null || true
 done
 unset _dbpat
+find "$STATE_ROOT/run" -xdev -maxdepth 2 -type f \
+    \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \
+       -o -name '*.db-journal' \) \
+    ! -path '*/jobs/*' ! -path '*/worker_queue/*' \
+    ! -perm -g+w -exec chmod g+rw {} + 2>/dev/null || true
 
 # Shared-state access provisioning: the state root and brain socket are
 # group-shared by design (UMask 0007, RuntimeDirectoryMode=0770), but the

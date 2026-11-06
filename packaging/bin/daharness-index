@@ -27,6 +27,19 @@
 # editor's stubPath there. `daharness-index --stubs --check` reports
 # OK/STALE/SKIP without writing.
 set -u
+# ORDERING MATTERS — conffile FIRST, framework-root append SECOND (live
+# 2026-11-05): a conffile may legitimately carry its own PYTHONPATH line
+# (the pylibs hook: PYTHONPATH=/var/lib/daharness/dacustoms/pylibs), and
+# exporting the framework root first meant the sourced plain assignment
+# REPLACED it wholesale — `python3 -m daharness.core` then failed with
+# "No module named 'daharness[.core]'" on an install whose files were all
+# present. Source-then-append merges both, the conffile's own entry
+# kept ahead of the tree (vendor-prepend doctrine, daharness-kernel(1)).
+if [ -r /etc/daharness/daharness.env ]; then
+	set -a
+	. /etc/daharness/daharness.env
+	set +a
+fi
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # Group-share writes: files this lane creates (tool_registry.db + its
 # -wal/-shm sidecars) take g=rw (0007) and — inside the setgid state
@@ -39,11 +52,6 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # wrapper was missed. The setgid dir cascade alone is not enough: SQLite
 # needs the main DB file itself group-writable for its WAL dance.
 umask 0007
-if [ -r /etc/daharness/daharness.env ]; then
-	set -a
-	. /etc/daharness/daharness.env
-	set +a
-fi
 # Embed probe resolves EMBED_URL — the exact knob daharness/embedding.py
 # dials (provider-agnostic: Ollama native /api/embed or OpenAI-compatible
 # /v1/embeddings). OLLAMA_BASE_URL is NOT the embed knob and the deb

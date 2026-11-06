@@ -236,6 +236,22 @@ class RationStore:
             ) from exc
         self.db_path = self.dir / "budget.db"
         self._local = threading.local()
+        # Cross-lane mode heal BEFORE the first connect, not just after: a
+        # db minted 0644/0640 by a tighter-umask lane (live 2026-11-05:
+        # budget.db 644 daharness:daharness minted mid-service) makes the
+        # first WAL pragma die with "attempt to write a readonly
+        # database" — when this process OWNS the file (or runs as root)
+        # it can heal itself here; a non-owner lane's chmod is a silent
+        # no-op per state_perms doctrine and the owner lane or the deb
+        # postinst sweep heals instead (that sweep covers all run/*.db to
+        # depth 2 since 2026-11-05).
+        from utils.state_perms import reconcile_sqlite_modes
+        try:
+            reconcile_sqlite_modes(self.db_path)
+        except OSError:
+            logging.getLogger(__name__).debug(
+                "swallowed exception in RationStore.__init__ (perm reconcile)",
+                exc_info=True)
         self._ensure_schema()
 
     # --- connection plumbing -------------------------------------------------
@@ -253,7 +269,21 @@ class RationStore:
         return c
 
     def _ensure_schema(self) -> None:
-        self.conn.executescript(_SCHEMA)
+        try:
+            self.conn.executescript(_SCHEMA)
+        except sqlite3.OperationalError as exc:
+            if "readonly" not in str(exc).lower():
+                raise
+            # The classic cross-lane state defect: this db is not
+            # group-writable and this lane can't fix it (daharness-owned,
+            # operator group-member, UMask 0007 wrapper or not). Tell the
+            # operator the ONE-LINE fix instead of a bare WAL traceback
+            # from a store open (live 2026-11-05 REPL report).
+            raise RuntimeError(
+                f"ration store is read-only from this lane: {self.db_path}\n"
+                f"  fix: sudo chmod g+rw {self.db_path}*   "
+                f"(or reinstall the deb — the postinst run/ sweep heals it)"
+            ) from exc
         cols = {r[1] for r in self.conn.execute(
             "PRAGMA table_info(nodes)")}
         for name in ("epoch_anchor", "manual_phase"):
@@ -270,6 +300,9 @@ class RationStore:
         if "metered_json" not in ecols:
             self.conn.execute("ALTER TABLE emissions ADD COLUMN metered_json TEXT")
         self.conn.commit()
+        # Post-WAL heal per state_perms doctrine: the pragma above minted
+        # (or would have minted) the -wal/-shm sidecars, which inherit the
+        # main db's mode — reconcile them alongside it.
         from utils.state_perms import reconcile_sqlite_modes
         try:
             reconcile_sqlite_modes(self.db_path)
