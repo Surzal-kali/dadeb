@@ -1016,7 +1016,8 @@ class RationEngine:
                   agent_id: str | None = None,
                   engagement: str | None = None,
                   exit_id: str | None = None,
-                  entry_partition: str | None = None) -> dict:
+                  entry_partition: str | None = None,
+                  operator_release: bool = False) -> dict:
         """Budget preflight for a dispatch. Returns:
 
         - ``{"decision": "disabled"}`` when BUDGET_ENABLED=0,
@@ -1070,6 +1071,19 @@ class RationEngine:
         decided["estimator"] = est_name
         decided["dims"] = dims
         decision = decided.get("decision")
+        # §6.2 (v0.4 fix): HOLD gates FRESH lanes — admit or enqueue, either
+        # way the fresh dispatch yields to the operator drain. The operator
+        # lane (operator_release) passes; the drain re-admits every tick.
+        # No queue row is minted for a held fresh dispatch — the drain owns it.
+        if (not operator_release and isinstance(decision, str)
+                and decision in ("admit", "enqueue") and any(
+                    r["mode"] == "hold" for r in self.store.conn.execute(
+                        "SELECT mode FROM nodes"))):
+            decided["decision"] = "held_pending"  # gate has its own branch
+            decided["instruction"] = (
+                "node in HOLD (backlog drain pending) - do NOT retry; "
+                "the operator tick already owns this item")
+            return decided
         if satisfied_check is not None:
             job = satisfied_check(tool_id, arguments or {})
             if job is not None:
@@ -1845,10 +1859,14 @@ def _queue_defer(engine: RationEngine, tool_id: str, arguments: dict | None,
 
 def ration_gate(tool_id: str, arguments: dict | None, *,
                 agent_id: str | None = None, session_id: str | None = None,
+                operator_release: bool = False,
                 now: float | None = None) -> dict | None:
     """The dispatch chokepoint's budget step. Returns:
 
     - ``None`` — ration does not engage (disabled / unregistered tool);
+      ``operator_release=True`` is the operator drain's release marker: the
+      drain lane passes the HOLD admission block (fresh dispatches still
+      defer — §6.2); every other lane leaves it False.
     - ``{"gate": "debited", ...}`` — debit committed, dispatch may proceed
       (caller MUST pass this to :func:`ration_discharge` afterwards);
     - envelope dict ``{"status": "budget_deferred"|"budget_refused", ...}`` —
@@ -1873,7 +1891,8 @@ def ration_gate(tool_id: str, arguments: dict | None, *,
                    f"(fail-closed): {exc!r}", arguments=arguments)
     try:
         decision = engine.preflight(tool_id, arguments, now=now,
-                                    agent_id=agent_id, engagement=engagement)
+                                    agent_id=agent_id, engagement=engagement,
+                                    operator_release=operator_release)
     except Exception as exc:
         logger.debug("swallowed exception in ration_gate(preflight)",
                      exc_info=True)
@@ -1897,10 +1916,19 @@ def ration_gate(tool_id: str, arguments: dict | None, *,
             reason=decision.get("reason")
             or "budget store unreadable — traffic dims fail-closed (§13)",
             declared=decision.get("declared"), arguments=arguments)
+    if d == "held_pending":
+        return _budget_envelope(
+            tool_id, status="budget_deferred",
+            reason=decision.get("reason") or
+            "node in HOLD — backlog drain pending (held_pending)",
+            declared=decision.get("declared"), arguments=arguments)
     if d == "enqueue":
         qid = decision.get("queue_id")
         return _budget_envelope(
             tool_id, status="budget_deferred", queue_id=qid,
+            reason=("node in HOLD — backlog drain pending; the operator tick "
+                    "already owns this item (held_pending)"
+                    if decision.get("held_pending") else None),
             declared=decision.get("declared"), arguments=arguments)
     if d != "admit":
         return _budget_envelope(

@@ -454,7 +454,8 @@ def _budget_drain_dispatcher(manifests):
     async def _dispatch(item: dict) -> dict:
         args = item.get("arguments_json")
         arguments = json.loads(args) if isinstance(args, str) else (args or {})
-        res = await run_tool(item["tool"], arguments, manifests)
+        res = await run_tool(item["tool"], arguments, manifests,
+                             session_id="ration-drain")
         if isinstance(res, dict) and res.get("status") == "budget_deferred":
             raise BudgetStillShort(queue_id=res.get("queue_id"))
         if isinstance(res, dict) and res.get("status") == "budget_refused":

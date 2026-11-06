@@ -159,7 +159,8 @@ class ExecutorMixin:
             from utils.ration import ration_gate
             _ration_gate_state = ration_gate(
                 manifest.module_id, arguments,
-                agent_id=resolved_agent_id, session_id=str(session_id))
+                agent_id=resolved_agent_id, session_id=str(session_id),
+                operator_release=(session_id == "ration-drain"))
         except Exception:
             logger.debug(
                 "[RATION] gate step skipped (non-fatal; store-state "

@@ -91,7 +91,9 @@ def discover_tools() -> list[ToolManifest]:
 
 # ── Run a tool ───────────────────────────────────────────────────────────────
 
-async def run_tool(tool_id: str, arguments: dict[str, Any], manifests: list[ToolManifest]) -> dict[str, Any]:
+async def run_tool(tool_id: str, arguments: dict[str, Any],
+                   manifests: list[ToolManifest],
+                   session_id: str | None = None) -> dict[str, Any]:
     """Run a single tool by ID and return the result dict."""
     manifest = next((m for m in manifests if m.module_id == tool_id), None)
     if manifest is None:
@@ -113,7 +115,8 @@ async def run_tool(tool_id: str, arguments: dict[str, Any], manifests: list[Tool
         # from the REPL now carry 'repl' ownership.
         from utils.agent_identity import REPL_AGENT_ID
         result = await executor.execute_tool(
-            manifest, arguments, session_id=REPL_AGENT_ID
+            manifest, arguments,
+            session_id=(session_id if session_id is not None else REPL_AGENT_ID)
         )
     except Exception as exc:
         result = {"error": f"Exception during execution: {exc}", "status": "Failed"}

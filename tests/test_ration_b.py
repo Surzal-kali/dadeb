@@ -180,7 +180,10 @@ class TestDrainDispatcherMapping:
         import replkit.core as core
         import replkit.operator_cli as cli
 
-        async def fake_run_tool(tool_id, arguments, manifests):
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            assert session_id == "ration-drain", \
+                "drain lane must announce itself"
             return {"status": "ok", "result": {"job_id": 9001}}
         monkeypatch.setattr(core, "run_tool", fake_run_tool)
         d = cli._budget_drain_dispatcher(())
@@ -191,7 +194,10 @@ class TestDrainDispatcherMapping:
         import replkit.core as core
         import replkit.operator_cli as cli
 
-        async def fake_run_tool(tool_id, arguments, manifests):
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            assert session_id == "ration-drain", \
+                "drain lane must announce itself"
             return {"job_id": 7}
         monkeypatch.setattr(core, "run_tool", fake_run_tool)
         d = cli._budget_drain_dispatcher(())
@@ -202,7 +208,10 @@ class TestDrainDispatcherMapping:
         import replkit.core as core
         import replkit.operator_cli as cli
 
-        async def fake_run_tool(tool_id, arguments, manifests):
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            assert session_id == "ration-drain", \
+                "drain lane must announce itself"
             return {"status": "ok", "result": {"stdout": "data"}}
         monkeypatch.setattr(core, "run_tool", fake_run_tool)
         d = cli._budget_drain_dispatcher(())
