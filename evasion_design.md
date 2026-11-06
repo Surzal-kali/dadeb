@@ -1,7 +1,7 @@
 # Evasion & Budget Engine — Design Doc
 
-**Version:** v0.2 · 2026-11-05
-**Status:** v0.1 draft + user red pen folded; 2026-11-05 chat threads (SQLite tier, fleet boundary, principal minting) resolved into the body. Build gate lifts per phase order.
+**Version:** v0.3 · 2026-11-05
+**Status:** v0.1 draft + user red pen folded; 2026-11-05 chat threads (SQLite tier, fleet boundary, principal minting) resolved into the body; 2026-11-05 review pack folded (two-tier emission spans, coverage boundary, credit-line lifecycle, constitution sketch, debit direction, clock discipline, CDN origin keys). Build gate lifts per phase order.
 **BUILD GATE:** no implementation until the user signs off. Every "OPEN" item below is a user decision; every "DEFAULT" is my proposed default, vetoable.
 
 ---
@@ -37,9 +37,9 @@ B. Per-tool estimator & actuator cheatsheet
 
 ## 2. Problem & goals
 
-**Goal:** keep total campaign signal below what defensive stacks can infer, without baking magic numbers or trusting model judgment with resources.
+**Goal:** keep total campaign signal below what defensive stacks can infer, without baking magic numbers or trusting model judgment with resources — and when the economy itself faults, admission fails CLOSED with no stated escape hatch (§5).
 
-Standing facts the design must honor:
+Standing facts the design must honor (trim candidate — restates the origin chat):
 - The unit of detection is a CAMPAIGN, not a request. Posture is a whole-engagement property.
 - Defender tripwires are unreadable configurations (velocity rules, lockout counters, IDS thresholds, bot scoring). You can only learn their shadows.
 - Regularity is as detectable as volume: interval entropy matters; metronomic spend is bot-shaped. (HostFloor precedent; bedside 301-flood also showed rate policy is an ANALYSIS-INTEGRITY control — floods drown your own signal.)
@@ -50,6 +50,7 @@ Standing facts the design must honor:
 - No synthetic TLS-fingerprint forgery (customs valve — see §14). [revisit]
 - No multi-operator distributed budget sync (DB-tiering tracks team mode separately).
 - No new scanning capability: the engine makes orchestration quieter, not more capable.
+- **Covers ONLY chokepoint-routed agent-driven traffic (v0.3).** Human kernel-lane IO and hand-run terminal work inherit human authority (gate-follows-actor) and are OUTSIDE the economy.
 
 ## 3. Architecture: three-concern pipeline
 
@@ -89,6 +90,7 @@ Budgets are keyed by the tuple defenders actually count on:
 
 - `principal` = account / session-cookie / credential identity — optional fourth axis (lockout counters count per-account; spray-vs-brute shape is a principal-dimension decision).
 - One host can sit in several ranges; debit cascades leaf→range→exit→engagement-global.
+- **CDN origin keys (v0.3):** mechanical CIDR derivation for the `range_cidr` dimension WRONGLY KEYs CDN-fronted hosts — defender counters are per-ORIGIN, not per edge-IP. Config may pin origin/vhost-group keys as the dimension identity instead (`cdn_origin_keys`, Appendix A).
 
 ### 4.2 Budget vectors (DEFAULT: vectors, not scalars)
 
@@ -138,7 +140,11 @@ Precedence: explicit declaration > config regex > under-key. No embeddings invol
 
 L0 failures to declare → dispatch blocked, not guessed (Unknown ≠ healthy — a tool that can't state its cost needs a registered estimator or runs credit-line mode).
 
+**Engine-fault rule (v0.3):** the economy's OWN fault is an admission failure, not a bypass — a bug, a mangled declaration, or a store-down condition fails CLOSED, and NO escape hatch is stated anywhere for it. (Store-down honesty is §13's degraded mode; the same posture holds anywhere the engine itself errs.)
+
 **Cascade debit is atomic (v0.2 fix):** admission checks ALL cascade levels (leaf→range→exit→global) then debits all in one `BEGIN IMMEDIATE` transaction — a mid-cascade shortfall rolls back the WHOLE debit; never a partially-charged leaf.
+
+**Reconcile to max(L0, L1) per dimension (v0.3):** actuals may legitimately run UNDER declaration (nmap retransmits, redirect chains) — the true-up lands on the larger of the two; drift in EITHER direction is a logged signal.
 
 **One harvester, two consumers:** L1's actuals harvest and §8's response-class signal parsing are the SAME component (§4.4 outcome classification); auth-outcome is one response class it emits.
 
@@ -168,6 +174,10 @@ Stated literally this deadlocks when a backlog forms at zero budget (drain needs
 - **Backlog definition (v0.2 fix):** backlog = `state='queued'` items only. Expired/cancelled items take their promised ledger exit and are purged at expiry — lingering terminal rows would latch HOLD forever; a node whose queue holds only terminal items is backlog-empty.
 - **Floor 0 is forbidden (v0.2 fix):** a dimension whose constitutional floor rate is 0 never accrues → never drains → stays HOLD forever. The red pen accepts MOMENTARY deadlocks; zero-floor is a permanent one. Constitution keeps every HOLD-mode floor rate > 0; belt-and-braces, a HOLD-stall alarm surfaces at `budget_status` (operator-visible, not auto-escalating) when a node holds backlog > 1 epoch with no drain progress.
 
+### 6.3 Clock discipline (v0.3)
+
+Clamp refill per tick to the constitutional floor; prefer monotonic deltas for epoch math — wall-clock suspend/NTP steps must not grant or withhold credit.
+
 ## 7. Exhaustion → deferred queue + operator
 
 **DECIDED (user):** exhaustion is DEFER-NOT-DENY via a task scheduler + operator. Budget-insufficient dispatches are queued, not bounced.
@@ -179,7 +189,9 @@ Stated literally this deadlocks when a backlog forms at zero budget (drain needs
 | scope violation | hard NO (unchanged) |
 | declared cost > available budget | ENQUEUE (defer), return deferred job id, pollable |
 | declared cost can never fit (single call > constitutional ceiling even at full refill) | REJECT with reason ("declare smaller: rate-limited sweep instead of one full call") |
-| open-ended tool (ZAP-class), can't preflight | credit-line mode: wrapper meters tool internally against a drawn budget token (draw = admission event) |
+| open-ended tool (ZAP-class), can't preflight | credit-line mode: the full lifecycle below — draw → HOLD w/ expiry → METER → SETTLE |
+
+**Credit-line lifecycle (v0.3):** `draw` (the admission event) opens a line that sits **HOLD w/ expiry** — expires if the tool never starts → **METER** — debits as consumed; exhaustion mid-flight means the tool ENDS (non-resumable crawls end, resumables pause via the pause/kill twins) → **SETTLE** — the unused remainder is released. ("HOLD" here = the held draw, not the §6.2 refill mode.) Note: **debit-at-draw is REJECTED** — it burns unused credit and turns open-ended tools into queue bullies.
 
 **Draw lifetime (v0.2 fix):** a credit-line draw is a reservation bound to the dispatching job's lifetime — unreleased remainder reconciles at fleet `release_unit` / the job store's reaper sweep (an abandoned draw is swept like a stale fleet unit; nothing dangles across a crash or restart).
 
@@ -197,6 +209,8 @@ QueueItem:
   submit_ts, state            # queued | dispatched | expired | cancelled
   job_ref,                    # set at dispatch; or the satisfying live unit's job_id (§7.3)
 ```
+
+**TTL expiry is poll-only (v0.3):** no push lane announces expiry — `queue_status`'s countdowns (§12) are the surface; expired items still take their promised ledger exit (§7.3).
 
 ### 7.3 Operator
 
@@ -242,6 +256,7 @@ When 429s onset after ~X requests in window W:
 - Both-sided interval estimates, cumulative, stored per host.
 - Controller uses bounds to auto-throttle — ONLY within constitutional authority (§8.2).
 - Cross-engagement retention: **DECIDED (user red pen): per-engagement, no cross-retention** — tripwire estimates are engagement-scoped rows; `engagement purge` wipes them. Corollary written down: every engagement cold-starts with no bounds, so the constitution's conservative defaults are the only floor until observations accrue.
+- **Span-provenance confidence (v0.3):** the controller weights confidence by span provenance (§10 `signal_spans`) — request-level spans drive tight tripwire bounds; aggregate spans only loosen/tighten widely; NO spans for a dim ⇒ pacing Unknown-ish + conservative (honesty rule holds).
 
 ## 9. Reserves
 
@@ -249,13 +264,13 @@ Frozen spike rationing: the loudest moments of an operation are initial-access�
 
 - **Release = CLI tag (decided v0.2, user red pen):** operator tags a release via REPL CLI (`scope on`/`engagement on` lane — human authority); once tagged, consumption is FREE-FORM for matching dims/tag — no per-use approval. No mechanism-gated auto-unlock path.
 - Token names: partition, dims, max vector, ttl, purpose tag.
-- Released funds are debitable ONLY by matching dispatches; the operator may apply released funds to backlog items matching the token's dims/tag.
+- Released funds are debitable ONLY by matching dispatches — matching is exact-dims OR tag-wildcard, config-declared; the operator may apply released funds to backlog items matching the token's dims/tag.
 - Refill: slow or none (DEFAULT none) — otherwise reserves erode into a second daily pool.
 - Sizing: per-engagement-type from config. Too big starves daily work; too small exhausts at first emergency.
 
 ## 10. Emissions ledger
 
-One record, two consumers (controller sensor feed + differential-testing corpus + blue-twin calibration telemetry):
+One record, three consumers (controller sensor feed + differential-testing corpus + blue-twin calibration telemetry):
 
 ```
 emissions(

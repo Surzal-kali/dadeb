@@ -132,7 +132,15 @@ CREATE TABLE IF NOT EXISTS emissions (
     actual_json TEXT, response_class TEXT,
     signals_json TEXT, posture_json TEXT,
     job_ref TEXT, queue_ref TEXT, budget_phase TEXT,
-    drift INTEGER NOT NULL DEFAULT 0, drift_note TEXT
+    drift INTEGER NOT NULL DEFAULT 0,
+    drift_note TEXT,
+    -- §7.1 credit-line lifecycle (v0.3): hold → metering → settled | expired
+    -- | exhausted. NULL = legacy/pre-migration row or a measured (non-draw)
+    -- emission that never carried a lifecycle.
+    meter_state TEXT,
+    -- §5/v0.3 debit-direction rule: cumulative per-dim charged total kept on
+    -- the row so meter polls are idempotent (target = max(L0, L1)).
+    metered_json TEXT
 );
 CREATE INDEX IF NOT EXISTS emissions_tool_ts ON emissions (tool, ts);
 CREATE INDEX IF NOT EXISTS emissions_engagement ON emissions (engagement) WHERE engagement IS NOT NULL;
@@ -184,6 +192,25 @@ CREATE TABLE IF NOT EXISTS reserves (
     note TEXT, ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS reserves_engagement ON reserves (engagement) WHERE engagement IS NOT NULL;
+CREATE TABLE IF NOT EXISTS signal_spans (
+    -- §10 two-tier emission ledger (v0.3): per-request truth attached by
+    -- tools that SEE per-request events (web/session lane: ffuf, ZAP,
+    -- curl-loop, session lane); batch tools (nmap/masscan) emit SUMMARY
+    -- spans only — window count + coarse outcome — provenance-tagged
+    -- 'aggregate'. Confidence MATERIAL for the controller (§8.3): spans
+    -- never block a dispatch and are never the throttle accounting basis
+    -- (that stays window_spend/emission-rows).
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    emission_ref INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    response_class TEXT,
+    provenance TEXT NOT NULL,
+    window_count REAL,
+    host_axis TEXT, engagement TEXT, tool TEXT,
+    detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS signal_spans_host_ts ON signal_spans (host_axis, ts);
+CREATE INDEX IF NOT EXISTS signal_spans_ref ON signal_spans (emission_ref);
 """
 
 
@@ -234,6 +261,14 @@ class RationStore:
                 self.conn.execute(
                     f"ALTER TABLE nodes ADD COLUMN {name} "
                     + ("REAL" if name == "epoch_anchor" else "TEXT"))
+        ecols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(emissions)")}
+        # §7.1 lifecycle (meter_state/metered_json) migrations ship after the
+        # table existed in the wild; new db's carry them in _SCHEMA directly.
+        if "meter_state" not in ecols:
+            self.conn.execute("ALTER TABLE emissions ADD COLUMN meter_state TEXT")
+        if "metered_json" not in ecols:
+            self.conn.execute("ALTER TABLE emissions ADD COLUMN metered_json TEXT")
         self.conn.commit()
         from utils.state_perms import reconcile_sqlite_modes
         try:
@@ -260,7 +295,13 @@ class RationStore:
         """Projected per-dim balances after lazy accrual (pure — used read-only
         by preflight and mutably by debit). Accrual is pro-rata against the
         per-epoch refill rate, clamped to the burst ceiling; HOLD-mode nodes
-        accrue at the constitutional floor rate instead (never zero — §6.2)."""
+        accrue at the constitutional floor rate instead (never zero — §6.2).
+
+        §6.3 clock discipline (v0.3): a single accrual touch grants at most
+        ``BUDGET_ACCRUE_TICK_EPOCHS`` (default 1.0) epochs of refill — a
+        wall-clock suspend or NTP step can never mint a catch-up burst, and
+        elapsed never goes negative across a backward step (credit is never
+        withheld, only bounded)."""
         now = now if now is not None else time.time()
         ceiling = {d: float(json.loads(node["ceiling_json"]).get(d, 0)) for d in DIMS}
         refill = {d: float(json.loads(node["refill_json"]).get(d, 0.0)) for d in DIMS}
@@ -282,7 +323,15 @@ class RationStore:
                           "anchored": True}
             return out
         start = max(last, anchor)
-        elapsed = max(0.0, float(now) - start)
+        try:
+            tick_epochs = float(os.getenv("BUDGET_ACCRUE_TICK_EPOCHS", "1.0"))
+        except ValueError:
+            tick_epochs = 1.0
+        if tick_epochs <= 0:
+            tick_epochs = 1.0
+        # elapsed rides a wall-vs-monotonic delta the CALLER already resolved
+        # (ration.budget_now); the per-tick cap is the only grant bound here.
+        elapsed = min(max(0.0, float(now) - start), tick_epochs * epoch_s)
         if node["mode"] == "hold":
             refill = dict(floor)
         out = {}
@@ -295,6 +344,7 @@ class RationStore:
 
     @staticmethod
     def _covers(balances: dict, decl: dict) -> bool:
+        """Appendix A ``covers()``: per-dim remaining ≥ requested."""
         return all(
             decl[d] is None or balances[d]["remaining"] >= decl[d]
             for d in DIMS
@@ -541,8 +591,9 @@ class RationStore:
                     "entry_partition, exit_id, range_axis, host_axis, principal, "
                     "declared_json, declared_basis, estimator, actual_json, "
                     "response_class, signals_json, posture_json, job_ref, "
-                    "queue_ref, budget_phase, drift) VALUES (?,?,?,?,?,?,?,?,?,?,"
-                    "?,?,NULL,NULL,?,?,NULL,NULL,?,0)",
+                    "queue_ref, budget_phase, drift, meter_state) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,"
+                    "?,?,NULL,NULL,?,?,NULL,NULL,?,0,?)",
                     (now, tool, engagement, agent_id or "0",
                      dims.get("entry_partition"), dims.get("exit_id"),
                      dims.get("range_axis"), dims.get("host_axis"),
@@ -551,12 +602,19 @@ class RationStore:
                      _opt_json((emit_meta or {}).get("signals")),
                      _opt_json((emit_meta or {}).get("posture")),
                      (emit_meta or {}).get("budget_phase"),
+                     # §7.1 lifecycle: the draw opens in HOLD; METER starts
+                     # at the first metered actual; measured (non-draw)
+                     # emissions carry no lifecycle.
+                     "hold" if credit_line else None,
                      ))
                 emission_id = int(cur.lastrowid)
                 c.commit()
-                return {"committed": True, "decision": "debit",
-                        "emission_id": emission_id, "tool": tool,
-                        "traces": traces, "credit_line": credit_line}
+                out = {"committed": True, "decision": "debit",
+                       "emission_id": emission_id, "tool": tool,
+                       "traces": traces, "credit_line": credit_line}
+                if reserve_cover is not None:
+                    out["reserve_cover"] = reserve_cover
+                return out
             except Exception:
                 try:
                     c.rollback()
@@ -760,21 +818,56 @@ class RationStore:
                 return False
         return True
 
+    _WILD_TAGS_ENV = "BUDGET_RESERVE_WILD_TAGS"
+
+    @staticmethod
+    def _wild_tags() -> tuple[str, ...]:
+        """§9/L2: released-token tags that may cover ANY deficit
+        (exact-dims OR tag-wildcard, config-declared). Env override first,
+        else the constitution's ``reserve_tag_wildcards``. Resolution
+        failure ⇒ NO wildcards (stricter, never looser)."""
+        raw = os.getenv(RationStore._WILD_TAGS_ENV, "").strip()
+        if raw:
+            return tuple(t.strip().lower() for t in raw.split(",") if t.strip())
+        try:
+            from utils.ration import constitution as _constitution
+            return tuple(
+                t.strip().lower() for t in
+                (_constitution().reserve_tag_wildcards or ()) if t and t.strip())
+        except Exception:
+            return ()
+
     def _released_reserve_cover(self, deficit: dict, *, dims: dict,
                                 engagement: str | None,
                                 now: float) -> dict | None:
         if not deficit:
             return None
+        wild = self._wild_tags()
         for r in self.conn.execute(
                 "SELECT * FROM reserves WHERE released IS NOT NULL AND"
                 " (ttl_expiry IS NULL OR ttl_expiry > ?) ORDER BY ts",
                 (now,)):
-            if not self._reserve_match(r, dims=dims, engagement=engagement):
+            # L2: a released token whose operator tag is in the config's
+            # wildcard list covers whatever it holds irrespective of dims —
+            # but engagement binding STILL applies (never funds a sibling
+            # engagement from this one's reserve).
+            tagged_wild = (r["tag"] or "").strip().lower() in wild
+            if not tagged_wild and not self._reserve_match(
+                    r, dims=dims, engagement=engagement):
+                continue
+            # Engagement binding applies to wildcards too: a wildcard tag
+            # skips the DIMS match, never the engagement one.
+            if tagged_wild and r["engagement"] is not None and \
+                    r["engagement"] != (engagement
+                                        or dims.get("engagement")):
                 continue
             remaining = json.loads(r["remaining_json"] or "{}")
-            if all(float(remaining.get(d) or 0.0) >= amt
-                   for d, amt in deficit.items()):
-                return {"token_id": r["token_id"], "consume": dict(deficit)}
+            consume = {d: amt for d, amt in deficit.items()}
+            if not all(float(remaining.get(d) or 0.0) >= amt
+                       for d, amt in consume.items()):
+                continue
+            return {"token_id": r["token_id"], "consume": consume,
+                    "wildcard_tag": r["tag"] if tagged_wild else None}
         return None
 
     def _consume_reserve(self, token_id: str, deficit: dict) -> None:
@@ -836,11 +929,16 @@ class RationStore:
                    limit: int = 50) -> list[dict]:
         # open = credit-line, never true-up'd, not compensated (drift=2 —
         # the debit was reversed) and not already honest-closed ('closed…'
-        # note: poll-release or sweep backstop). Closed draws are history.
+        # note: poll-release or sweep backstop). §7.1 lifecycle: a draw is
+        # open while still in HOLD (waiting to start) or METER (billing as
+        # consumed) — exhausted (mid-flight credit death) and expired
+        # (hold TTL) draws are closed history too. Closed draws are history.
         sql = ("SELECT id, tool, ts, engagement, declared_json,"
-               " declared_basis, job_ref, drift_note FROM emissions WHERE"
+               " declared_basis, job_ref, drift_note, meter_state FROM"
+               " emissions WHERE"
                " declared_basis='credit_line' AND actual_json IS NULL AND"
-               " (drift IS NULL OR drift=0) AND"
+               " (meter_state IS NULL OR meter_state IN ('hold','metering'))"
+               " AND (drift IS NULL OR drift=0) AND"
                " (drift_note IS NULL OR drift_note NOT LIKE 'closed%')")
         params: list = []
         if engagement:
@@ -854,11 +952,13 @@ class RationStore:
             r["emission_id"] = r.pop("id")
         return rows
 
-    def close_draw(self, emission_id: int, note: str) -> bool:
+    def close_draw(self, emission_id: int, note: str, *,
+                   meter_state: str | None = None) -> bool:
         cur = self.conn.execute(
-            "UPDATE emissions SET drift_note=? WHERE id=? AND"
+            "UPDATE emissions SET drift_note=?, meter_state=COALESCE(?, "
+            "meter_state) WHERE id=? AND"
             " actual_json IS NULL AND declared_basis='credit_line'",
-            (note, emission_id))
+            (note, meter_state, emission_id))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -871,14 +971,195 @@ class RationStore:
 
     def draws_for_job(self, job_ref: str) -> list[dict]:
         rows = [dict(r) for r in self.conn.execute(
-            "SELECT id, tool, declared_json, declared_basis,"
-            " drift_note FROM emissions WHERE job_ref=? AND"
-            " declared_basis='credit_line' AND actual_json IS NULL",
+            "SELECT id, tool, declared_json, declared_basis, engagement,"
+            " host_axis, drift_note, meter_state, job_ref FROM emissions"
+            " WHERE job_ref=? AND"
+            " declared_basis='credit_line' AND actual_json IS NULL AND"
+            " (meter_state IS NULL OR meter_state IN ('hold','metering'))"
+            " AND (drift IS NULL OR drift != 2) AND"
+            " (drift_note IS NULL OR drift_note NOT LIKE 'closed%')",
             (job_ref,))]
         for r in rows:
             r["declared"] = json.loads(r.pop("declared_json") or "{}")
             r["emission_id"] = r.pop("id")
         return rows
+
+    # --- credit-line lifecycle (§7.1 v0.3): draw → HOLD → METER → SETTLE ----
+
+    _METER_OPEN_STATES = (None, "hold", "metering")
+
+    def meter_draw(self, emission_id: int, target: dict, *,
+                   policy: dict, epoch_s: float,
+                   now: float | None = None,
+                   settle: bool = False, settle_note: str = "") -> dict | None:
+        """§7.1 METER + §5 debit-direction rule: the cumulative charged
+        target per dim is ``max(L0 declared, L1 actual)`` — actuals may run
+        UNDER declaration (nmap retransmits, redirect chains) and never
+        refund; overage charges as consumed. Drift either direction is a
+        logged signal (notes; the >1.05× overage also trips ``drift=1`` at
+        :meth:`reconcile_emission`).
+
+        Idempotent: the row's ``metered_json`` carries the cumulative
+        charged total, so repeat polls charge only the delta. Any cascade
+        level unable to pay the delta mid-flight stamps the draw
+        ``meter_state='exhausted'`` (credit-line rows ONLY — the tool must
+        END: non-resumable crawls end, resumables pause via their own
+        status/cancel twins) and charges nothing that tick; the NEXT poll
+        with a higher target retries honestly (cumulative idempotence).
+        Measured (non-draw) emissions that run short leave the lifecycle
+        untouched but report the shortfall — they were already fully
+        charged at debit time."""
+        now = now if now is not None else time.time()
+        row = self.conn.execute(
+            "SELECT * FROM emissions WHERE id=?", (emission_id,)).fetchone()
+        if row is None:
+            return None
+        declared = json.loads(row["declared_json"] or "{}")
+        dims = {"engagement": row["engagement"],
+                "entry_partition": row["entry_partition"],
+                "exit_id": row["exit_id"], "range_axis": row["range_axis"],
+                "host_axis": row["host_axis"], "principal": row["principal"]}
+        is_credit = row["declared_basis"] == "credit_line"
+        metered = (json.loads(row["metered_json"])
+                   if row["metered_json"] else None)
+        if not isinstance(metered, dict):
+            # first meter: what the debit already charged in advance
+            metered = {d: (float(declared[d])
+                           if declared.get(d) is not None else 0.0)
+                       for d in DIMS}
+        cum = {d: round(float(metered.get(d) or 0.0), 6) for d in DIMS}
+        charge: dict[str, float] = {}
+        for d in DIMS:
+            decl_v = declared.get(d)
+            act_v = target.get(d)
+            tgt = 0.0
+            if decl_v is not None:
+                tgt = float(decl_v)
+            if act_v is not None:
+                try:
+                    tgt = max(tgt, float(act_v))
+                except (TypeError, ValueError):
+                    pass          # non-numeric actual never invents a charge
+            delta = round(tgt - cum[d], 6)
+            if delta > 0:
+                charge[d] = delta
+        rem_col = {"requests": "remaining_requests",
+                   "packets": "remaining_packets",
+                   "auth_events": "remaining_auth",
+                   "bytes": "remaining_bytes"}
+        if not charge:
+            self.conn.execute(
+                "UPDATE emissions SET metered_json=?, meter_state=CASE WHEN"
+                " meter_state='hold' THEN 'metering' ELSE meter_state END"
+                " WHERE id=?", (json.dumps(cum, sort_keys=True), emission_id))
+            if settle and is_credit and \
+                    row["meter_state"] not in ("exhausted", "settled",
+                                               "expired"):
+                # SETTLE at the release point even when the terminal true-up
+                # charges nothing (actuals ran under the declared advance).
+                self.conn.execute(
+                    "UPDATE emissions SET meter_state='settled', "
+                    "drift_note=COALESCE(NULLIF(?, ''), drift_note) WHERE"
+                    " id=?", (settle_note, emission_id))
+            self.conn.commit()
+            return {"emission_id": emission_id, "charged": False,
+                    "exhausted": False, "ledger_short": False,
+                    "settled": bool(settle and is_credit),
+                    "metered": cum, "meter_state": self.conn.execute(
+                        "SELECT meter_state FROM emissions WHERE id=?",
+                        (emission_id,)).fetchone()[0]}
+        c = self.conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            traces, deficit, short_levels = [], {}, []
+            for label, ldims in self._levels(dims):
+                key = _node_key(row["engagement"], ldims.get("entry_partition"),
+                                ldims.get("exit_id"), ldims.get("range_axis"),
+                                ldims.get("host_axis"), ldims.get("principal"))
+                self._upsert_node(key, {**dims, **ldims}, policy, now)
+                node = self._node_row(key)
+                balances = self._accrue(node, now, epoch_s)
+                updates = {}
+                for d in DIMS:
+                    if d not in charge:
+                        continue
+                    avail = balances[d]["remaining"]
+                    if avail < charge[d]:
+                        deficit[d] = deficit.get(d, 0.0) + round(
+                            charge[d] - avail, 6)
+                        short_levels.append(label)
+                    updates[d] = round(
+                        max(0.0, avail) - min(max(0.0, avail), charge[d]), 6)
+                if updates:
+                    c.execute(
+                        "UPDATE nodes SET remaining_requests=?, "
+                        "remaining_packets=?, remaining_auth=?, "
+                        "remaining_bytes=?, last_refill=? WHERE node_key=?",
+                        (updates.get(DIMS[0], balances[DIMS[0]]["remaining"]),
+                         updates.get(DIMS[1], balances[DIMS[1]]["remaining"]),
+                         updates.get(DIMS[2], balances[DIMS[2]]["remaining"]),
+                         updates.get(DIMS[3], balances[DIMS[3]]["remaining"]),
+                         now, key))
+                traces.append({"level": label, "node_key": key,
+                               "charged": {d: updates.get(d, 0.0)
+                                           for d in DIMS if d in charge}})
+            if deficit:
+                try:
+                    c.rollback()
+                except sqlite3.Error:
+                    logging.getLogger(__name__).debug(
+                        "swallowed rollback error in meter_draw", exc_info=True)
+                if is_credit and row["meter_state"] not in \
+                        ("settled", "expired", "exhausted"):
+                    note = (f"meter exhausted mid-flight: "
+                            f"{sorted(deficit)} short at level "
+                            f"{short_levels[0]} — the tool must END "
+                            "(non-resumable crawls end; resumables pause "
+                            "via their own status/cancel twins)")
+                    self.conn.execute(
+                        "UPDATE emissions SET meter_state='exhausted', "
+                        "metered_json=?, drift_note=? WHERE id=?",
+                        (json.dumps(cum, sort_keys=True), note, emission_id))
+                    self.conn.commit()
+                return {"emission_id": emission_id, "charged": False,
+                        "exhausted": is_credit,
+                        "ledger_short": bool(deficit),
+                        "shortfall_dims": sorted(deficit),
+                        "level": short_levels[0], "metered": cum}
+            cumulative = dict(cum)
+            for d in charge:
+                cumulative[d] = round(cumulative[d] + charge[d], 6)
+            c.execute(
+                "UPDATE emissions SET metered_json=?, meter_state=CASE WHEN"
+                " meter_state='hold' THEN 'metering' ELSE meter_state END"
+                " WHERE id=?",
+                (json.dumps(cumulative, sort_keys=True), emission_id))
+            if settle and is_credit and row["meter_state"] not in (
+                    "exhausted", "settled", "expired"):
+                # §7.1 SETTLE: the true-up is complete — the remainder beyond
+                # the metered total is released (nothing further debits this
+                # draw; the lifecycle closes).
+                self.conn.execute(
+                    "UPDATE emissions SET meter_state='settled', "
+                    "drift_note=COALESCE(NULLIF(?, ''), drift_note) WHERE"
+                    " id=?", (settle_note, emission_id))
+            c.commit()
+            return {"emission_id": emission_id, "charged": True,
+                    "charged_dims": charge, "metered": cumulative,
+                    "settled": bool(settle and is_credit and
+                                    row["meter_state"] not in
+                                    ("exhausted", "settled", "expired")),
+                    "meter_state": self.conn.execute(
+                        "SELECT meter_state FROM emissions WHERE id=?",
+                        (emission_id,)).fetchone()[0],
+                    "traces": traces}
+        except Exception:
+            try:
+                c.rollback()
+            except sqlite3.Error:
+                logging.getLogger(__name__).debug(
+                    "swallowed rollback error in meter_draw", exc_info=True)
+            raise
 
     # --- principals (§4.3, Phase A skeleton) ---------------------------------
 
@@ -1027,6 +1308,87 @@ class RationStore:
 
     # --- status + purge -------------------------------------------------------
 
+    # --- §10 signal spans (two-tier emission truth) ---------------------------
+
+    def record_span(self, emission_ref: int, *, provenance: str,
+                    response_class: str | None = None,
+                    window_count: float | None = None,
+                    host_axis: str | None = None, engagement: str | None = None,
+                    tool: str | None = None, detail: dict | None = None,
+                    ts: float | None = None) -> dict:
+        """Attach ONE signal span to an emission (§10): the per-request /
+        per-event truth attached by tools that SEE those events. Spans are
+        CONFIDENCE material for the controller (§8.3), never the throttle
+        accounting basis. ``provenance`` is ``'request'`` (request-level
+        event) or ``'aggregate'`` (batch tool summary span) — anything else
+        raises (authored honesty). Batch tools (nmap/masscan) emit SUMMARY
+        spans only (window count + coarse outcome)."""
+        prov = (provenance or "").strip().lower()
+        if prov not in ("request", "aggregate"):
+            raise ValueError(
+                f"span provenance must be 'request' or 'aggregate', "
+                f"got {provenance!r}")
+        ts = ts if ts is not None else time.time()
+        rc = (response_class or "").strip().lower()
+        cur = self.conn.execute(
+            "INSERT INTO signal_spans (emission_ref, ts, response_class, "
+            "provenance, window_count, host_axis, engagement, tool, "
+            "detail_json) VALUES (?,?,?,?,?,?,?,?,?)",
+            (int(emission_ref), float(ts), rc or None, prov,
+             float(window_count) if window_count is not None else None,
+             host_axis, engagement, tool, _opt_json(detail)))
+        self.conn.commit()
+        return {"span_id": int(cur.lastrowid), "emission_ref": int(emission_ref),
+                "provenance": prov}
+
+    def spans_for_emission(self, emission_ref: int) -> list[dict]:
+        rows = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM signal_spans WHERE emission_ref=?"
+            " ORDER BY ts, id", (int(emission_ref),))]
+        for r in rows:
+            r["detail"] = json.loads(r.pop("detail_json") or "null")
+        return rows
+
+    def span_summary(self, *, host_axis: str | None = None,
+                     engagement: str | None = None,
+                     before_ts: float | None = None,
+                     window_s: float = 300.0) -> dict:
+        """Span counts by provenance in a recent window for a (host_axis,
+        engagement) observation axis — the §8.3 verdict ingredient."""
+        before = before_ts if before_ts is not None else time.time()
+        q = ("SELECT provenance, COUNT(*) n FROM signal_spans WHERE"
+             " ts < ? AND ts >= ?")
+        params: list = [before, before - window_s]
+        if host_axis:
+            q += " AND host_axis=?"
+            params.append(host_axis)
+        if engagement is not None:
+            q += " AND engagement=?"
+            params.append(engagement)
+        q += " GROUP BY provenance"
+        out = {"request": 0, "aggregate": 0}
+        for r in self.conn.execute(q, params):
+            p = (r["provenance"] or "").strip().lower()
+            if p in out:
+                out[p] = int(r["n"] or 0)
+        return out
+
+    def span_lanes(self, *, window_s: float = 300.0, limit: int = 6,
+                   before_ts: float | None = None) -> list[dict]:
+        """Per (host_axis, engagement) span activity in the recent window —
+        the status lens for §8.3 provenance weighting."""
+        before = before_ts if before_ts is not None else time.time()
+        return [dict(r) for r in self.conn.execute(
+            "SELECT engagement, host_axis, MAX(ts) last_ts,"
+            " SUM(provenance='request') request_spans,"
+            " SUM(provenance='aggregate') aggregate_spans"
+            " FROM signal_spans WHERE ts < ? AND ts >= ?"
+            " GROUP BY engagement, host_axis"
+            " ORDER BY last_ts DESC LIMIT ?",
+            (before, before - window_s, int(limit)))]
+
+    # --- status + purge -------------------------------------------------------
+
     def status_snapshot(self, *, now: float | None = None) -> dict:
         """Plain-dict status for tests + the Phase B ``budget_status`` twin
         (which adds the LLM-facing framing). No verdicts here — data only."""
@@ -1042,12 +1404,18 @@ class RationStore:
             r["dims"] = json.loads(r.pop("dims_json") or "{}")
             r["max_vector"] = json.loads(r.pop("max_vector_json") or "{}")
             r["remaining"] = json.loads(r.pop("remaining_json") or "{}")
-        open_draws = [dict(r) for r in self.conn.execute(
-            "SELECT id, tool, ts, engagement, job_ref FROM "
+        r_open = [dict(r) for r in self.conn.execute(
+            "SELECT id, tool, ts, engagement, job_ref, meter_state FROM "
             "emissions WHERE declared_basis='credit_line' AND "
-            "actual_json IS NULL ORDER BY ts DESC LIMIT 20")]
+            "actual_json IS NULL AND (meter_state IS NULL OR meter_state"
+            " IN ('hold','metering')) AND (drift IS NULL OR drift=0) AND "
+            "(drift_note IS NULL OR drift_note NOT LIKE 'closed%') "
+            "ORDER BY ts DESC LIMIT 20")]
+        exhausted = self.conn.execute(
+            "SELECT COUNT(*) FROM emissions WHERE meter_state="
+            "'exhausted'").fetchone()[0]
         return {"nodes": nodes, "queue": queue, "reserves": reserves,
-                "open_draws": open_draws,
+                "open_draws": r_open, "exhausted_draws": int(exhausted or 0),
                 "generated": now}
 
     def purge_engagement(self, slug: str) -> dict:
@@ -1056,7 +1424,7 @@ class RationStore:
         tagged ``engagement=slug`` go; unarmed NULL-engagement lab rows stay."""
         counts = {}
         for table in ("nodes", "queue_items", "emissions", "principals",
-                      "tripwire_intervals", "reserves"):
+                      "tripwire_intervals", "reserves", "signal_spans"):
             cur = self.conn.execute(
                 f"DELETE FROM {table} WHERE engagement=?", (slug,))
             counts[table] = int(cur.rowcount)

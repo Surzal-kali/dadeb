@@ -34,6 +34,13 @@ Phase B surface. ``BUDGET_ENABLED`` gates the wiring, not this module
 (exercises the engine in tests regardless? no — preflight respects the
 knob; tests turn it on explicitly).
 
+Coverage boundary (§3 v0.3): this economy covers ONLY chokepoint-routed
+agent-driven traffic — the gate→dispatch→discharge seam in
+``daharness/executor.py`` and its poll/discharge hooks. Human kernel-lane
+IO and hand-run terminal work inherit HUMAN authority
+(gate-follows-actor) and are OUTSIDE the economy — the model can never be
+delegated a rule that binds its operator.
+
 No numpy in this engine (pure stdlib; §13 decision 2026-11-03).
 """
 
@@ -104,6 +111,29 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+_MONO_ANCHOR: tuple[float, float] = (time.monotonic(), time.time())
+"""Captured eagerly at IMPORT (never lazily): a faked/poisoned ``time.time``
+inside a test window must never become the anchor — every later ``budget_now``
+call would inherit the fantasy epoch for the life of the process."""
+
+
+def budget_now() -> float:
+    """§6.3 M4 clock discipline: wall-clock value derived from a MONOTONIC
+    delta — a wall-clock suspend or NTP step can never GRANT credit (faked
+    forward jump) nor withhold it (backward jump); with
+    ``BUDGET_MONO_CLOCK=0`` every call collapses to plain ``time.time()``
+    for tests that want raw wall time.
+
+    Linux caveat stated honestly: ``CLOCK_MONOTONIC`` EXCLUDES suspend, so
+    a suspended process grants nothing across its own sleep — the lane
+    could not have emitted traffic while it was frozen, so the suspended
+    interval is honest dead time, not confiscated budget."""
+    if not _env_bool("BUDGET_MONO_CLOCK", True):
+        return time.time()
+    mono0, wall0 = _MONO_ANCHOR
+    return wall0 + max(0.0, time.monotonic() - mono0)
+
+
 class BudgetStillShort(Exception):
     """Raised by a drain dispatcher when a drain dispatch returned the ration
     gate's ``budget_deferred`` envelope. The queue item must survive — it is
@@ -151,11 +181,23 @@ _MAX_SINGLE_CALL = {
 
 @dataclass(frozen=True)
 class Constitution:
-    """Immutable node policy the engine stamps onto every node."""
+    """Immutable node policy the engine stamps onto every node.
+
+    M2 (Appendix A YAML sketch): the optional keys map 1:1 from the sketched
+    constitution document — ``release_jitter``, ``controller`` authority
+    bounds, ``reserve_partitions`` sizing, ``cdn_origin_keys`` M5 pins,
+    ``reserve_tag_wildcards`` §9 tags, and ``store`` (``sqlite`` — the sole
+    leg; no postgres key exists). All are validated fail-closed at load."""
 
     defaults: dict[str, dict[str, float]]
     max_single_call: dict[str, float]
     epoch_s: float
+    release_jitter: dict[str, float] | None = None   # {"min": s, "max": s}
+    controller: dict[str, Any] | None = None          # authority bounds
+    reserve_partitions: dict[str, Any] | None = None  # entry/exit sizing
+    cdn_origin_keys: dict[str, str] | None = None     # M5 dimension pins
+    reserve_tag_wildcards: tuple[str, ...] = ()       # §9/L2 wildcard tags
+    store_backend: str = "sqlite"                     # the sole leg (M2)
 
     def policy(self) -> dict[str, dict[str, float]]:
         return {d: dict(self.defaults[d]) for d in DIMS}
@@ -196,38 +238,217 @@ class Constitution:
             raise ValueError("epoch_s must be > 0")
 
 
+_ALLOWED_CONST_KEYS = (
+    "defaults", "per_dim", "max_single_call", "epoch_seconds",
+    "release_jitter", "controller", "reserve_partitions",
+    "cdn_origin_keys", "reserve_tag_wildcards", "store")
+
+
+def _parse_per_dim(per_dim: Any) -> dict[str, dict[str, float]]:
+    """M2 ``per_dim`` form: ``{dim: {ceiling, floor, [refill_per_epoch]}}``.
+    Ceiling + floor REQUIRED, refill optional (inherits the code default) —
+    unknown keys are authoring errors (fail-closed, never silently dropped)."""
+    if not isinstance(per_dim, dict):
+        raise ValueError("constitution per_dim must be a map of dim -> spec")
+    out: dict[str, dict[str, float]] = {}
+    for d, spec in per_dim.items():
+        if d not in DIMS:
+            raise ValueError(f"constitution per_dim has unknown dim {d!r} "
+                             f"(known: {', '.join(DIMS)})")
+        if not isinstance(spec, dict):
+            raise ValueError(f"constitution per_dim.{d} must be a map")
+        cur: dict[str, float] = {}
+        for k in ("ceiling", "floor"):
+            if k not in spec or isinstance(spec[k], bool) \
+                    or not isinstance(spec[k], (int, float)):
+                raise ValueError(
+                    f"constitution per_dim.{d}.{k} missing/not numeric "
+                    "(M2 form requires ceiling + floor)")
+            cur[k] = float(spec[k])
+        refill = spec.get("refill_per_epoch", spec.get("refill"))
+        if refill is not None:
+            if isinstance(refill, bool) or not isinstance(refill, (int, float)):
+                raise ValueError(
+                    f"constitution per_dim.{d}.refill not numeric")
+            cur["refill_per_epoch"] = float(refill)
+        extra = set(spec) - {"ceiling", "floor", "refill_per_epoch", "refill"}
+        if extra:
+            raise ValueError(f"constitution per_dim.{d} has unknown "
+                             f"key(s) {sorted(extra)}")
+        out[d] = cur
+    return out
+
+
+def _parse_release_jitter(rj: Any) -> dict[str, float] | None:
+    if rj is None:
+        return None
+    if not isinstance(rj, dict) or "min" not in rj or "max" not in rj:
+        raise ValueError('constitution release_jitter must be {min: s, max: s}')
+    lo, hi = float(rj["min"]), float(rj["max"])
+    if lo < 0 or hi < lo:
+        raise ValueError("constitution release_jitter needs 0 <= min <= max")
+    return {"min": lo, "max": hi}
+
+
+def _parse_controller(cb: Any) -> dict[str, Any] | None:
+    if cb is None:
+        return None
+    if not isinstance(cb, dict):
+        raise ValueError("constitution controller must be a map")
+    allowed = {"max_transitions_per_hour", "max_throttle_down", "max_speed_up"}
+    extra = set(cb) - allowed
+    if extra:
+        raise ValueError(f"constitution controller has unknown key(s) "
+                         f"{sorted(extra)}")
+    out: dict[str, Any] = {}
+    tr = cb.get("max_transitions_per_hour")
+    if tr is not None:
+        if isinstance(tr, bool) or not isinstance(tr, (int, float)) or tr < 1:
+            raise ValueError("constitution controller."
+                             "max_transitions_per_hour must be a number >= 1")
+        out["max_transitions_per_hour"] = int(tr)
+    for k in ("max_throttle_down", "max_speed_up"):
+        v = cb.get(k)
+        if v is None:
+            continue
+        if v not in CONTROLLER_STATES:
+            raise ValueError(f"constitution controller.{k}={v!r} is not a "
+                             f"controller state "
+                             f"({', '.join(CONTROLLER_STATES)})")
+        out[k] = v
+    return out or None
+
+
+def _parse_partitions(rp: Any) -> dict[str, Any] | None:
+    if rp is None:
+        return None
+    if not isinstance(rp, dict) or not rp:
+        raise ValueError("constitution reserve_partitions must be a map of "
+                         "partition -> spec")
+    for k, v in rp.items():
+        if not isinstance(v, dict):
+            raise ValueError(
+                f"constitution reserve_partitions.{k} must be a map")
+    return rp
+
+
+def _parse_cdn_keys(spec: Any) -> dict[str, str] | None:
+    """M5: ``[origin-label, ...]`` or ``{pattern: origin-label}`` — the
+    config that pins a CDN-fronted host's dimension identity to the
+    DEFENDER'S per-origin counters instead of the edge-IP span."""
+    if spec is None:
+        return None
+    if isinstance(spec, list):
+        pairs = [(str(s), str(s)) for s in spec]
+    elif isinstance(spec, dict):
+        pairs = [(str(k), str(v) if v is not None else "") for k, v in
+                 spec.items()]
+    else:
+        raise ValueError("constitution cdn_origin_keys must be a list of "
+                         "labels or a {pattern: label} map")
+    out: dict[str, str] = {}
+    for pattern, label in pairs:
+        p = pattern.strip()
+        label = (label or "").strip() or p
+        if not p or not label:
+            raise ValueError("constitution cdn_origin_keys has an empty "
+                             "pattern or label")
+        out[p] = label
+    return out or None
+
+
+def _parse_wildcards(spec: Any) -> tuple[str, ...]:
+    if spec is None:
+        return ()
+    if not isinstance(spec, (list, tuple)):
+        raise ValueError("constitution reserve_tag_wildcards must be a "
+                         "list of tags")
+    return tuple(str(t).strip().lower() for t in spec if str(t).strip())
+
+
 def constitution(
     *, now: float | None = None
 ) -> Constitution:
     """The constitution, built from env at CALL time (lane convention:
     per-call env reads make tests and operator edits take effect without a
     process restart). Raises on invalid authoring — callers convert to the
-    fail-closed Unknown verdict, never green."""
+    fail-closed Unknown verdict, never green.
+
+    M2 authoring forms are accepted ON TOP of the legacy form: a JSON (or
+    .yml/.yaml file) document may carry ``per_dim`` (the Appendix A sketch),
+    ``epoch_seconds``, ``release_jitter``, the ``controller`` bounds,
+    ``reserve_partitions``, ``cdn_origin_keys`` (M5), the
+    ``reserve_tag_wildcards`` list (§9/L2), and ``store`` — which must be
+    ``sqlite`` (the sole leg; no postgres key exists). Unknown top-level
+    keys raise — authored config is never silently reinterpreted."""
     epoch_s = _env_float("BUDGET_EPOCH_SECONDS", _EPOCH_S_DEFAULT, minimum=1.0)
     defaults = {d: dict(_DIM_DEFAULTS[d]) for d in DIMS}
     max_single = dict(_MAX_SINGLE_CALL)
     raw = os.getenv("BUDGET_CONSTITUTION", "").strip()
     raw_file = os.getenv("BUDGET_CONSTITUTION_FILE", "").strip()
-    overrides = None
+    overrides: Any = None
     if raw_file:
         with open(raw_file) as fh:
-            overrides = json.load(fh)
+            text = fh.read()
+        try:
+            overrides = json.loads(text)
+        except json.JSONDecodeError:
+            if raw_file.lower().endswith((".yml", ".yaml")):
+                import yaml  # optional dep; JSON needs no reader
+                overrides = yaml.safe_load(text)
+            else:
+                raise
     elif raw:
         overrides = json.loads(raw)
+    rj: dict[str, float] | None = None
+    ctrl: dict[str, Any] | None = None
+    parts: dict[str, Any] | None = None
+    cdn: dict[str, str] | None = None
+    wild: tuple[str, ...] = ()
     if isinstance(overrides, dict):
+        unknown = [k for k in overrides if k not in _ALLOWED_CONST_KEYS]
+        if unknown:
+            raise ValueError(f"constitution has unknown key(s) {unknown} "
+                             f"(known: {', '.join(_ALLOWED_CONST_KEYS)})")
+        if overrides.get("per_dim") and overrides.get("defaults"):
+            raise ValueError("constitution mixes 'per_dim' and legacy "
+                             "'defaults' — pick one authoring form")
         user_defaults = overrides.get("defaults") or {}
         for d, spec in user_defaults.items():
             if d in DIMS and isinstance(spec, dict):
                 cur = dict(defaults[d])
                 cur.update({k: spec[k] for k in cur if k in spec})
                 defaults[d] = cur
+        for d, spec in _parse_per_dim(overrides.get("per_dim") or {}).items():
+            cur = dict(defaults[d])
+            cur.update(spec)
+            defaults[d] = cur
         user_max = overrides.get("max_single_call") or {}
         for d, v in user_max.items():
             if d in DIMS and v is not None:
                 max_single[d] = float(v)
+        es = overrides.get("epoch_seconds")
+        if es is not None:
+            if isinstance(es, bool) or not isinstance(es, (int, float)) \
+                    or float(es) <= 0:
+                raise ValueError("constitution epoch_seconds must be a "
+                                 "positive number")
+            epoch_s = float(es)
+        rj = _parse_release_jitter(overrides.get("release_jitter"))
+        ctrl = _parse_controller(overrides.get("controller"))
+        parts = _parse_partitions(overrides.get("reserve_partitions"))
+        cdn = _parse_cdn_keys(overrides.get("cdn_origin_keys"))
+        wild = _parse_wildcards(overrides.get("reserve_tag_wildcards"))
+        store_b = overrides.get("store")
+        if store_b is not None and str(store_b).strip().lower() != "sqlite":
+            raise ValueError(
+                f"constitution store must be 'sqlite' (the sole leg — "
+                f"no postgres key exists; got {store_b!r})")
     Constitution.validate(defaults, max_single, epoch_s)
     return Constitution(defaults=defaults, max_single_call=max_single,
-                        epoch_s=epoch_s)
+                        epoch_s=epoch_s, release_jitter=rj, controller=ctrl,
+                        reserve_partitions=parts, cdn_origin_keys=cdn,
+                        reserve_tag_wildcards=wild, store_backend="sqlite")
 
 
 # ─── BudgetVector ─────────────────────────────────────────────────────────────
@@ -428,6 +649,48 @@ def find_target(arguments: dict | None) -> str | None:
     return None
 
 
+def _cdn_origin_keys() -> dict[str, str]:
+    """M5 dimension identity overrides: ``BUDGET_CDN_ORIGIN_KEYS`` env (JSON
+    ``{pattern: label}`` or label list) FIRST, else the constitution block;
+    both absent → empty. A parse failure raises (authored-honest; callers
+    convert to the fail-closed path) — a typo'd pin list whose host keys
+    would silently key traffic by edge-IP instead of origin is exactly the
+    bug M5 exists to kill."""
+    raw = os.getenv("BUDGET_CDN_ORIGIN_KEYS", "").strip()
+    if raw:
+        spec = json.loads(raw)
+        keys = _parse_cdn_keys(spec)
+        if not keys:
+            raise ValueError("BUDGET_CDN_ORIGIN_KEYS parses to no labels")
+        return keys
+    try:
+        c = constitution()
+    except Exception:
+        return {}                # broken constitution has its own loud path
+    return c.cdn_origin_keys or {}
+
+
+def _cdn_pin(host_axis: str | None) -> str | None:
+    """The defender-side origin label for a host, when one is pinned. Match
+    is suffix-or-equal (``*.pattern`` in the appendix sketch collapses to
+    the pattern itself); a pinned host drops its mechanical range_axis —
+    defender counters are per-ORIGIN, not per edge-IP (M5)."""
+    if not host_axis:
+        return None
+    keys = _cdn_origin_keys()
+    if not keys:
+        return None
+    host = host_axis.lower().strip()
+    for pattern, label in keys.items():
+        p = pattern.strip().lower()
+        if p.startswith("*."):
+            p = p[2:]
+        p = p.lstrip(".").rstrip(".")
+        if p and (host == p or host.endswith("." + p)):
+            return label
+    return None
+
+
 def dims_for_target(target: str | None, *, principal: str | None = None,
                     exit_id: str | None = None,
                     entry_partition: str | None = None) -> dict:
@@ -436,11 +699,14 @@ def dims_for_target(target: str | None, *, principal: str | None = None,
 
     - ``host_axis``: numeric → the fleet's canonical span label (a bare IP
       or a CIDR/range collapsed); URL-embedded numeric hosts keep only the
-      host; hostname → lowercased (no DNS, ever).
+      host; hostname → lowercased (no DNS, ever). M5: a CDN-pinned host
+      resolves to its configured ORIGIN key instead — defender counters
+      are per-origin, not per edge-IP.
     - ``range_axis``: the bare single IP's containing /24 (a sweep of that
       /24 and its member hosts contend on the same range node). None when
       the host axis IS a multi-address span (sweeps debit the host node;
-      range=None avoids double-debiting one node) or the host is a name.
+      range=None avoids double-debiting one node), the host is a name, OR
+      the host is CDN-pinned (the origin key replaces span identity).
     - ``principal`` / ``exit_id`` / ``entry_partition``: carried through."""
     t = (target or "").strip()
     _numeric_axis, _numeric_span, _ = _lazy_fleet()
@@ -472,6 +738,12 @@ def dims_for_target(target: str | None, *, principal: str | None = None,
                 f"{ipaddress.IPv4Address(lo)}/24", strict=False)
             label = f"{net.network_address}-{net.broadcast_address}"
             range_axis = None if label == host_axis else label
+    origin = _cdn_pin(host_axis)
+    if origin:
+        # M5: the pinned ORIGIN key becomes the dimension identity; the
+        # mechanical edge-IP span axis is dropped for this dimension.
+        host_axis = origin
+        range_axis = None
     return {"engagement": None, "entry_partition": entry_partition or "default",
             "exit_id": exit_id, "range_axis": range_axis,
             "host_axis": host_axis, "principal": principal}
@@ -498,7 +770,7 @@ class Controller:
     def __init__(self, store: RationStore, *, hysteresis_k: int | None = None,
                  quiet_window_s: float | None = None,
                  max_transitions_h: int | None = None,
-                 now_fn: Callable[[], float] = time.time):
+                 now_fn: Callable[[], float] | None = None):
         self.store = store
         self.hysteresis_k = (hysteresis_k if hysteresis_k is not None
                              else _env_int("BUDGET_CTRL_HYSTERESIS_K", 2,
@@ -506,10 +778,35 @@ class Controller:
         self.quiet_window_s = (quiet_window_s if quiet_window_s is not None
                                else _env_float("BUDGET_CTRL_QUIET_WINDOW_S",
                                                120.0, minimum=1.0))
+        # M2 authority bounds (constitution controller block; env fallback).
+        bound_src: dict[str, Any] | None = None
+        try:
+            bound_src = constitution().controller
+        except Exception:
+            logger.debug("swallowed constitution read for controller bounds",
+                         exc_info=True)
+        bound_src = bound_src or {}
         self.max_transitions_h = (
             max_transitions_h if max_transitions_h is not None
-            else _env_int("BUDGET_CTRL_MAX_TRANSITIONS_H", 12, minimum=1))
-        self.now_fn = now_fn
+            else int(bound_src.get("max_transitions_per_hour")
+                     or _env_int("BUDGET_CTRL_MAX_TRANSITIONS_H", 12,
+                                 minimum=1)))
+        self.max_throttle_down = (bound_src.get("max_throttle_down")
+                                  or "cooldown")
+        self.max_speed_up = bound_src.get("max_speed_up") or "normal"
+        if self.max_throttle_down not in CONTROLLER_STATES:
+            self.max_throttle_down = "cooldown"
+        if self.max_speed_up not in CONTROLLER_STATES:
+            self.max_speed_up = "normal"
+        self.now_fn = now_fn if now_fn is not None else budget_now
+
+    @property
+    def _deepest_allowed_idx(self) -> int:
+        return CONTROLLER_STATES.index(self.max_throttle_down)
+
+    @property
+    def _highest_allowed_idx(self) -> int:
+        return CONTROLLER_STATES.index(self.max_speed_up)
 
     @staticmethod
     def _node_key(engagement: str | None, host_axis: str | None) -> str:
@@ -558,8 +855,15 @@ class Controller:
             rec["quiet_since"] = None
             if rec["streak"] >= self.hysteresis_k and rec["state"] != "cooldown":
                 idx = CONTROLLER_STATES.index(rec["state"])
-                deeper = CONTROLLER_STATES[min(idx + 1, len(CONTROLLER_STATES) - 1)]
-                if self._advance_window_ok(rec, now):
+                # M2 authority bound: the controller may NEVER deepen past
+                # max_throttle_down even on hard evidence.
+                deeper = CONTROLLER_STATES[min(
+                    idx + 1, len(CONTROLLER_STATES) - 1,
+                    self._deepest_allowed_idx)]
+                if deeper != rec["state"] and self._advance_window_ok(rec, now):
+                    # capped at the current depth: no posture change, no
+                    # transition-slot burn (§8.2) — the streak simply keeps
+                    # counting honest evidence.
                     rec["state"] = deeper
                     rec["entered"] = now
                     rec["streak"] = 0
@@ -578,7 +882,18 @@ class Controller:
                     and rec["state"] != "normal":
                 idx = CONTROLLER_STATES.index(rec["state"])
                 if self._advance_window_ok(rec, now):
-                    rec["state"] = CONTROLLER_STATES[idx - 1]
+                    if idx <= self._highest_allowed_idx:
+                        # M2 authority bound: already at/below the fastest
+                        # sanctioned recovery level — operator review, not
+                        # quiet-stretch decay, moves it again.
+                        target_idx = idx
+                    else:
+                        target_idx = idx - 1
+                    # M2 authority bound: recovery NEVER rises above
+                    # max_speed_up — a constitution that says the fastest
+                    # sanctioned recovery is `throttled` stays there until
+                    # operator review regardless of quiet stretches.
+                    rec["state"] = CONTROLLER_STATES[target_idx]
                     rec["entered"] = now
                     rec["streak"] = 0
                     rec["quiet_since"] = now  # next decay needs a full window
@@ -588,6 +903,41 @@ class Controller:
             entered=float(rec.get("entered") or now),
             transitions_hour=list(rec.get("transitions_hour") or []))
         return rec
+
+    def verdict(self, *, engagement: str | None = None,
+                host_axis: str | None = None,
+                now: float | None = None,
+                window_s: float | None = None) -> str:
+        """§8.3 H2 span-provenance verdict for a host lane — how much the
+        controller's observation can be TRUSTED:
+
+        - ``measured``: request-level spans landed in the window (the
+          web/session lane saw per-request events) — tight tripwire bounds
+          drive the auto-throttle.
+        - ``aggregate``: only batch SUMMARY spans (nmap/masscan emit one
+          per draw) — loose bounds only.
+        - ``unknown``: NO spans — no observed request-level truth; the
+          tight conservative bounds hold and the lane verdicts Unknown-ish
+          (the honesty rule: unobserved is unmeasured)."""
+        now = now if now is not None else self.now_fn()
+        window_s = window_s or max(self.quiet_window_s, 300.0)
+        try:
+            return self._verdict_impl(engagement, host_axis, now)
+        except Exception:
+            logger.debug("swallowed span consult in verdict", exc_info=True)
+            return "unknown"
+
+    def _verdict_impl(self, engagement, host_axis, now: float,
+                      window_s: float | None = None) -> str:
+        window_s = window_s or max(self.quiet_window_s, 300.0)
+        spans = self.store.span_summary(
+            host_axis=host_axis, engagement=engagement, before_ts=now,
+            window_s=window_s)
+        if spans.get("request"):
+            return "measured"
+        if spans.get("aggregate"):
+            return "aggregate"
+        return "unknown"
 
     def pacing(self, *, engagement: str | None = None,
                host_axis: str | None = None,
@@ -610,8 +960,23 @@ class Controller:
                     host_axis, engagement=engagement, before_ts=now,
                     window_seconds=win)
                 lower = max(float(i["lower"]) for i in iv)
-                if spent >= lower and factor > CONTROLLER_PACING["throttled"]:
-                    factor = CONTROLLER_PACING["throttled"]
+                # §8.3 H2 two-tier ledger: span provenance weights the
+                # bound's confidence. Request-level spans (and no spans at
+                # all — unknown keeps the conservative default) drive the
+                # tight bounds; AGGREGATE-only evidence widens the deadband
+                # so a coarse batch summary cannot slam the throttle on
+                # sparse data.
+                if spent >= lower:
+                    wide = 1.0
+                    if self._verdict_impl(
+                            engagement, host_axis, now,
+                            window_s=max(self.quiet_window_s, win)) == \
+                            "aggregate":
+                        wide = _env_float("BUDGET_SPAN_AGG_DEADBAND", 4.0,
+                                          minimum=1.0)
+                    if spent >= lower * wide and factor > \
+                            CONTROLLER_PACING["throttled"]:
+                        factor = CONTROLLER_PACING["throttled"]
         except Exception:
             logger.debug("swallowed exception in pacing(tripwire consult)",
                          exc_info=True)
@@ -664,7 +1029,7 @@ class RationEngine:
           the envelope carries the do-not-retry instruction,
         - ``{"decision": "admit", ...}`` — caller proceeds; the DEBIT is a
           separate atomic call (fleet-acquired ordering, §3)."""
-        now = now if now is not None else time.time()
+        now = now if now is not None else budget_now()
         if not _env_bool("BUDGET_ENABLED", DEFAULT_ENABLED):
             return {"decision": "disabled"}
         try:
@@ -680,8 +1045,16 @@ class RationEngine:
         decl, est_name, basis = resolve_declaration(
             tool_id, find_target(arguments), arguments)
         target = find_target(arguments)
-        dims = dims_for_target(target, principal=None, exit_id=exit_id,
-                               entry_partition=entry_partition)
+        try:
+            dims = dims_for_target(target, principal=None, exit_id=exit_id,
+                                   entry_partition=entry_partition)
+        except Exception as exc:
+            # L3: the engine's OWN config fault (e.g. unparseable CDN pin
+            # list) is admission fail-closed too — no escape hatch exists.
+            logger.debug("swallowed dims error in preflight", exc_info=True)
+            return {"decision": "unknown", "fail_closed": True,
+                    "reason": f"target dimensioning failed (fail-closed): "
+                              f"{exc!r}"}
         try:
             decided = self.store.admit_vector(
                 decl, dims, policy=self._policy(const),
@@ -736,7 +1109,7 @@ class RationEngine:
         """The atomic cascade debit — call AFTER the fleet unit is acquired,
         immediately before execution (§3). Returns the debit receipt
         (``committed`` True/False; commit includes the emission row)."""
-        now = now if now is not None else time.time()
+        now = now if now is not None else budget_now()
         target = find_target(arguments)
         dims = dims_for_target(target, principal=principal, exit_id=exit_id,
                                entry_partition=entry_partition)
@@ -790,7 +1163,7 @@ class RationEngine:
         drains through the async run_tool lane — which is awaited here.
         ``satisfied_check(item) -> job_id`` implements duplicate=satisfied at
         drain: no second debit, the live job wins."""
-        now = now if now is not None else time.time()
+        now = now if now is not None else budget_now()
         batch = batch or _env_int("BUDGET_DRAIN_BATCH", _DRAIN_BATCH_DEFAULT,
                                   minimum=1)
         results: list[dict] = []
@@ -799,9 +1172,14 @@ class RationEngine:
         # refill economy of one host never freezes another host's. A held
         # node re-normalizing with empty backlog stamps a JITTERED epoch
         # anchor so refill resumes only after the drain window.
+        authored_jitter: dict | None = None
         try:
             const = self.constitution()
             epoch_s = const.epoch_s if const is not None else _EPOCH_S_DEFAULT
+            # M2 release_jitter: {min,max} seconds between releases, authored
+            # in the constitution — overrides BUDGET_RELEASE_JITTER_S when
+            # present.
+            authored_jitter = const.release_jitter if const else None
         except Exception:
             logger.debug("swallowed constitution read in operator_tick",
                          exc_info=True)
@@ -936,8 +1314,20 @@ class RationEngine:
             # both work, the loop never freezes.
             dispatched += 1
             if release_base > 0.0 and dispatched < _eff_batch:
-                delay = min(random.uniform(0.0, release_base) * (1.0 / pacing),
-                            release_cap)
+                if authored_jitter:
+                    # M2 constitution-authored release band: the min is the
+                    # floor interval, the max the spread — pacing scaling
+                    # and the cap still apply (cap lifts only to fit the
+                    # authored max).
+                    delay = min(
+                        authored_jitter["min"] + random.uniform(
+                            0.0, max(0.0, authored_jitter["max"]
+                                     - authored_jitter["min"]))
+                        * (1.0 / pacing),
+                        max(release_cap, authored_jitter["max"]))
+                else:
+                    delay = min(random.uniform(0.0, release_base)
+                                * (1.0 / pacing), release_cap)
                 if delay > 0.0:
                     out_s = sleep_fn(delay)
                     if hasattr(out_s, "__await__"):
@@ -949,9 +1339,17 @@ class RationEngine:
 
     def reconcile(self, receipt: dict, actual: dict, *,
                   response_class: str | None = None,
-                  signals: dict | None = None) -> dict | None:
+                  signals: dict | None = None,
+                  settle: bool = False,
+                  settle_note: str = "") -> dict | None:
         """L1 true-up on a debit receipt. Tripwire seeds update on any
-        actuals; drift stamps APPEND (never rewrite the declared vector)."""
+        actuals; drift stamps APPEND (never rewrite the declared vector).
+
+        §5 M3/§7.1 METER (v0.3): actuals beyond the advance-charged
+        declared vector charge as consumed (reconcile to ``max(L0, L1)``
+        per dim — actuals may run UNDER declaration and never refund);
+        a credit-line draw's lifecycle advances hold → metering → settled
+        here (``settle=True`` at the release point)."""
         emission_id = receipt.get("emission_id")
         if not isinstance(emission_id, int):
             return None
@@ -967,6 +1365,25 @@ class RationEngine:
         # drift is the alarm, the seed is the meter.
         self.store.upsert_tripwire(
             receipt.get("tool") or receipt.get("tool_id") or "unknown", actual)
+        # §7.1 METER: charge the max(L0, L1) delta through the cascade. The
+        # meter can NEVER break a reconcile — an exhausted mid-flight draw
+        # is reported, not raised.
+        try:
+            const = self.constitution()
+            if const is not None:
+                mout = self.store.meter_draw(
+                    emission_id, actual, policy=self._policy(const),
+                    epoch_s=const.epoch_s, now=budget_now(),
+                    settle=settle, settle_note=settle_note)
+                if mout:
+                    out["meter"] = mout
+                    if mout.get("exhausted"):
+                        logger.warning(
+                            "[ration] credit-line draw %s exhausted mid-"
+                            "flight — tool must END (non-resumable crawls "
+                            "end; resumables pause via twins)", emission_id)
+        except Exception:
+            logger.debug("swallowed meter stage in reconcile", exc_info=True)
         # §8 lane: emissions feed BOTH the per-host tripwire interval
         # hypotheses (onset caps upper; sustained clean runs raise lower)
         # and the controller posture machine (reactions advance under
@@ -1033,7 +1450,7 @@ class RationEngine:
     # -- status ----------------------------------------------------------------
 
     def status(self, *, now: float | None = None) -> dict:
-        now = now if now is not None else time.time()
+        now = now if now is not None else budget_now()
         snap = self.store.status_snapshot(now=now)
         try:
             const = self.constitution()
@@ -1224,6 +1641,43 @@ def budget_status() -> str:
     except Exception as exc:
         logging.getLogger(__name__).debug(
             "swallowed exception in budget_status(draws)", exc_info=True)
+    try:
+        exhausted = snap.get("exhausted_draws")
+        if exhausted:
+            lines.append(f"exhausted credit-line draws: {exhausted} "
+                         "(died mid-flight — the tool must END; resumables "
+                         "pause via their status/cancel twins)")
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in budget_status(exhausted)", exc_info=True)
+    # §10 H2: span-provenance verdict per active lane — the confidence the
+    # controller currently weighs (measured = request-level, aggregate =
+    # batch summaries, unknown = pacing stays conservative).
+    try:
+        lanes = engine.store.span_lanes()
+        if lanes:
+            for lane in lanes[:4]:
+                lines.append(
+                    "spans: {eng} on {host} — {req} request / {agg} "
+                    "aggregate (prov {verdict})".format(
+                        eng=lane["engagement"], host=lane["host_axis"],
+                        req=lane["request_spans"],
+                        agg=lane["aggregate_spans"],
+                        verdict=("measured" if lane["request_spans"]
+                                 else "aggregate" if lane["aggregate_spans"]
+                                 else "unknown")))
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in budget_status(spans)", exc_info=True)
+    try:
+        const = engine.constitution()
+        if const is not None and getattr(const, "reserve_partitions", None):
+            parts = ", ".join(sorted(const.reserve_partitions))
+            lines.append(f"reserve partitions (advisory): {parts} — operator "
+                         "sizes the entry/exit split beyond the token tags")
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in budget_status(partitions)", exc_info=True)
     lines.append("note: budget short → work is DEFERRED to this queue; do "
                  "NOT retry the rejected call, check here or wait for the "
                  "operator drain.")
@@ -1242,6 +1696,10 @@ def budget_queue_status(tool: str = "",
                         state: str = "queued",
                         limit: int = 20) -> str:
     """Ration deferral-queue listing for the model lane.
+
+    NOTE (L4): TTL expiry of deferred items is notification-silent — the
+    item simply stops appearing once expired; there is NO push event. Poll
+    this status lane to notice the disappearance.
 
     Args:
         tool: Case-insensitive substring filter on the tool id; empty = all.
@@ -1374,7 +1832,7 @@ def _queue_defer(engine: RationEngine, tool_id: str, arguments: dict | None,
                  decl: dict, dims: dict, *, agent_id: str | None,
                  engagement: str | None, reason: str = "budget_short",
                  now: float | None = None) -> str:
-    now = now if now is not None else time.time()
+    now = now if now is not None else budget_now()
     qid = engine.store.enqueue_item(
         tool=tool_id, arguments=arguments or {}, decl=decl, dims=dims,
         reason=reason, agent_id=agent_id or "0", engagement=engagement,
@@ -1399,7 +1857,7 @@ def ration_gate(tool_id: str, arguments: dict | None, *,
     Never raises: a gate machinery failure for a REGISTERED tool is a
     fail-closed refusal envelope, never a silent pass (§13).
     """
-    now = now if now is not None else time.time()
+    now = now if now is not None else budget_now()
     if not _env_bool("BUDGET_ENABLED", DEFAULT_ENABLED):
         return None
     if not _estimator_engaged(tool_id):
@@ -1518,6 +1976,87 @@ def _harvest_inline_actuals(tool_id: str, result: dict) -> dict | None:
     return None
 
 
+def _span_rc(status_code: Any) -> str:
+    """Coarse per-span response class for the two-tier ledger (§10)."""
+    try:
+        sc = int(status_code)
+    except (TypeError, ValueError):
+        return ""
+    return "2xx" if 200 <= sc <= 299 else str(sc)
+
+
+def _record_inline_spans(engine: "RationEngine", receipt: dict,
+                         gate_state: dict, result: dict) -> int:
+    """§10 two-tier ledger (H2): the web/session lane SEES per-request
+    events — attach one ``request``-provenance span per hop so the
+    controller (§8.3) can weight its tripwire bounds as measured. Best
+    effort; spans never break a discharge."""
+    emission_id = receipt.get("emission_id")
+    if not isinstance(emission_id, int):
+        return 0
+    inner = result.get("result") if isinstance(result.get("result"), dict) \
+        else result
+    if not isinstance(inner, dict):
+        return 0
+    events: list[tuple[str | None, str]] = []
+    hops = inner.get("hops")
+    if isinstance(hops, list):
+        events = [((h or {}).get("status") if isinstance(h, dict) else None,
+                   (h or {}).get("url") if isinstance(h, dict) else None)
+                  for h in hops if h is not None]
+    elif inner.get("status_code") is not None:
+        events = [(inner.get("status_code"), inner.get("url"))]
+    if not events:
+        return 0
+    gate_dims = gate_state.get("dims") or {}
+    host_axis = gate_dims.get("host_axis")
+    engagement = gate_state.get("engagement") or gate_dims.get("engagement")
+    tool = (receipt.get("tool") or receipt.get("tool_id")
+            or gate_state.get("tool_id") or "")
+    n = 0
+    now = budget_now()
+    for status_code, _url in events:
+        try:
+            engine.store.record_span(
+                emission_id, provenance="request",
+                response_class=_span_rc(status_code),
+                host_axis=host_axis, engagement=engagement, tool=tool,
+                ts=now)
+            n += 1
+        except Exception:
+            logger.debug("swallowed span record (emission %s)", emission_id,
+                         exc_info=True)
+            break
+    return n
+
+
+def _record_batch_span(engine: "RationEngine", draw: dict,
+                       actual: dict, poll_result: dict | None) -> dict | None:
+    """§10 two-tier ledger (H2): batch tools (nmap/masscan/...) never see
+    per-request events — ONE aggregate SUMMARY span per draw at release
+    (window count + coarse outcome), provenance ``aggregate``, so the
+    controller's tight tripwire path never over-trusts it (§8.3)."""
+    emission_id = draw.get("emission_id")
+    if not isinstance(emission_id, int):
+        return None
+    status = str((poll_result or {}).get("status") or "").strip().lower()
+    rc = {"done": "ok"}.get(status, "timeout" if "timeout" in status
+                            else ("failed" if status in ("failed", "error",
+                                                         "cancelled")
+                                  else "unknown"))
+    try:
+        ref = engine.store.record_span(
+            emission_id, provenance="aggregate", response_class=rc,
+            window_count=float(actual.get("requests") or 0.0),
+            host_axis=draw.get("host_axis"), engagement=draw.get("engagement"),
+            tool=draw.get("tool"), detail={"job_id": draw.get("job_ref")})
+        return ref
+    except Exception:
+        logger.debug("swallowed aggregate span (emission %s)", emission_id,
+                     exc_info=True)
+        return None
+
+
 def ration_discharge(gate_state: dict | None, result: dict | None) -> dict | None:
     """Post-dispatch discharge for a debited call (§3 step 6):
 
@@ -1564,9 +2103,24 @@ def ration_discharge(gate_state: dict | None, result: dict | None) -> dict | Non
                 "emission_id": emission_id}
     actual = _harvest_inline_actuals(tool_id, result)
     if actual is not None:
+        # §10 H2: the session lane saw per-request events — attach request
+        # spans BEFORE the settle so the controller's next consult reads
+        # measured provenance.
+        spans_recorded = 0
         try:
-            out = engine.reconcile(receipt, actual)
+            spans_recorded = _record_inline_spans(engine, receipt,
+                                                  gate_state, result)
+        except Exception:
+            logger.debug("swallowed inline span recording (emission %s)",
+                         emission_id, exc_info=True)
+        try:
+            out = engine.reconcile(
+                receipt, actual, settle=True,
+                settle_note="settled at inline release — unused credit "
+                            "beyond the metered total released")
             return {"discharge": "reconciled", "actual": actual,
+                    "spans": spans_recorded,
+                    "meter": (out or {}).get("meter"),
                     "drift": (out or {}).get("drift"),
                     "emission_id": emission_id}
         except Exception as exc:
@@ -1598,6 +2152,47 @@ def _harvest_poll_actuals(result: dict | None) -> dict | None:
     return None
 
 
+def meter_poll_job(job_id: str, poll_result: dict | None = None) -> dict:
+    """§7.1 METER hook for NON-terminal polls: every poll of an in-flight
+    job bills the deterministic-actuals delta (``max(L0, L1)`` per dim, M3)
+    through the cascade. A draw that exhausts mid-flight reports so — the
+    tool must END (non-resumable crawls end; resumables pause via their own
+    status/cancel twins). Best-effort: a bug here must never break polling.
+    Partial actuals do NOT stamp reconcile/drift evidence — only the
+    terminal reconcile does that."""
+    try:
+        engine = get_engine()
+    except Exception:
+        logger.debug("swallowed engine unavailable in meter_poll_job",
+                     exc_info=True)
+        return {"draws": []}
+    try:
+        draws = engine.store.draws_for_job(str(job_id))
+        if not draws:
+            return {"job_ref": str(job_id), "draws": []}
+        actual = _harvest_poll_actuals(poll_result)
+        if actual is None:
+            return {"job_ref": str(job_id), "draws": [], "actual": None}
+        const = engine.constitution()
+        metered = []
+        if const is not None:
+            policy = engine._policy(const)
+            for draw in draws:
+                try:
+                    mout = engine.store.meter_draw(
+                        draw["emission_id"], actual, policy=policy,
+                        epoch_s=const.epoch_s, now=budget_now())
+                    metered.append({"emission_id": draw["emission_id"],
+                                    "meter": mout or {}})
+                except Exception:
+                    logger.debug("swallowed meter in poll (emission %s)",
+                                 draw["emission_id"], exc_info=True)
+        return {"job_ref": str(job_id), "draws": metered, "actual": actual}
+    except Exception as exc:
+        logger.debug("swallowed exception in meter_poll_job", exc_info=True)
+        return {"error": f"meter skipped: {exc!r}"}
+
+
 def reconcile_poll_job(job_id: str, poll_result: dict | None = None, *,
                        now: float | None = None) -> dict | None:
     """§7.1 draw-lifetime hook: called by ``poll_job`` on its first ``done``
@@ -1621,10 +2216,15 @@ def reconcile_poll_job(job_id: str, poll_result: dict | None = None, *,
                 try:
                     out = engine.reconcile(
                         {"emission_id": draw["emission_id"],
-                         "tool": draw["tool"]}, actual)
+                         "tool": draw["tool"]}, actual,
+                        settle=True,
+                        settle_note="settled at job release — unused credit "
+                                    "beyond the metered total released")
+                    _record_batch_span(engine, draw, actual, poll_result)
                     closed.append({"emission_id": draw["emission_id"],
                                    "reconciled": True,
                                    "actual": actual,
+                                   "meter": (out or {}).get("meter"),
                                    "drift": (out or {}).get("drift")})
                     continue
                 except Exception:
@@ -1648,7 +2248,7 @@ def sweep_draws(*, jobs_getter=None, now: float | None = None) -> int:
     is gone honest-closes ('job row gone'), an UNBOUND draw past the TTL
     honest-closes ('staled'). No numbers are ever invented; budget_status
     surfaces the count. Returns rows closed."""
-    now = now if now is not None else time.time()
+    now = now if now is not None else budget_now()
     ttl_s = _env_float("BUDGET_DRAW_TTL_HOURS", _DRAW_TTL_H_DEFAULT,
                        minimum=0.1) * 3600.0
     try:
@@ -1684,7 +2284,9 @@ def sweep_draws(*, jobs_getter=None, now: float | None = None) -> int:
                 continue
             note = "closed: staled unbound draw past TTL — declared stands"
         try:
-            closed += 1 if store.close_draw(draw["emission_id"], note) else 0
+            closed += 1 if store.close_draw(
+                draw["emission_id"], note,
+                meter_state="expired") else 0   # §7.1 HOLD expiry
         except Exception:
             logger.debug("swallowed close in sweep_draws", exc_info=True)
     return closed

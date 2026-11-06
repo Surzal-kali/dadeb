@@ -275,6 +275,18 @@ def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:
         that can read the store).
     """
     result = get_store().poll(job_id)
+    # §7.1 METER hook (M1/M3): non-terminal polls bill the running
+    # consumption of open credit-line draws bound to this job — a draw that
+    # exhausts mid-flight reports so and the tool must END. Best-effort and
+    # never breaks polling.
+    if result.get("status") not in ("done", "failed"):
+        try:
+            from utils.ration import meter_poll_job
+
+            meter_poll_job(job_id, result)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "swallowed ration meter in poll_job", exc_info=True)
     # Poll-side fleet release (scale-doctrine rule: a finished job frees
     # its slot at the FIRST terminal observation — done OR failed; with
     # failures reporting "done" no longer, a crash-released slot must not
