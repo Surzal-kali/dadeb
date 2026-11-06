@@ -30,7 +30,8 @@ from replkit.core import (
     run_tool,
 )
 from replkit.ipython_embed import run_embedded_ipython
-from replkit.operator_cli import _engagement_command, _scope_command
+from replkit.operator_cli import (_budget_command, _engagement_command,
+                                  _scope_command)
 
 # ── Rich input (prompt_toolkit) ──────────────────────────────────────────────
 # Falls back to plain input() when prompt_toolkit isn't installed.  The
@@ -124,6 +125,17 @@ Tool REPL commands:
                          disarms (rows keep their slug). Credential material is
                          bounded by the 24h floor, not mid-engage scrubbing.
   engagement status|purge <slug>
+  budget [status|queue|defer|drain|set-phase|purge|constitution]
+                         Ration-engine operator levers: traffic budgets live in
+                         SQLite (independent of Postgres, fed by the scope gate).
+                         'budget status' prints node balances + backlog;
+                         'budget defer <tool_id> ...' stages a call into the
+                         queue (declared vector + dims resolved now); 'budget
+                         drain [--batch N]' dispatches due items (bg tools bind
+                         job_id, inline tools finish in place); 'set-phase'
+                         flips selected nodes normal/hold; 'purge' erases one
+                         engagement's budget rows.  The model gets read-only
+                         twins (budget_status / budget_queue_status).
   help                   This message
   quit / exit            Leave the REPL
 
@@ -307,6 +319,9 @@ async def repl_loop(manifests: list[ToolManifest]):
 
         elif cmd == "engagement":
             _engagement_command(rest)
+
+        elif cmd == "budget":
+            await _budget_command(rest)
 
         else:
             print(f"  Unknown command: {cmd}. Type 'help' for commands.")

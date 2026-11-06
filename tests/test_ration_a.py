@@ -1,0 +1,652 @@
+"""Phase A ration-engine tests (utils/ration_store.py + utils/ration.py).
+
+Covers the §15 Phase-A hooks: read-only preflight routing, the atomic
+cascade debit + emission append, L1 reconcile drift stamps, fail-closed
+Unknown verdicts, the L0 estimator registry (unregistered = credit-line),
+REJECT never-fit, the queue skeleton (enqueue/drain/brain-timeout/
+no_reenqueue/sweep), HOLD-mode floor accrual, and engagement-scoped purge.
+
+Store state is isolated per test via BUDGET_STORE_DIR -> tmp_path and the
+module's reset hooks.
+"""
+
+import json
+
+import asyncio
+
+import pytest
+
+import utils.ration as rt
+from utils.ration_store import DIMS, RationStore
+
+
+def asyncio_run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture
+def engine(tmp_path, monkeypatch):
+    (tmp_path / "budget").mkdir()
+    monkeypatch.setenv("BUDGET_STORE_DIR", str(tmp_path / "budget"))
+    monkeypatch.setenv("BUDGET_ENABLED", "1")
+    for k in ("BUDGET_CONSTITUTION", "BUDGET_CONSTITUTION_FILE",
+              "BUDGET_EPOCH_SECONDS", "BUDGET_QUEUE_TTL_HOURS",
+              "BUDGET_DRAIN_BATCH"):
+        monkeypatch.delenv(k, raising=False)
+    rt.reset_engine()
+    yield rt.get_engine()
+    rt.reset_engine()
+
+
+def _decl(**kw):
+    return {d: kw.get(d) for d in DIMS}
+
+
+def _dims(tool=None, **kw):
+    dims = rt.dims_for_target(kw.pop("target", "10.0.0.7"))
+    if tool:
+        dims["tool"] = tool
+    dims.update(kw)
+    return dims
+
+
+def _nodes(store):
+    return {r["node_key"]: dict(r) for r in store.conn.execute("SELECT * FROM nodes")}
+
+
+def _emissions(store):
+    return [dict(r) for r in store.conn.execute("SELECT * FROM emissions ORDER BY id")]
+
+
+# ─── preflight routing + debit math ──────────────────────────────────────────
+
+class TestAdmitAndDebit:
+    def test_admit_then_debit_deducts_every_level(self, engine):
+        const = rt.constitution()
+        policy, epoch = const.policy(), const.epoch_s
+        receipt = engine.store.debit_vector(
+            _decl(requests=1), _dims(), tool="tests.t",
+            policy=policy, epoch_s=epoch, max_single=const.max_single(),
+            now=1000.0, estimator="seed")
+        assert receipt["committed"] is True
+        assert receipt["emission_id"] == 1
+        # every cascade level (host + range + global) debited by exactly 1
+        by_host = by_range = by_global = 0
+        for key, node in _nodes(engine.store).items():
+            if node["host_axis"] == "10.0.0.7" and node["range_axis"] is None:
+                by_host = node["remaining_requests"]
+            elif node["range_axis"] == "10.0.0.0-10.0.0.255" and \
+                    node["host_axis"] is None:
+                by_range = node["remaining_requests"]
+            elif node["host_axis"] is None and node["range_axis"] is None:
+                by_global = node["remaining_requests"]
+        assert by_host == pytest.approx(599.0)
+        assert by_range == pytest.approx(599.0)
+        assert by_global == pytest.approx(599.0)
+        assert len(_emissions(engine.store)) == 1
+
+    def test_preflight_admit_routes_clean(self, engine):
+        out = engine.preflight("tests.fresh.tool", {"target": "10.0.0.7"},
+                               now=1000.0)
+        assert out["decision"] == "admit"
+        assert out["estimator"] == "unregistered"
+        assert out["declared_basis"] == "credit_line"
+
+    def test_refill_and_redebit(self, engine):
+        const = rt.constitution()
+        engine.store.debit_vector(
+            _decl(requests=600), _dims(), tool="tests.t",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        # one epoch later the node refilled 100 → a 50 call fits now
+        receipt = engine.store.debit_vector(
+            _decl(requests=50), _dims(), tool="tests.t",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0 + const.epoch_s)
+        assert receipt["committed"] is True
+
+
+# ─── atomicity (§5) ──────────────────────────────────────────────────────────
+
+class TestCascadeAtomicity:
+    def test_global_shortfall_rolls_back_host_and_emits_nothing(self, engine):
+        const = rt.constitution()
+        kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
+                  max_single=const.max_single())
+        s = engine.store
+        # drain host A + the shared global node to 1/600 spent
+        assert s.debit_vector(_decl(requests=1), _dims(target="10.0.0.1"),
+                              tool="tests.t", now=1000.0, **kw)["committed"]
+        # one half-epoch later: every node has 50 accrued (host A: 600 clamp)
+        # a SECOND-RANGE host (10.0.1.2) draws 100 — the global node drops
+        # to 500 while host/range for .1 stay untouched by this debit
+        assert s.debit_vector(_decl(requests=100), _dims(target="10.0.1.2"),
+                              tool="tests.t", now=1000.0 + 1800, **kw)["committed"]
+        # now host A (capped back at 600) CAN cover 600 but the global node
+        # (500) cannot — shortfall must surface at global and roll the host
+        # debit back untouched
+        receipt = s.debit_vector(_decl(requests=600),
+                                 _dims(target="10.0.0.1"), tool="tests.t",
+                                 now=1000.0 + 1800, **kw)
+        assert receipt["committed"] is False
+        assert receipt["decision"] == "enqueue"
+        assert receipt["level"] == "global"
+        assert receipt["shortfall_dims"] == ["requests"]
+        # host node still at its STORED ceiling-spent value (lazy accrual —
+        # balances persist only on debit writes; the projection refills at
+        # accrue-time) and exactly one emission row exists
+        host = [n for n in _nodes(s).values()
+                if n["host_axis"] == "10.0.0.1"][0]
+        assert host["remaining_requests"] == pytest.approx(599.0)
+        node = s._node_row(host["node_key"])
+        assert s._accrue(node, 1000.0 + 1800, const.epoch_s)["requests"][
+            "remaining"] == pytest.approx(600.0)  # clamped projection
+        # two committed debits, two emission rows — the rolled-back attempt
+        # wrote nothing
+        assert len(_emissions(s)) == 2
+
+    def test_shortfall_at_host_reports_level(self, engine):
+        const = rt.constitution()
+        kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
+                  max_single=const.max_single())
+        s = engine.store
+        assert s.debit_vector(_decl(requests=599), _dims(target="10.0.0.1"),
+                              tool="tests.t", now=1000.0, **kw)["committed"]
+        out = s.debit_vector(_decl(requests=10), _dims(target="10.0.0.1"),
+                             tool="tests.t", now=1000.0, **kw)
+        assert out["committed"] is False
+        assert out["level"] == "host"
+
+
+# ─── L1 reconcile (§10) ──────────────────────────────────────────────────────
+
+class TestReconcile:
+    def test_drift_trips_over_5pct_and_declared_never_rewritten(self, engine):
+        const = rt.constitution()
+        receipt = engine.store.debit_vector(
+            _decl(requests=10), _dims(), tool="tests.drift",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        out = engine.reconcile(receipt, {"requests": 11})
+        assert out["tripped"] is True
+        row = _emissions(engine.store)[0]
+        assert row["drift"] == 1
+        assert json.loads(row["declared_json"]) == _decl(requests=10)
+
+    def test_actual_at_declared_no_trip(self, engine):
+        const = rt.constitution()
+        receipt = engine.store.debit_vector(
+            _decl(requests=10, packets=100), _dims(), tool="tests.drift2",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        out = engine.reconcile(receipt, {"requests": 10, "packets": 99})
+        assert out["tripped"] is False
+
+    def test_reconcile_drift_seeds_tripwire(self, engine):
+        const = rt.constitution()
+        receipt = engine.store.debit_vector(
+            _decl(requests=10), _dims(), tool="tests.tw",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        engine.reconcile(receipt, {"requests": 20, "bytes": 4096})
+        row = engine.store.conn.execute(
+            "SELECT * FROM tripwire_estimates WHERE tool='tests.tw'").fetchone()
+        per = json.loads(row["per_dim_json"])
+        assert per["requests"] == 20.0        # first sample seeds directly
+        assert per["bytes"] == 4096.0         # undeclared dims still seed
+        assert row["samples"] == 1
+        engine.reconcile(receipt, {"requests": 4})
+        per = json.loads(engine.store.conn.execute(
+            "SELECT per_dim_json FROM tripwire_estimates WHERE "
+            "tool='tests.tw'").fetchone()["per_dim_json"])
+        assert per["requests"] == pytest.approx((20.0 * 1 + 4.0) / 2)
+
+    def test_reconcile_seeds_tripwire_on_any_actual(self, engine):
+        # §15 hook: the seed is the meter (updates on ALL actuals); drift
+        # is the alarm. No-trip reconciliation still feeds the average.
+        const = rt.constitution()
+        receipt = engine.store.debit_vector(
+            _decl(requests=10), _dims(), tool="tests.tw2",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        out = engine.reconcile(receipt, {"requests": 1})
+        assert out["tripped"] is False
+        row = engine.store.conn.execute(
+            "SELECT * FROM tripwire_estimates WHERE tool='tests.tw2'"
+        ).fetchone()
+        assert row is not None
+        assert json.loads(row["per_dim_json"])["requests"] == 1.0
+
+
+# ─── fail-closed Unknown (§13) ───────────────────────────────────────────────
+
+class TestFailClosed:
+    def test_store_construction_refuses_unwritable_dir(self, tmp_path):
+        bad = tmp_path / "not-a-dir"
+        bad.write_text("i am a file")
+        with pytest.raises(RuntimeError, match="unusable"):
+            RationStore(store_dir=bad)
+
+    def test_preflight_unknown_when_store_errors(self, engine, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("disk on fire")
+        monkeypatch.setattr(engine.store, "admit_vector", boom)
+        out = engine.preflight("tests.t", {"target": "10.0.0.7"}, now=1000.0)
+        assert out["decision"] == "unknown"
+        assert out["fail_closed"] is True
+
+    def test_dispatch_debit_unknown_on_store_error(self, engine, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("disk on fire")
+        monkeypatch.setattr(engine.store, "debit_vector", boom)
+        out = engine.dispatch_debit("tests.t", {"target": "10.0.0.7"},
+                                    now=1000.0)
+        assert out["committed"] is False
+        assert out["decision"] == "unknown"
+        assert out["fail_closed"] is True
+
+    def test_invalid_consitution_fail_closed(self, engine, monkeypatch):
+        monkeypatch.setenv("BUDGET_CONSTITUTION", json.dumps({
+            "defaults": {"requests": {"ceiling": 10.0,
+                                      "refill_per_epoch": 5.0, "floor": 0.0}},
+            "max_single_call": {"requests": 10.0}}))
+        out = engine.preflight("tests.t", {"target": "10.0.0.7"}, now=1000.0)
+        assert out["decision"] == "unknown"
+        assert out["fail_closed"] is True
+        assert "constitution invalid" in out["reason"]
+
+    def test_floor0_validation_message(self):
+        with pytest.raises(ValueError, match="permanent-HOLD"):
+            rt.Constitution.validate(
+                {"requests": {"ceiling": 10.0, "refill_per_epoch": 5.0,
+                              "floor": 0.0}, **{
+                    d: dict(rt._DIM_DEFAULTS[d]) for d in DIMS
+                    if d != "requests"}},
+                dict(rt._MAX_SINGLE_CALL), 3600.0)
+
+    def test_disabled_kill_switch(self, engine, monkeypatch):
+        monkeypatch.setenv("BUDGET_ENABLED", "0")
+        out = engine.preflight("tests.t", {"target": "10.0.0.7"}, now=1000.0)
+        assert out["decision"] == "disabled"
+
+
+# ─── L0 estimator registry (§4.2) ────────────────────────────────────────────
+
+class TestEstimatorRegistry:
+    def test_unregistered_tool_is_credit_line_and_admits(self, engine):
+        out = engine.preflight("tests.never.registered", {"target": "10.0.0.7"},
+                               now=1000.0)
+        assert out["decision"] == "admit"
+        assert out["declared"] == _decl()
+        assert out["estimator"] == "unregistered"
+        assert out["declared_basis"] == "credit_line"
+
+    def test_web_session_seed_is_measured(self, engine):
+        out = engine.preflight(
+            "auxiliaries.web_session.session_get", {"target": "10.0.0.7"},
+            now=1000.0)
+        assert out["decision"] == "admit"
+        assert out["declared"] == _decl(requests=1)
+        assert out["estimator"] == "web_session_get"
+        assert out["declared_basis"] == "measured"
+
+    def test_nmap_seed_estimates_packets_from_span_and_ports(self, engine):
+        out = engine.preflight(
+            "auxiliaries.nmap.run_nmap", {"target": "10.0.0.0/24",
+                                          "options": "-p 1-1000 -sV"},
+            now=1000.0)
+        assert out["decision"] == "admit"
+        assert out["declared"]["packets"] == 256 * 1000
+        assert out["declared_basis"] == "estimation"
+
+    def test_estimator_error_falls_to_credit_line(self, engine):
+        @rt.register_estimator("tests.broken", basis="estimation",
+                               name="broken_seed")
+        def _broken(target, arguments):
+            raise TypeError("boom")
+
+        out = engine.preflight("tests.broken", {"target": "10.0.0.7"},
+                               now=1000.0)
+        assert out["declared"] == _decl()
+        assert out["estimator"] == "broken_seed@error"
+        assert out["declared_basis"] == "credit_line"
+
+    def test_credit_line_admits_even_when_drained(self, engine):
+        const = rt.constitution()
+        engine.store.debit_vector(
+            _decl(requests=600), _dims(), tool="tests.t",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        out = engine.preflight("tests.open.tool", {"target": "10.0.0.7"},
+                               now=1000.0)
+        assert out["decision"] == "admit"
+
+
+# ─── REJECT never-fit (§7.1) ─────────────────────────────────────────────────
+
+class TestNeverFit:
+    def test_over_ceiling_declaration_uses_credit_line(self, engine):
+        @rt.register_estimator("tests.rejection_tool", basis="measured",
+                               name="too_big")
+        def _too_big(target, arguments):
+            return {"requests": 700}
+
+        out = engine.preflight("tests.rejection_tool", {"target": "10.0.0.7"},
+                               now=1000.0)
+        assert out["decision"] == "reject"
+        assert "reject" in out.get("instruction", "") or out.get("level")
+        assert len(_emissions(engine.store)) == 0
+
+    def test_nmap_full_sweep_vs_default_ceiling_is_rejected(self, engine):
+        # /24 × all 65535 ports under the default 2M-packet ceiling: honest
+        # NEVER-FIT — the constitution must be raised, not waited on.
+        out = engine.preflight(
+            "auxiliaries.nmap.run_nmap", {"target": "10.0.0.0/24",
+                                          "options": "-p-"},
+            now=1000.0)
+        assert out["decision"] == "reject"
+        assert out["declared"]["packets"] == 256 * 65535
+
+    def test_max_single_call_rejects(self, engine, monkeypatch):
+        monkeypatch.setenv("BUDGET_CONSTITUTION", json.dumps({
+            "defaults": {"requests": {"ceiling": 100.0,
+                                      "refill_per_epoch": 10.0,
+                                      "floor": 1.0}},
+            "max_single_call": {"requests": 50.0}}))
+        receipt = engine.store.debit_vector(
+            _decl(requests=60), _dims(), tool="tests.big",
+            policy=rt.constitution().policy(),
+            epoch_s=rt.constitution().epoch_s,
+            max_single=rt.constitution().max_single(), now=1000.0)
+        assert receipt["committed"] is False
+        assert receipt["decision"] == "reject"
+        assert receipt["level"] == "config"
+        assert receipt["shortfall_dims"] == ["requests"]
+
+
+# ─── queue skeleton (§7.2) ───────────────────────────────────────────────────
+
+class TestQueue:
+    def _short_call(self, engine, now=1000.0):
+        engine.store.debit_vector(
+            _decl(requests=600), _dims(), tool="tests.q",
+            policy=rt.constitution().policy(),
+            epoch_s=rt.constitution().epoch_s,
+            max_single=rt.constitution().max_single(), now=now)
+        return engine.preflight("auxiliaries.web_session.session_get",
+                                {"target": "10.0.0.7"}, now=now)
+
+    def test_enqueue_decision_carry_qid_and_instruction(self, engine):
+        out = self._short_call(engine)
+        assert out["decision"] == "enqueue"
+        assert out["queue_id"].startswith("q-")
+        assert "do NOT retry" in out["instruction"]
+        item = engine.store.get_item(out["queue_id"])
+        assert item["status"] == "queued"
+        assert item["tool"] == "auxiliaries.web_session.session_get"
+        assert item["agent_id"] == "0"
+
+    def test_duplicate_satisfied_skips_enqueue(self, engine):
+        out = engine.preflight(
+            "auxiliaries.web_session.session_get", {"target": "10.0.0.7"},
+            now=1000.0,
+            satisfied_check=lambda tool, args: 4321)
+        assert out["decision"] == "satisfied"
+        assert out["job_id"] == "4321"
+        queued = engine.store.due_items(now=1000.0)
+        assert queued == []
+
+    def test_operator_tick_drains_and_binds(self, engine):
+        out = self._short_call(engine)
+        dispatched = []
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: (dispatched.append(item) or {"job_id": 99}),
+            now=1005.0))
+        assert res["decision"] == "drained"
+        assert res["results"][0]["decision"] == "dispatched"
+        assert res["results"][0]["job_id"] == "99"
+        item = engine.store.get_item(out["queue_id"])
+        assert item["status"] == "launched"
+        assert item["job_ref"] == "99"
+        assert dispatched[0]["tool"] == "auxiliaries.web_session.session_get"
+
+    def test_tick_without_dispatcher_is_noop(self, engine):
+        self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(now=1005.0))
+        assert res["decision"] == "noop"
+        assert res["backlog"] == 1
+
+    def test_dispatch_raise_keeps_item_queued(self, engine):
+        self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: (_ for _ in ()).throw(RuntimeError("jvm")),
+            now=1005.0))
+        assert res["results"][0]["decision"] == "dispatch_failed"
+        item = engine.store.due_items(now=1006.0)
+        assert len(item) == 1 and item[0]["status"] == "queued"
+
+    def test_brain_timeout_is_cancelled_not_reenqueued(self, engine):
+        out = self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: {"brain_timeout": True}, now=1005.0))
+        assert res["results"][0]["decision"] == "brain_timeout_flagged"
+        item = engine.store.get_item(out["queue_id"])
+        assert item["status"] == "cancelled"
+        assert "brain_timeout" in item["notes_json"]
+        assert engine.store.due_items(now=1006.0) == []
+
+    def test_no_reenqueue_flag_items_are_flagged_not_dispatched(self, engine):
+        engine.store.enqueue_item(
+            tool="tests.q", arguments={}, decl=_decl(requests=1),
+            dims=_dims(), reason="budget_short", agent_id="0",
+            engagement=None, no_reenqueue=True, now=1000.0)
+        dispatched = []
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: (dispatched.append(item) or {"job_id": 1}),
+            now=1005.0))
+        assert res["results"][0]["decision"] == "flagged_for_human"
+        assert dispatched == []
+
+    def test_sweep_expired_cancels_only_queued(self, engine, tmp_path,
+                                              monkeypatch):
+        const = rt.constitution()
+        kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
+                  max_single=const.max_single())
+        engine.store.debit_vector(_decl(requests=600), _dims(),
+                                  tool="tests.sweep", now=0.0, **kw)
+        a = engine.preflight("auxiliaries.web_session.session_get",
+                             {"target": "10.0.0.7"}, now=1.0,
+                             agent_id="agent-a")
+        engine.store.enqueue_item(
+            tool="tests.sweep", arguments={}, decl=_decl(),
+            dims=_dims(), reason="x", agent_id="a", engagement=None,
+            ttl_hours=0.0, now=2000.0, no_reenqueue=False)  # pre-expired
+        n = engine.store.sweep_expired(now=2001.0)
+        assert n == 1
+        # the 24h-TTL enqueue item is untouched; only the ttl=0 one cancelled
+        assert engine.store.get_item(a["queue_id"])["status"] == "queued"
+
+    def test_drain_batch_cap_respected(self, engine, monkeypatch):
+        for i in range(5):
+            engine.store.enqueue_item(
+                tool="tests.q", arguments={}, decl=_decl(),
+                dims=_dims(), reason="x", agent_id="a", engagement=None,
+                now=1000.0 + i)
+        monkeypatch.setenv("BUDGET_DRAIN_BATCH", "2")
+        dispatched = []
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: (dispatched.append(item) or {"job_id": 1}),
+            now=1010.0))
+        assert len(dispatched) == 2
+        assert res["backlog_remaining"] == 3
+
+
+# ─── HOLD mode (§6.2) ────────────────────────────────────────────────────────
+
+class TestHoldMode:
+    def test_hold_accrues_at_floor_not_refill(self, engine):
+        const = rt.constitution()
+        kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
+                  max_single=const.max_single())
+        s = engine.store
+        assert s.debit_vector(_decl(requests=600), _dims(target="10.0.0.42"),
+                              tool="tests.h", now=1000.0, **kw)["committed"]
+        n = s.set_phase(mode="hold", host_axis="10.0.0.42")
+        assert n == 1
+        # normal refill would be +100; HOLD accrues at the +2 floor
+        receipt = s.debit_vector(_decl(requests=4),
+                                 _dims(target="10.0.0.42"),
+                                 tool="tests.h", now=1000.0 + const.epoch_s,
+                                 **kw)
+        assert receipt["committed"] is False, "4 > floor 2 → still short (HOLD)"
+        receipt = s.debit_vector(_decl(requests=2),
+                                 _dims(target="10.0.0.42"),
+                                 tool="tests.h", now=1000.0 + const.epoch_s,
+                                 **kw)
+        assert receipt["committed"] is True
+
+    def test_hold_never_zero_floor(self, engine):
+        engine.store.set_phase(mode="hold", host_axis="10.0.0.42") \
+            if engine.store._node_row("\x1f".join(
+                [""] * 4 + ["10.0.0.42", ""])) else None
+        # the honest guarantee lives in the constitution validator (floor 0
+        # forbidden) — HOLD accrual rate IS the floor, never zero.
+        row = engine.store.conn.execute(
+            "SELECT floor_json FROM nodes WHERE host_axis='10.0.0.42'"
+        ).fetchone()
+        if row is not None:
+            assert json.loads(row["floor_json"])["requests"] > 0
+
+    def test_hold_set_phase_requires_selector(self, engine):
+        with pytest.raises(ValueError, match="selector"):
+            engine.store.set_phase(mode="hold")
+
+
+# ─── principals + engagement attribution (§4.3) ─────────────────────────────
+
+class TestPrincipalsAndPurge:
+    def test_debit_attribution_and_principal_touch(self, engine):
+        receipt = engine.dispatch_debit(
+            "auxiliaries.web_session.session_post",
+            {"target": "10.0.0.7"}, now=1000.0, agent_id="agent-1",
+            engagement="lab-e", principal="admin")
+        assert receipt["committed"] is True
+        rows = _emissions(engine.store)
+        assert rows[0]["engagement"] == "lab-e"
+        assert rows[0]["agent_id"] == "agent-1"
+        assert rows[0]["budget_phase"] == "phase_a"
+        assert engine.store.distinct_principals(
+            host_axis="10.0.0.7", now=1000.0, window_s=3600.0 * 168) == 1
+
+    def test_unarmed_rows_are_null_engagement(self, engine):
+        engine.dispatch_debit("auxiliaries.web_session.session_get",
+                              {"target": "10.0.0.7"}, now=1000.0,
+                              agent_id="agent-1")
+        assert _emissions(engine.store)[0]["engagement"] is None
+
+    def test_purge_removes_only_engagement_rows(self, engine):
+        kw = dict(policy=rt.constitution().policy(),
+                  epoch_s=rt.constitution().epoch_s,
+                  max_single=rt.constitution().max_single())
+        s = engine.store
+        s.debit_vector(_decl(requests=1), _dims(target="10.0.0.7"),
+                       tool="tests.p", now=1000.0, **kw)               # NULL
+        s.debit_vector(_decl(requests=1), _dims(target="10.0.0.8"),
+                       tool="tests.p", now=1000.0, engagement="job-e",
+                       **kw)                                           # slugged
+        counts = s.purge_engagement("job-e")
+        assert counts["emissions"] == 1
+        rows = _emissions(s)
+        assert len(rows) == 1
+        assert rows[0]["engagement"] is None
+        assert all(n["engagement"] != "job-e" for n in _nodes(s).values())
+
+    def test_purge_counts_tripwire_as_zero(self, engine):
+        engine.store.upsert_tripwire("tests.p", {"requests": 3})
+        counts = engine.store.purge_engagement("whatever")
+        assert counts["tripwire_estimates"] == 0
+        assert engine.store.conn.execute(
+            "SELECT COUNT(*) FROM tripwire_estimates").fetchone()[0] == 1
+
+
+# ─── engine.status / budget knobs ────────────────────────────────────────────
+
+class TestStatus:
+    def test_status_snapshot_shape(self, engine):
+        st = engine.status(now=1000.0)
+        assert st["generated"] == 1000.0
+        assert st["backlog"] == 0
+        assert isinstance(st["nodes"], list)
+        st2 = engine.status(now=1001.0)
+        assert "queue" in st2
+
+    def test_reconstitute_re_stamps_policy(self, engine, monkeypatch):
+        const = rt.constitution()
+        engine.store.debit_vector(
+            _decl(requests=1), _dims(), tool="tests.rc",
+            policy=const.policy(), epoch_s=const.epoch_s,
+            max_single=const.max_single(), now=1000.0)
+        monkeypatch.setenv("BUDGET_CONSTITUTION", json.dumps({
+            "defaults": {"requests": {"ceiling": 99.0,
+                                      "refill_per_epoch": 9.0,
+                                      "floor": 1.0}},
+            "max_single_call": {"requests": 50.0}}))
+        new_const = rt.constitution()
+        engine.store.reconstitute(None, policy=new_const.policy())
+        for node in _nodes(engine.store).values():
+            assert json.loads(node["ceiling_json"])["requests"] == 99.0
+        # and the next debit uses the new ceiling without erroring
+        out = engine.store.debit_vector(
+            _decl(requests=50), _dims(), tool="tests.rc",
+            policy=new_const.policy(), epoch_s=new_const.epoch_s,
+            max_single=new_const.max_single(), now=1000.0)
+        assert out["committed"] is True
+
+
+# ─── registry lock regression (the 2025 self-deadlock) ───────────────────────
+
+class TestRegistry:
+    def test_seed_then_register_on_same_thread_does_not_deadlock(self):
+        # ensure_seed_estimators holds _ESTIMATORS_LOCK while the decorator
+        # inside takes it again — a plain Lock hung forever here (found live
+        # in the first smoke run; RLock is the fix).
+        rt.ensure_seed_estimators()
+        assert "auxiliaries.web_session.session_get" in rt._ESTIMATORS
+
+    def test_bad_basis_rejected(self):
+        with pytest.raises(ValueError, match="basis"):
+            rt.register_estimator("tests.bad", basis="vibes")
+
+    def test_budget_vector_validation(self):
+        with pytest.raises(ValueError, match=">= 0"):
+            rt.BudgetVector(requests=-1)
+        assert rt.BudgetVector(requests=None).as_dict() == _decl()
+
+
+# ─── dims resolution (§4.2 node identity) ────────────────────────────────────
+
+class TestDims:
+    def test_bare_ip_gets_containing_slash24_range(self):
+        d = rt.dims_for_target("10.0.0.7")
+        assert d["host_axis"] == "10.0.0.7"
+        assert d["range_axis"] == "10.0.0.0-10.0.0.255"
+
+    def test_cidr_is_its_own_host_axis_no_range(self):
+        d = rt.dims_for_target("10.0.0.0/24")
+        assert d["host_axis"] == "10.0.0.0-10.0.0.255"
+        assert d["range_axis"] is None
+
+    def test_url_host_numeric(self):
+        d = rt.dims_for_target("http://10.0.0.9/admin")
+        assert d["host_axis"] == "10.0.0.9"
+        assert d["range_axis"] == "10.0.0.0-10.0.0.255"
+
+    def test_hostname_no_dns(self):
+        d = rt.dims_for_target("BLUE.HTB")
+        assert d["host_axis"] == "blue.htb"
+        assert d["range_axis"] is None
+
+    def test_find_target_key_order(self):
+        args = {"host": "a", "target": "b", "url": "c"}
+        assert rt.find_target(args) == "b"
+        assert rt.find_target({}) is None

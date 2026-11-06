@@ -284,6 +284,17 @@ def poll_job(job_id: str, *, tool_name: str = "") -> dict[str, Any]:
         from utils.fleet_scheduler import release_units_for_job
 
         release_units_for_job(result["job_id"])
+        # §7.1 draw lifetime: open credit-line budget draws bound to this
+        # job close (or reconcile with deterministic verdict actuals) at
+        # the first terminal observation, right after the fleet release.
+        # Best-effort — a draw reconcile bug must never break polling.
+        try:
+            from utils.ration import reconcile_poll_job
+
+            reconcile_poll_job(result["job_id"], result)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "swallowed ration draw reconcile in poll_job", exc_info=True)
     return result
 
 

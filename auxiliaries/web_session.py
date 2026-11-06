@@ -242,6 +242,20 @@ def _do_session_request(
 
     floor_waited = HostFloor.wait(host)
 
+    # Posture dwell (§11 seam): the ration controller's pacing adds a
+    # jittered extra wait for hosts whose lane degraded (soft_signal and
+    # below). Zero when the budget system is disarmed or pacing normal.
+    # Sync sleep is safe here — web tools run in worker threads.
+    try:
+        from utils.ration import ration_dwell
+
+        dwell_waited = ration_dwell(host)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug(
+            "swallowed ration dwell (non-fatal)", exc_info=True)
+        dwell_waited = 0.0
+
     profile = sticky_profile(host)
     merged = _merge_headers(headers, None, host=host)
     caller_ua_override = bool(headers and any(
