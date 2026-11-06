@@ -1751,8 +1751,13 @@ def budget_queue_status(tool: str = "",
     for r in rows:
         d = dict(r)
         age = max(0, now - float(d.get("requested") or now)) / 60.0
+        pos = ""
+        if d["status"] == "queued" and d.get("qid"):
+            _p = store.queued_position(d["qid"])
+            if _p is not None:
+                pos = f" pos={_p}"  # standing in the drain's launch order
         out.append(
-            f"  {d['qid']} [{d['status']}] {d['tool']} "
+            f"  {d['qid']} [{d['status']}]{pos} {d['tool']} "
             f"prio={d['priority']} waited={age:.1f}m "
             f"job={d.get('job_ref') or '-'} reason={d['reason']}"
             + (f" notes={d['notes_json']}" if d.get("notes_json") else ""))
@@ -1810,17 +1815,37 @@ def _current_engagement() -> str | None:
 def _budget_envelope(tool_id: str, *, status: str, reason: str | None = None,
                      queue_id: str | None = None, fail_closed: bool = False,
                      declared: dict | None = None,
-                     arguments: dict | None = None) -> dict:
+                     arguments: dict | None = None,
+                     instruction: str | None = None) -> dict:
     env = {"status": status, "tool_id": tool_id,
            "arguments": arguments or {}, "declared": declared}
     if status == "budget_deferred":
+        if instruction is None:
+            # Standing-in-line ground truth: drain-order position when a
+            # queue row really exists. Cosmetics never block the envelope
+            # (swallowed, logged) — an unpositioned honest instruction is
+            # better than a refused deferred dispatch.
+            _pos = ""
+            if queue_id:
+                try:
+                    _p = get_ration_store().queued_position(queue_id)
+                    if _p is not None:
+                        _pos = f" (position {_p} in queue)"
+                except Exception:
+                    logger.debug("swallowed position read in envelope",
+                                 exc_info=True)
+            instruction = ("budget short — do NOT retry this call; the item "
+                           "is queued and the operator tick will drain it "
+                           "(check budget_status / budget_queue_status)"
+                           + _pos)
+        # instruction is NOT None here only when a caller with different
+        # semantics passes it (e.g. held_pending has NO queue row —
+        # "the item is queued" would be a lie).
         env.update({
             "decision": "enqueue",
             "queue_id": queue_id,
             "defer_reason": "budget_short",
-            "instruction": ("budget short — do NOT retry this call; the item "
-                            "is queued and the operator tick will drain it "
-                            "(check budget_status / budget_queue_status)"),
+            "instruction": instruction,
         })
     else:
         env.update({
@@ -1926,6 +1951,12 @@ def ration_gate(tool_id: str, arguments: dict | None, *,
             tool_id, status="budget_deferred",
             reason=decision.get("reason") or
             "node in HOLD — backlog drain pending (held_pending)",
+            instruction=("node HOLD — dispatch withheld for the backlog "
+                         "drain; this call is NOT queued and no qid exists "
+                         "(the drain re-reads your request every tick while "
+                         "the node is held). Poll budget_status; if the "
+                         "operator later drains past your request, a fresh "
+                         "envelope with a qid will arrive."),
             declared=decision.get("declared"), arguments=arguments)
     if d == "enqueue":
         qid = decision.get("queue_id")

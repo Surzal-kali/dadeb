@@ -317,3 +317,77 @@ class TestListItems:
         engine.store.finish_item(rows[0]["qid"])
         assert [r["qid"] for r in engine.store.list_items(state="finished")] \
             == [rows[0]["qid"]]
+
+
+# ─── 2026-11-06: queue position + held_pending envelope honesty ──────────────
+
+class TestQueuePosition:
+    """Position must mirror the drain's EXACT launch order (priority DESC,
+    requested ASC) — a position computed on any other order teaches the
+    model to wait for a launch sequence that won't happen."""
+
+    def _enq(self, engine, prio, now, tool="tests.p"):
+        return engine.store.enqueue_item(
+            tool=tool, arguments={}, decl=_decl(), dims=_dims(),
+            reason="budget_short", agent_id="a", engagement=None,
+            priority=prio, now=now)
+
+    def test_position_matches_drain_order(self, engine):
+        late_low = self._enq(engine, 0, 1030.0)
+        high = self._enq(engine, 5, 1040.0)     # newer but higher prio → 1st
+        early_low = self._enq(engine, 0, 1010.0)
+        s = engine.store
+        assert s.queued_position(high) == 1
+        assert s.queued_position(early_low) == 2   # same prio, requested first
+        assert s.queued_position(late_low) == 3
+        out = rt.budget_queue_status()
+        import re as _re
+        assert f"pos=1" in out and f"pos=2" in out and f"pos=3" in out
+        rows = {m.group(1): m.group(2)
+                for m in _re.finditer(r"(q-[0-9a-f]+) \[queued\]( pos=\d+)?", out)}
+        assert rows[high].endswith("pos=1") and rows[late_low].endswith("pos=3")
+
+    def test_position_none_after_launch(self, engine):
+        q1 = self._enq(engine, 0, 1000.0)
+        q2 = self._enq(engine, 0, 1001.0)
+        engine.store.bind_item(q1, "777")
+        assert engine.store.queued_position(q1) is None  # launched → no queue slot
+        assert engine.store.queued_position(q2) == 1     # next in line moved up
+        out_all = rt.budget_queue_status(state="all")   # default shows queued only
+        assert "job=777" in out_all and " pos=" not in out_all.split(q1)[1].split("\n")[0]
+
+    def test_envelope_instruction_carries_position(self, engine, monkeypatch):
+        monkeypatch.setenv("BUDGET_ENABLED", "1")
+        self._enq(engine, 0, 1000.0)
+        q2 = self._enq(engine, 0, 1001.0)
+        env = rt._budget_envelope(
+            "tests.p", status="budget_deferred", queue_id=q2,
+            declared={}, arguments={})
+        assert "(position 2 in queue)" in env["instruction"], env["instruction"]
+
+    def test_envelope_no_position_when_qid_unknown(self):
+        env = rt._budget_envelope(
+            "tests.p", status="budget_deferred", queue_id="q-doesnotexist",
+            declared={}, arguments={})
+        assert "(position" not in env["instruction"]
+        assert "do NOT retry" in env["instruction"]
+
+    def test_held_pending_envelope_never_lies_about_queue(self, engine,
+                                                          monkeypatch, tmp_path):
+        """F-1 class regression pin: a held_pending deferral has NO queue row —
+        its instruction must say NOT queued, never 'the item is queued'."""
+        store = engine.store
+        # session_get = estimator-backed (a gate-less tool returns None and
+        # never reaches the envelope — the F-1 file's tool choice).
+        r = engine.dispatch_debit(
+            "auxiliaries.web_session.session_get", {"target": "10.9.9.9"},
+            agent_id="seed", engagement=None, now=1000.0)
+        assert r.get("committed"), r
+        store.set_phase(mode="hold", host_axis="10.9.9.9")
+        env = rt.ration_gate(  # sync fn (F-1 pattern); the envelope carries
+            "auxiliaries.web_session.session_get", {"target": "10.9.9.9"},
+            agent_id="fresh", session_id="fresh-sess", now=1001.0)
+        assert env["status"] == "budget_deferred"
+        assert env.get("queue_id") is None
+        assert "is queued" not in env["instruction"]
+        assert "NOT queued" in env["instruction"], env["instruction"]

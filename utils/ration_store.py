@@ -731,6 +731,22 @@ class RationStore:
         params.append(limit)
         return [dict(r) for r in self.conn.execute(sql, params)]
 
+    def queued_position(self, qid: str) -> int | None:
+        """1-based standing of a queued item under the drain's EXACT order
+        (priority DESC, requested ASC — mirroring budget_queue_status and
+        operator_tick's launch selection), or None when the item is not
+        currently queued (drained/expired/cancelled)."""
+        me = self.conn.execute(
+            "SELECT priority, requested FROM queue_items "
+            "WHERE qid=? AND status='queued'", (qid,)).fetchone()
+        if me is None:
+            return None
+        (ahead,) = self.conn.execute(
+            "SELECT COUNT(*) FROM queue_items WHERE status='queued' AND "
+            "(priority > ? OR (priority = ? AND requested < ?))",
+            (me["priority"], me["priority"], me["requested"])).fetchone()
+        return int(ahead) + 1
+
     def bind_item(self, qid: str, job_ref: str) -> None:
         cur = self.conn.execute(
             "UPDATE queue_items SET status='launched', job_ref=? WHERE "
