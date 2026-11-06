@@ -198,6 +198,8 @@ class Constitution:
     cdn_origin_keys: dict[str, str] | None = None     # M5 dimension pins
     reserve_tag_wildcards: tuple[str, ...] = ()       # §9/L2 wildcard tags
     store_backend: str = "sqlite"                     # the sole leg (M2)
+    source: str = "code"                              # provenance verdict:
+                                                      # code | inline | file <path>
 
     def policy(self) -> dict[str, dict[str, float]]:
         return {d: dict(self.defaults[d]) for d in DIMS}
@@ -386,6 +388,8 @@ def constitution(
     max_single = dict(_MAX_SINGLE_CALL)
     raw = os.getenv("BUDGET_CONSTITUTION", "").strip()
     raw_file = os.getenv("BUDGET_CONSTITUTION_FILE", "").strip()
+    source = f"file {raw_file}" if raw_file else (
+        "inline" if raw else "code")  # provenance verdict for the viewer
     overrides: Any = None
     if raw_file:
         with open(raw_file) as fh:
@@ -448,7 +452,8 @@ def constitution(
     return Constitution(defaults=defaults, max_single_call=max_single,
                         epoch_s=epoch_s, release_jitter=rj, controller=ctrl,
                         reserve_partitions=parts, cdn_origin_keys=cdn,
-                        reserve_tag_wildcards=wild, store_backend="sqlite")
+                        reserve_tag_wildcards=wild, store_backend="sqlite",
+                        source=source)
 
 
 # ─── BudgetVector ─────────────────────────────────────────────────────────────

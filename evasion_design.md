@@ -1,7 +1,7 @@
 # Evasion & Budget Engine — Design Doc
 
 **Version:** v0.3 · 2026-11-05
-**Status:** v0.1 draft + user red pen folded; 2026-11-05 chat threads (SQLite tier, fleet boundary, principal minting) resolved into the body; 2026-11-05 review pack folded (two-tier emission spans, coverage boundary, credit-line lifecycle, constitution sketch, debit direction, clock discipline, CDN origin keys). Build gate lifts per phase order.
+**Status:** v0.1 draft + user red pen folded; 2026-11-05 chat threads (SQLite tier, fleet boundary, principal minting) resolved into the body; 2026-11-05 review pack folded (two-tier emission spans, coverage boundary, credit-line lifecycle, constitution sketch, debit direction, clock discipline, CDN origin keys). Build gate lifts per phase order. 2026-11-05-late operator fold: constitution-file on-ramp (deployed .env template + man bullet + python3-yaml Suggests), viewer provenance and fail-closed refusal at `budget constitution`, and `.env.example` BUDGET_CONSTITUTION semantics corrected to inline-JSON-only (the path form is BUDGET_CONSTITUTION_FILE). §6.2 HOLD gating fix shipped separately as 6a7fbff.
 **BUILD GATE:** no implementation until the user signs off. Every "OPEN" item below is a user decision; every "DEFAULT" is my proposed default, vetoable.
 
 ---
@@ -229,6 +229,7 @@ Exhausted dispatch returns: defer hint + qid + estimated availability surface (m
 
 - **Deferred envelopes read as instructions, not transient failures (v0.2):** the model-facing ENQUEUE shape mirrors `budget_exhausted` — qid + defer_reason (`budget_short` | `host_busy`) + availability estimate + explicit "do not retry; poll `queue_status`." A model spinning on a full economy is the failure mode deferral exists to avoid.
 - **Turn-budget interaction (decided v0.2):** a returned ENQUEUE consumes the calling turn's tool-budget slot — the call happened, deferral is not free work. `budget_status`/`queue_status` stay terminal-lane (§12), so a deferral never traps the model without observability.
+- **Constitution provenance (2026-11-05-late operator fold):** the constitution is env-authored only — inline JSON (`BUDGET_CONSTITUTION`) or file path (`BUDGET_CONSTITUTION_FILE`; `.json` stdlib, `.yaml` optionally via `python3-yaml`) — read at call time per lane. The `budget constitution` viewer prints the live source (defaults | inline | file) and refuses cleanly on authored-config errors (fail-closed message, never a traceback). Deliberately NO CLI verb authors law — §8.2 mutation authority unchanged; the viewer reads law, it does not write it.
 
 ## 8. Controller
 

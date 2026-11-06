@@ -722,7 +722,21 @@ async def _budget_command(rest: str):
 
     elif sub == "constitution":
         from dataclasses import asdict as _asdict
-        print("  " + _json_or_none(_asdict(constitution())))
+        import os as _os
+        _raw = _os.getenv("BUDGET_CONSTITUTION", "").strip()
+        _rawf = _os.getenv("BUDGET_CONSTITUTION_FILE", "").strip()
+        try:
+            const = constitution()
+        except Exception as e:
+            print("  Constitution INVALID — the engine is fail-closed "
+                  "until the authored config is fixed.")
+            print(f"    {e}")
+            return
+        _prov = ("file " + _rawf) if _rawf else (
+            "inline JSON (BUDGET_CONSTITUTION)" if _raw
+            else "built-in defaults (code)")
+        print("  Source: " + _prov)
+        print("  " + _json_or_none(_asdict(const)))
 
     else:
         print(f"  Unknown budget subcommand: {sub!r}. Try 'budget' for help.")

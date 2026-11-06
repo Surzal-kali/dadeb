@@ -650,3 +650,112 @@ class TestDims:
         args = {"host": "a", "target": "b", "url": "c"}
         assert rt.find_target(args) == "b"
         assert rt.find_target({}) is None
+
+
+# ─── 2026-11-05-late: constitution file on-ramp + viewer provenance pins ─────
+
+class TestConstitutionFileOnramp:
+    """BUDGET_CONSTITUTION_FILE mechanics + the doc-inventory drift guard.
+
+    Pins the two real legs (inline JSON string vs file path) exactly as
+    .env.example documents them, a provenance verdict on the Constitution
+    dataclass, and clean refusal on unreadable files. Companion pins for
+    the operator viewer live in TestBudgetCLIViewProvenance."""
+
+    def _file(self, tmp_path, text, suffix):
+        p = tmp_path / f"constitution.{suffix}"
+        p.write_text(text)
+        return p
+
+    def test_yaml_file_loads(self, tmp_path, monkeypatch):
+        p = self._file(tmp_path, (
+            "per_dim:\n"
+            "  requests:\n"
+            "    ceiling: 700\n"
+            "    floor: 5\n"), "yaml")
+        monkeypatch.setenv("BUDGET_CONSTITUTION_FILE", str(p))
+        c = rt.constitution()
+        assert c.defaults["requests"]["ceiling"] == 700.0, c.defaults["requests"]
+
+    def test_json_file_loads_and_epoch(self, tmp_path, monkeypatch):
+        p = self._file(tmp_path, json.dumps(
+            {"epoch_seconds": 7200}), "json")
+        monkeypatch.setenv("BUDGET_CONSTITUTION_FILE", str(p))
+        assert rt.constitution().epoch_s == 7200.0
+
+    def test_inline_constitution_takes_a_path_and_fails_closed(self):
+        """The .env.example bug class: a PATH inside BUDGET_CONSTITUTION is
+        parsed as JSON text → guaranteed failure → engine fail-closed."""
+        import os as _os
+        _os.environ["BUDGET_CONSTITUTION"] = "/etc/daharness/budget.yaml"
+        try:
+            c = rt.constitution()
+            raise AssertionError(
+                f"path-in-inline must fail closed, got epoch_s={c.epoch_s}")
+        except Exception:
+            pass
+        finally:
+            _os.environ.pop("BUDGET_CONSTITUTION", None)
+
+    def test_provenance_verdict_on_dataclass(self, monkeypatch, tmp_path):
+        p = self._file(tmp_path, json.dumps({}), "json")
+        monkeypatch.setenv("BUDGET_CONSTITUTION_FILE", str(p))
+        c = rt.constitution()
+        assert getattr(c, "source", None), (
+            "Constitution must carry a provenance verdict for the viewer")
+
+    def test_env_example_knobs_are_read_by_ration(self):
+        """Doc-drift guard: every BUDGET_* knob documented in .env.example
+        must be read somewhere in the engine code. The inventory may never
+        document a knob the code ignores ('the docs are allowed to lie' is
+        the failure class this session caught)."""
+        import re as _re, pathlib as _pl
+        repo = _pl.Path(__file__).resolve().parent.parent
+        doc = (repo / ".env.example").read_text()
+        documented = set(_re.findall(r"#\s*(BUDGET_[A-Z_]+)=", doc))
+        assert documented, "inventory lost its BUDGET_* rows?"
+        engine_src = "\n".join(
+            (repo / f).read_text()
+            for f in ("utils/ration.py", "utils/ration_store.py"))
+        unread = {k for k in documented if k not in engine_src}
+        assert not unread, f".env.example documents knobs the engine never reads: {sorted(unread)}"
+
+
+class TestBudgetCLIViewProvenance:
+    """The viewer prints WHERE the live law came from and refuses cleanly
+    on authored-config errors (no raw traceback — operator honesty)."""
+
+    def _invoke(self, monkeypatch, tmp_path, **env):
+        # _budget_command is ASYNC (prints inside an event loop) and
+        # get_ration_store() runs before subcommand dispatch, so point the
+        # store at a hermetic dir too.
+        import asyncio as _a, io, contextlib
+        for k in ("BUDGET_CONSTITUTION", "BUDGET_CONSTITUTION_FILE"):
+            monkeypatch.delenv(k, raising=False)
+        (tmp_path / "budget").mkdir()
+        monkeypatch.setenv("BUDGET_STORE_DIR", str(tmp_path / "budget"))
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        from replkit import operator_cli as oc
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _a.run(oc._budget_command("constitution"))
+        return buf.getvalue()
+
+    def test_defaults_source_line(self, monkeypatch, tmp_path):
+        out = self._invoke(monkeypatch, tmp_path)
+        assert "Source: built-in defaults" in out, out
+
+    def test_file_source_line(self, monkeypatch, tmp_path):
+        p = tmp_path / "c.json"
+        p.write_text("{}")
+        out = self._invoke(monkeypatch, tmp_path,
+                           BUDGET_CONSTITUTION_FILE=str(p))
+        assert f"Source: file {p}" in out, out
+
+    def test_bad_file_refuses_cleanly(self, monkeypatch, tmp_path):
+        p = tmp_path / "bad.json"
+        p.write_text("{{{{not json")
+        out = self._invoke(monkeypatch, tmp_path,
+                           BUDGET_CONSTITUTION_FILE=str(p))
+        assert "Constitution INVALID" in out and "Traceback" not in out, out

@@ -47,7 +47,8 @@ Recommends: metasploit-framework, zaproxy, wordlists,
 # honestly when absent — optional, so Suggests and never Depends (masscan + the
 # engagement-Postgres lane already sit here).
 Suggests: amass, ldap-utils, exploitdb, ffuf, hydra, sqlmap,
- python3-pg8000, python3-psycopg, python3-pip, masscan, postgresql
+ python3-pg8000, python3-psycopg, python3-pip, python3-yaml,
+ masscan, postgresql
 Description: headless orchestration harness for authorized security research
  An external LLM (Open WebUI model, gateway or MCP client) semantically
  searches the vector-indexed tool registry (SQLite + numpy) and executes modules
