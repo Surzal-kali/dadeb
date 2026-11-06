@@ -237,3 +237,69 @@ def test_doctor_reports_unsupported_dialect(tmp_path, monkeypatch):
     assert report["available"] is True  # fail-open: still checked
     assert "temp*" in report["remediation"]
     assert any(f["file"] == "mod.py" for f in report["files"])
+
+
+# --- discovery integration --------------------------------------------------
+
+
+def test_discovery_skips_gitignored_pylibs(tmp_path, monkeypatch):
+    """End-to-end (live 2026-11-05 deb failure): discovery dynamically
+    imported every vendored module under a pip --target ``pylibs`` tree
+    as ``dacustoms.pylibs.<pkg>.*`` and failed wholesale — because the
+    ignore lane was only wired into the doctor, never into the registry's
+    walk. With the wiring, the root ``pylibs/`` rule prunes the tree
+    before either pass sees it: no manifests, no imports, no traceback
+    flood. The operator's own module (outside the ignored tree) still
+    mints, proving the rule is scoped and not a blanket skip."""
+    from daharness.registry import ToolRegistry
+
+    tree = tmp_path / "customs"
+    tree.mkdir()
+    (tree / "__init__.py").write_text("")
+    # A MINTABLE operator module (docstring + argparse = static-pass
+    # LOCAL_FILE tool) so the scope check below has something positive to
+    # assert on — custom_constants-style const modules mint nothing.
+    (tree / "my_probe.py").write_text(
+        '"""Operator probe tool: echoes a marker for selftest."""\n'
+        "import argparse\n\n"
+        "def main():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument(\"--marker\", default=\"x\", help=\"marker\")\n"
+        "    args = parser.parse_args()\n"
+        "    print(f\"marker={args.marker}\")\n\n"
+        "if __name__ == \"__main__\":\n"
+        "    main()\n"
+    )
+    # The flood shape: a site-packages-shape vendored tree (importable
+    # modules, no __init__.py at its root) that the operator gitignored.
+    pylibs = tree / "pylibs"
+    (pylibs / "fakevendor").mkdir(parents=True)
+    (pylibs / "fakevendor" / "__init__.py").write_text("vendored = True\n")
+    (pylibs / "fakevendor" / "core.py").write_text("VENDOR_CONST = 1\n")
+    (tree / ".gitignore").write_text("pylibs/\n")
+
+    monkeypatch.setenv("DACUSTOMS_DIR", str(tree))
+    reg = ToolRegistry.__new__(ToolRegistry)
+    reg._tool_instances = {}
+    manifests = reg.discover_local_tools()
+
+    module_ids = {m.module_id for m in manifests}
+    assert not any("pylibs" in mid for mid in module_ids), module_ids
+    # The probe module itself is NOT gitignored, so it mints normally.
+    assert any(mid == "dacustoms.my_probe" for mid in module_ids), sorted(module_ids)[:20]
+
+    # The scope check: the SAME walk with the rule removed must mint the
+    # operator module — the skip came from the ignore lane, not a bug in
+    # the walk itself. Re-assert the env first: phase 1's PASS 2 imports
+    # scanned packages whose module-level load_dotenv(override=True)
+    # rewrites DACUSTOMS_DIR process-wide (the pass-boundary contract is
+    # one snapshot per pass, so a lane calls with a coherent env).
+    monkeypatch.setenv("DACUSTOMS_DIR", str(tree))
+    (tree / ".gitignore").write_text("\n")
+    manifests = reg.discover_local_tools()
+    module_ids = {m.module_id for m in manifests}
+    clean = {mid for mid in module_ids if mid.startswith("dacustoms.")}
+    assert any("my_probe" in mid for mid in clean), clean
+    # pylibs members still never mint: ignored-tree modules never reach
+    # either pass, and vendored leaves lack docstring+argparse anyway.
+    assert not any("pylibs" in mid for mid in module_ids), module_ids

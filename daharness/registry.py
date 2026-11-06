@@ -508,8 +508,40 @@ class ToolRegistry(ExecutorMixin):
             "memories.py",
         }
 
+        # Customs-lane ignore spec (dacustoms_ignore): the operator's own
+        # .gitignore files decide what the customs tooling may see — venvs
+        # (stdlib venv ships '.gitignore' with '*'), pip --target pylibs
+        # trees, editor droppings. The doctor already spoke this dialect;
+        # discovery did NOT, so a vendored pylibs/ tree was swept as
+        # candidate operator tools and PASS 2 dynamically imported every
+        # vendored module as dacustoms.pylibs.* — failing wholesale with
+        # ModuleNotFoundError (pylibs is a site-packages-shape tree, not a
+        # package; no __init__.py). Live 2026-11-05 on the deb. Fail open
+        # toward CHECKING files: a broken ignore spec hides nothing.
+        _customs_root = dacustoms_dir()
+        customs_ignore_match = None
+        if _customs_root is not None:
+            try:
+                from dacustoms_ignore import load_ignore_matcher
+                customs_ignore_match, _ignore_sources, _ignore_unsupported = \
+                    load_ignore_matcher(_customs_root)
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "swallowed exception loading customs ignore spec in "
+                    "discover_local_tools — fail-open (nothing ignored)",
+                    exc_info=True)
+
         manifests = []
-        for base in ALLOWED_TOOL_ROOTS:
+        # ONE snapshot per pass: allowed roots are resolved once, BEFORE
+        # any module import. Module-level load_dotenv(override=True) in
+        # scanned packages (auxiliaries.program_scope, payloads.
+        # metasploiting) rewrites ambient env mid-walk — re-resolving the
+        # roots during the loop would let a .env DACUSTOMS_DIR pin swap
+        # the tree out from under the walk (customs files then land
+        # "not under any allowed tool root"; live repro 2026-11-05).
+        # One discovery pass sees one tree.
+        roots_snapshot = [Path(base) for base in ALLOWED_TOOL_ROOTS]
+        for base in roots_snapshot:
             if not base.exists():
                 continue
             for path in sorted(base.rglob("*.py")):
@@ -526,6 +558,21 @@ class ToolRegistry(ExecutorMixin):
                 if not include_tests and "tests" in path.parts:
                     continue
 
+                # Honor the customs dir's gitignore dialect (only for the
+                # customs root — the matcher's rules are scoped to that
+                # tree, they would be nonsense against in-tree roots).
+                # Dir rules prune whole subtrees: 'pylibs/' already matches
+                # 'pylibs/aio_pika/abc.py' via the (?:/.*|$) tail.
+                if customs_ignore_match is not None and _customs_root is not None:
+                    try:
+                        rel_probe = path.resolve().relative_to(
+                            _customs_root.resolve())
+                    except ValueError:
+                        rel_probe = None  # not under the customs root
+                    if rel_probe is not None and customs_ignore_match(
+                            rel_probe.as_posix(), is_dir=False):
+                        continue
+
                 # Guard: out-of-tree roots (e.g. ~/.dacustoms) are not
                 # relative to FRAMEWORK_ROOT.  Resolve against the matching
                 # allowed root instead of letting ValueError euthanize the
@@ -538,7 +585,7 @@ class ToolRegistry(ExecutorMixin):
                     rel_path = path.relative_to(FRAMEWORK_ROOT)
                 except ValueError:
                     root_for_id = next(
-                        (r for r in ALLOWED_TOOL_ROOTS if path.resolve().is_relative_to(r)),
+                        (r for r in roots_snapshot if path.resolve().is_relative_to(r)),
                         None,
                     )
                     if root_for_id is None:
@@ -548,9 +595,14 @@ class ToolRegistry(ExecutorMixin):
                         )
                         continue
                     rel_path = path.resolve().relative_to(root_for_id.resolve())
-                    # Check if this root is the customs dir.
-                    _customs = dacustoms_dir()
-                    if _customs is not None and root_for_id.resolve() == _customs.resolve():
+                    # Check if this root is the customs dir — against the
+                    # _customs_root snapshot from the top of the pass,
+                    # never a fresh dacustoms_dir(): scanned packages'
+                    # load_dotenv(override=True) may have rewritten the env
+                    # mid-walk, and the prefix must agree with the tree we
+                    # actually walked (see the roots_snapshot note above).
+                    if _customs_root is not None and \
+                            root_for_id.resolve() == _customs_root.resolve():
                         module_prefix = "dacustoms"
 
                 # --- PASS 1: Static Analysis (LOCAL_FILE) ---
