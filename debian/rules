@@ -52,6 +52,12 @@ override_dh_auto_install:
 	# collection — observed live on the deb 2026-10-20).
 	install -m 0644 pyproject.toml debian/daharness/usr/share/daharness/pyproject.toml
 	# profile conffile: /etc/daharness/daharness.env (system profile knobs)
+	# Default budget-ration constitution: canonical copy ships package-owned
+	# (NOT a conffile — content tracks the deb); daharness.postinst seeds
+	# /etc/daharness/budget.yaml from it when absent and activates the env
+	# on-ramp while it still holds the shipped placeholder form.
+	install -D -m 0644 packaging/reference/budget.constitution.yaml \
+		debian/daharness/usr/share/daharness/packaging/reference/budget.constitution.yaml
 	install -D -m 0644 packaging/etc/daharness.env debian/daharness/etc/daharness/daharness.env
 	# operator-shell plumbing: login shells source /etc/profile.d (the units'
 	# EnvironmentFile never reaches a human shell), so the system-profile

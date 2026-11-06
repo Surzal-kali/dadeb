@@ -759,3 +759,54 @@ class TestBudgetCLIViewProvenance:
         out = self._invoke(monkeypatch, tmp_path,
                            BUDGET_CONSTITUTION_FILE=str(p))
         assert "Constitution INVALID" in out and "Traceback" not in out, out
+
+
+class TestDefaultConstitutionYamlFidelity:
+    """packaging/reference/budget.constitution.yaml must mirror the no-env
+    law field-for-field (a shipped 'default' that differs from defaults is
+    a doc-lie of the BUDGET_CONSTITUTION class), and every commented
+    example block must be load-accurate."""
+
+    def _ref_path(self):
+        import pathlib as _pl
+        return (_pl.Path(__file__).resolve().parent.parent
+                / "packaging/reference/budget.constitution.yaml")
+
+    def test_reference_yaml_is_field_for_field_identical_to_defaults(
+            self, monkeypatch):
+        import dataclasses as _dc
+        ref = self._ref_path()
+        assert ref.exists(), "reference constitution yaml went missing"
+        monkeypatch.delenv("BUDGET_CONSTITUTION", raising=False)
+        monkeypatch.delenv("BUDGET_CONSTITUTION_FILE", raising=False)
+        baseline = rt.constitution()
+        monkeypatch.setenv("BUDGET_CONSTITUTION_FILE", str(ref))
+        fromfile = rt.constitution()
+        for f in _dc.fields(fromfile):
+            if f.name == "source":
+                continue  # provenance legitimately differs
+            assert getattr(fromfile, f.name) == getattr(baseline, f.name), (
+                f"reference yaml drifted from code defaults: {f.name}")
+
+    def test_reference_yaml_commented_examples_all_parse(self):
+        # Only the OPTIONAL-region example rows are un-commented (prose and
+        # the section marker are dropped), then the document must load AND
+        # the restored option keys must be exactly loader-schema keys.
+        import re as _re, yaml as _y
+        from utils.ration import _ALLOWED_CONST_KEYS as _allowed
+        text = self._ref_path().read_text()
+        tail = text.split("everything below is OPTIONAL", 1)[1]
+        keep = []
+        for line in tail.splitlines():
+            m = _re.match(r"^# (.*)$", line)
+            if not m:
+                continue
+            body = m.group(1)
+            if _re.match(r"^[a-z_]+:", body) or body.startswith((" ", "\t")):
+                keep.append(body)  # option key row or indented block member
+        doc = _y.safe_load("\n".join(keep))
+        assert {"release_jitter", "controller", "reserve_partitions",
+                "cdn_origin_keys", "reserve_tag_wildcards"} <= set(doc)
+        assert set(doc["controller"]) <= {"max_transitions_per_hour",
+                                          "max_throttle_down", "max_speed_up"}
+        assert set(doc) <= set(_allowed)

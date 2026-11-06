@@ -181,6 +181,36 @@ if [ -r "$_TEMPLATE" ]; then
 fi
 unset _TEMPLATE
 
+# Default budget-ration constitution (utils/ration.py): the deb ships the
+# canonical default law at /usr/share/daharness/packaging/reference/
+# budget.constitution.yaml (package-owned, content tracks the release) and
+# seeds the operator-facing live copy at /etc/daharness/budget.yaml ONLY
+# when absent — an existing file is operator-authored law and is NEVER
+# stomped on upgrades (same guarded-seeding doctrine as the scope template).
+# 0644 root:root: the law holds no secrets; the daharness service lanes read
+# it through the env leg, operators edit it via sudo.
+# While daharness.env still carries the shipped commented on-ramp line, use
+# it — sed flips ONLY that exact placeholder (pristine-gated, gateway-key
+# idiom), so an operator's own edit or re-comment of the line survives.
+_CONST_REF=/usr/share/daharness/packaging/reference/budget.constitution.yaml
+_CONST_ETC=/etc/daharness/budget.yaml
+if [ -r "$_CONST_REF" ]; then
+    if [ ! -e "$_CONST_ETC" ]; then
+        if install -m 0644 "$_CONST_REF" "$_CONST_ETC" 2>/dev/null; then
+            echo "daharness: seeded default budget constitution at $_CONST_ETC"
+            echo "daharness:   edit law via sudo; reload is per-call (see man daharness.env.5)"
+        fi
+    fi
+    if grep -q '^#BUDGET_CONSTITUTION_FILE=/etc/daharness/budget.yaml$' \
+        /etc/daharness/daharness.env 2>/dev/null; then
+        sed -i 's|^#BUDGET_CONSTITUTION_FILE=/etc/daharness/budget.yaml$|BUDGET_CONSTITUTION_FILE=/etc/daharness/budget.yaml|' \
+            /etc/daharness/daharness.env
+        echo "daharness: budget constitution on-ramp activated in daharness.env (default law live)"
+        echo "daharness:   un-wire: re-comment that line (any wording) + sudo rm or edit /etc/daharness/budget.yaml"
+    fi
+fi
+unset _CONST_REF _CONST_ETC
+
 # Gateway API key: generate once when the conffile placeholder is still
 # empty, so a stock deb never boots an unauthenticated gateway. The
 # in-place conffile edit triggers the upgrade prompt ("keep current" — the

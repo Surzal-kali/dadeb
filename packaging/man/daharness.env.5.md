@@ -112,8 +112,11 @@ WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
   `.env.example` for the full `BUDGET_*` inventory). `.json` is the
   stdlib-only leg; `.yaml`/`.yml` additionally needs `python3-yaml`
   (available via Suggests). Inline override via `BUDGET_CONSTITUTION`
-  (JSON only). Read at call time — no restart needed.
-  Shipped commented here: units inherit defaults until an operator opts in.
+  (JSON only). Read at call time — no restart needed. Commented in this
+  template; on deb installs the postinst seeds the DEFAULT law at
+  /etc/daharness/budget.yaml (only when the file is absent) and activates
+  this knob only while it still reads exactly as shipped — an operator
+  edit or re-comment always wins.
 
 **Postgres lane (HARNESS_DB_HOST / HARNESS_DB_PORT / HARNESS_DB_NAME /
 HARNESS_DB_PASSWORD_*)**
