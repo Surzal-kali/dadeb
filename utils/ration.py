@@ -572,6 +572,18 @@ def _target_host_count(target: str | None) -> int:
     return max(1, hi - lo + 1)
 
 
+# evasion_upgrade.md §2.2: per-line consumption vectors for wordlist-shaped
+# tools. Declared requests = line count (1 hit ≈ 1 request); bytes = lines
+# × WORDLIST_FILL_BYTES (request + response ≈ 8 KiB). The chunk lane's
+# slice arithmetic min()s these over max_single — the binding dim is the
+# tightest one (§2.2).
+WORDLIST_FILL_BYTES = 8192.0
+WORDLIST_TOOL_VECTORS = {
+    "payloads.ffuf.run_ffuf": {"requests": 1.0, "packets": None,
+                               "auth_events": None, "bytes": WORDLIST_FILL_BYTES},
+}
+
+
 def ensure_seed_estimators() -> None:
     """Idempotent registration of the Chapter-B seed families. Seeds err
     OPEN (None dims) — under-keying beats over-claiming (§4.2)."""
@@ -622,15 +634,45 @@ def ensure_seed_estimators() -> None:
         def _masscan(target, arguments):
             return {d: None for d in DIMS}  # rate × walltime unknown upfront
 
-        @register_estimator("auxiliaries.ffuf.run_ffuf",
-                            basis="credit_line", name="ffuf_open")
+        @register_estimator("payloads.ffuf.run_ffuf", basis="estimation",
+                            name="ffuf_lines")
         def _ffuf(target, arguments):
-            return {d: None for d in DIMS}  # wordlist-size dependent
+            # U2 wordlist economics (§2): `lane_decision` is the ONE
+            # predicate the estimator and the tool body both read, so
+            # preflight and body can never disagree about plan vs
+            # single-shot. Single-shot declares its true line vector; a
+            # plan issue is a ZERO dispatch (spend lands per chunk
+            # through the drain); a chunk dispatch declares its slice.
+            # Lane off / no wordlist / unreadable constitution → open
+            # credit line (the legacy shape).
+            from utils import wordlist_chunking as wlc
+            if not wlc.plan_enabled():
+                return {d: None for d in DIMS}
+            decision = wlc.lane_decision(
+                "payloads.ffuf.run_ffuf", arguments,
+                wlc.resolved_ffuf_wordlist(arguments))
+            if decision is None:
+                return {d: None for d in DIMS}
+            if decision["mode"] == "plan":
+                return {"requests": 0.0, "packets": None,
+                        "auth_events": None, "bytes": 0.0}
+            return dict(decision["decl"])
 
-        @register_estimator("auxiliaries.hydra.run_hydra",
-                            basis="credit_line", name="hydra_open")
+        @register_estimator("payloads.hydra.run_hydra", basis="credit_line",
+                            name="hydra_open")
         def _hydra(target, arguments):
             return {d: None for d in DIMS}  # auth-traffic; open-ended
+
+        @register_estimator("auxiliaries.web_login_brute.web_login_brute",
+                            basis="credit_line", name="web_login_brute_open")
+        def _wlb(target, arguments):
+            return {d: None for d in DIMS}  # wordlist-dependent; open-ended
+
+        @register_estimator(
+            "payloads.metasploiting.MetasploitClient.dispatch_metasploit",
+            basis="credit_line", name="msf_dispatch_open")
+        def _msf(target, arguments):
+            return {d: None for d in DIMS}  # msf module traffic; open-ended
 
         @register_estimator("payloads.sqlmap.run_sqlmap",
                             basis="credit_line", name="sqlmap_open")
@@ -1207,6 +1249,15 @@ class RationEngine:
         self.store.apply_backlog_modes(
             now, epoch_s, jitter_lo=epoch_s * (1.0 - spread),
             jitter_hi=epoch_s * (1.0 + spread))
+        # U2: observe wordlist-plan chunk jobs BEFORE selecting the batch —
+        # finished siblings free their slots and mint the next lazy window
+        # so the same tick can carry the plan forward.
+        try:
+            from utils.wordlist_chunking import advance_plans
+            advance_plans(now=now)
+        except Exception:
+            logger.debug("swallowed plan advance in operator_tick",
+                         exc_info=True)
         items = self.store.due_items(now=now)
         # §7.3 pacing: the tick scales itself to the controller posture —
         # throttle = smaller batch + jittered inter-release gaps; the floor
@@ -1309,6 +1360,19 @@ class RationEngine:
                 self.store.cancel_item(qid, note="brain_timeout — no auto "
                                                  "re-enqueue (may still run)")
                 results.append({"qid": qid, "decision": "brain_timeout_flagged"})
+                dispatched += 1
+                continue
+            if out.get("requeued"):
+                # U2 wordlist lane: the chunk's launch hit a fleet duplicate
+                # (the sibling unit owns this work) or a TRANSIENT fleet
+                # refusal — the wrapper re-enqueued the SAME chunk and the
+                # plan keeps advancing elsewhere. Nothing to bind; the churn
+                # counts against the batch like still_short so a plan in
+                # fleet-contended territory cannot burn endless ticks
+                # silently (§2.5).
+                results.append({"qid": qid, "decision": "requeued",
+                                "plan_id": out.get("plan_id"),
+                                "reason": out.get("reason")})
                 dispatched += 1
                 continue
             if out.get("finished"):
@@ -1713,7 +1777,8 @@ def budget_status() -> str:
     tags=["infra"])
 def budget_queue_status(tool: str = "",
                         state: str = "queued",
-                        limit: int = 20) -> str:
+                        limit: int = 20,
+                        plan_id: str = "") -> str:
     """Ration deferral-queue listing for the model lane.
 
     NOTE (L4): TTL expiry of deferred items is notification-silent — the
@@ -1724,12 +1789,51 @@ def budget_queue_status(tool: str = "",
         tool: Case-insensitive substring filter on the tool id; empty = all.
         state: queued|launched|finished|cancelled|all (default queued).
         limit: Max rows returned (default 20).
+        plan_id: wordlist-plan lens (U2): observe + advance that plan's
+            chunk ladder first, then report its frontier arithmetic.
 
     Returns:
-        Formatted backlog rows and a state-count summary.
+        Formatted backlog rows (plus a plan section) and a state-count
+        summary.
     """
     store = get_ration_store()
     limit = max(1, int(limit))
+    plan_section = ""
+    if plan_id:
+        try:
+            from utils.wordlist_chunking import advance_plans
+            advance_plans()
+        except Exception:
+            logger.debug(
+                "swallowed plan advance in budget_queue_status",
+                exc_info=True)
+        plan = store.plan_get(plan_id)
+        if plan is None:
+            plan_section = f"plan {plan_id}: not found"
+        else:
+            counts = store.plan_counts(plan_id)
+            total = int(counts.get("total_chunks") or 0)
+            minted = int(counts.get("minted") or 0)
+            lines_n = int(plan.get("lines") or 0)
+            plan_section = (
+                f"plan {plan_id} [{plan.get('state')}] {plan['tool']} "
+                f"wordlist={plan['wordlist']} lines={lines_n} "
+                f"chunk_size={plan['chunk_size']} "
+                f"({plan['binding_dim']}-bound) "
+                f"total={total} minted={minted} "
+                + " ".join(f"{k}={v}" for k, v in sorted(counts.items())
+                           if k not in ("total_chunks", "minted")))
+            chunk_rows = store.plan_chunks(plan_id)
+            for c in chunk_rows[:limit]:
+                meta = json.loads(c.get("chunk_meta_json") or "{}")
+                plan_section += (
+                    f"\n  {c['qid']} [{c['status']}] chunk "
+                    f"{int(c.get('chunk_index') or 0) + 1}/{total} "
+                    f"lines#{meta.get('chunk_offset')}-{meta.get('chunk_size')} "
+                    f"job={c.get('job_ref') or '-'}")
+            if len(chunk_rows) > limit:
+                plan_section += f"\n  … {len(chunk_rows) - limit} more chunks"
+    rows_sql = None
     if state and state != "all":
         rows = store.conn.execute(
             "SELECT * FROM queue_items WHERE status=? AND "
@@ -1766,7 +1870,8 @@ def budget_queue_status(tool: str = "",
     ).fetchall()
     summary = ", ".join(f"{c['status']}={c['n']}" for c in counts) or "empty"
     body = "\n".join(out[:int(limit)]) if out else "  (queue empty)"
-    return f"queue [{summary}]:\n{body}"
+    header = "queue" if not plan_section else f"{plan_section}\nqueue"
+    return f"{header} [{summary}]:\n{body}"
 
 
 # ─── Executor chokepoint integration (§3, §15 Phase D) ───────────────────────
@@ -2153,6 +2258,38 @@ def ration_discharge(gate_state: dict | None, result: dict | None) -> dict | Non
         why = result.get("reason") or result.get("error") or "no reason"
         return engine.compensate(receipt, gate_state.get("declared") or {},
                                  f"refused ({why}); debit reversed")
+    if status == "requeued":
+        # U2 chunk lane: this attempt launched NO traffic of its own (the
+        # sibling fleet unit owns the work, or the refusal was transient
+        # and the chunk is re-queued in its plan). The retry debits fresh,
+        # so reverse the attempt's debit — otherwise every requeue cycle
+        # leaks a slice.
+        try:
+            return engine.compensate(
+                receipt, gate_state.get("declared") or {},
+                "requeued — no traffic this attempt; debit reversed "
+                "(the drain re-runs the chunk)")
+        except Exception as exc:
+            logger.debug("swallowed requeue compensation", exc_info=True)
+            return {"discharge": "requeue_compensate_failed",
+                    "reason": str(exc)}
+    if status in ("chunk_plan",):
+        # U2 wordlist lane: the PLAN-ISSUE dispatch declared a zero vector
+        # (§2.1 — no traffic in this call; spend lands per chunk through
+        # the drain). There is nothing to meter: settle the emission at
+        # once so no zero-draw lingers in open_draws.
+        emission_id = receipt.get("emission_id")
+        try:
+            engine.reconcile(
+                receipt, {}, settle=True,
+                settle_note="wordlist plan issued — spend lands per chunk")
+            return {"discharge": "plan_issued",
+                    "emission_id": (emission_id
+                                    if isinstance(emission_id, int) else None)}
+        except Exception as exc:
+            logger.debug("swallowed plan-issue settle (emission %s)",
+                         emission_id, exc_info=True)
+            return {"discharge": "plan_settle_failed", "reason": str(exc)}
     emission_id = receipt.get("emission_id")
     if not isinstance(emission_id, int):
         return {"discharge": "no emission"}

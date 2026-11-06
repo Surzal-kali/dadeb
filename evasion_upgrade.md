@@ -1,11 +1,14 @@
 # BUDGET × WORDLIST TRAFFIC — GAP MAP + DESIGN SKETCH
 
-Status: DESIGN-STAGE. Nothing below is wire today except what's marked
-[WIRE]. Anchored to dadeb dev/wip @ 0e2b687 (evasion_design.md §7/§13,
-utils/ration.py ~:602-635 registry, ~:1360-1440 metering, ~:1790-1836
-envelope; utils/ration_store.py queued_position/bind_item).
-Author note: this doc was drafted after the 2026-11-06 queue-position +
-held_pending-honesty patch. Do not treat "proposed" items as shipped.
+Status: DESIGN-STAGE, reviewed 2026-11-06 (operator folds marked DECIDED).
+Nothing below is wire today except what's marked [WIRE]. Anchored to dadeb
+dev/wip @ 33edb33 (evasion_design.md §7/§13/§15, utils/ration.py ~:493-531
+registry, ~:602-635 seeds, ~:1360-1440 metering, ~:1790-1836 envelope;
+utils/ration_store.py enqueue_item/queued_position/bind_item).
+Author note: drafted after the 2026-11-06 queue-position +
+held_pending-honesty patch; review folds (2026-11-06) resolved the
+wrapper-vs-fleet interplay, lazy minting, and re-lettered §3 off the
+completed §15 phase ladder. Do not treat "proposed" items as shipped.
 
 ## 0. WHY THIS EXISTS (the one-paragraph thesis)
 
@@ -14,11 +17,12 @@ CLI modules) fails the allocation economy in one of two ways today:
 
 - If declared TRUTHFULLY (5M-line wordlist vs 600-request epoch
   ceiling), the never-fit guard rejects it forever. Nothing ever runs.
-- If declared as credit_line (current ffuf/hydra/masscan/sqlmap
-  estimators: all-None dims, basis="credit_line"), it admits NOW and
-  draws uncontained at whatever rate the tool decides — metered after
-  the fact at L1 reconcile, but never paced, never split, never
-  pausable mid-run.
+- If declared as open-ended (the REGISTERED-credit_line lanes today:
+  masscan/sqlmap estimators, all-None dims, basis="credit_line"), it
+  admits NOW and draws uncontained at whatever rate the tool decides
+  — metered after the fact at L1 reconcile, but never paced, never
+  split, never pausable mid-run. (ffuf/hydra are NOT in this class —
+  their seed estimator keys are stale, see 1.1.)
 
 The design premise: chunked-cycles is the third way. The wordlist job
 is re-modelled as N bounded dispatches, each individually allocatable,
@@ -31,19 +35,29 @@ construction instead of fit-by-lie (credit_line) or fit-never (reject).
 1.1 UNREGISTERED LANES FLY BLIND
   [WIRE] §13 rule: unregistered tools carry zero traffic semantics,
   gate returns None, dispatch un-metered.
-  Affected today: metasploit CLI (no estimator — user-correct), 
+  Affected today: metasploit CLI (minted as
+  payloads.metasploiting.MetasploitClient.dispatch_metasploit —
+  no estimator; user-correct), payloads/ffuf.py + payloads/hydra.py
+  (seed estimator keys are STALE — registered as auxiliaries.ffuf.*/ 
+  auxiliaries.hydra.* but the tools mint from payloads/; they resolve
+  "unregistered" and fly blind, review-verified; user-correct),
   auxiliaries/web_login_brute (in-tree, unregistered — user-correct),
   anything customs registers later.
-  Owner altitude: ENGINE — one estimator registry entry per lane.
+  NOTE: registering the WRONG (stale) keys is also a blind-flying
+  bug — the registry matches exact minted tool_ids.
+  Owner altitude: ENGINE — one estimator registry entry per lane,
+  keyed by the MINTED id.
   This is the cheapest, highest-leverage closure. Do first.
 
 1.2 CREDIT_LINE IS ADMIT-UNCONTAINED
-  [WIRE] estimators at ration.py:620-635 return {d: None for d in
-  DIMS}; preflight admits (ration.py:464 comment: "credit-line mode:
-  always admit, L1 true-up fixes later").
+  [WIRE] the registered open-ended lanes (masscan, sqlmap; seeds at
+  ration.py:620-635) return {d: None for d in DIMS}; preflight admits
+  (ration.py:464 comment: "credit-line mode: always admit, L1 true-up
+  fixes later").
   Gap: no pre-count, no pacing, no mid-run ceiling. A 10M-line ffuf
-  runs at full blast; meter_draw reports exhaustion AFTER it happens
-  ("exhausted mid-flight" warning, ration.py:1401).
+  (currently UNREGISTERED — 1.1) runs at full blast; meter_draw
+  reports exhaustion AFTER it happens ("exhausted mid-flight"
+  warning, ration.py:1401).
   Owner altitude: ENGINE (estimator upgrade) + WRAPPER (wordlist
   parsing/pagination flags).
 
@@ -52,8 +66,13 @@ construction instead of fit-by-lie (credit_line) or fit-never (reject).
   resumables pause via twins" — INTENDED behavior, no wrapper on the
   wire carries pause/resume semantics today (ffuf/hydra greps empty).
   Tools run to completion or operator-kills them.
-  Owner altitude: WRAPPER — resume hooks (ffuf: -of json + offset
-  replay; hydra: -o restore file; dirb-class: position bookmarks).
+  Owner altitude: WRAPPER — reduced by the chunk lane (§2): per-chunk
+  resume IS slice-file replay at offset, which the chunk deliverer
+  provides for free (chunk_meta.offset/slice_size). Upstream reality
+  (review-verified): ffuf has NO offset-resume flag; hydra -R
+  (restore-file replay) exists but is moot once chunks are slices.
+  Residual WRAPPER value: in-chunk pause for honest single-shot
+  fits (§7.1 "resumables pause") — parked behind the chunk lane.
 
 1.4 NO CHUNKED-CYCLE DELIVERY MODEL
   [WIRE] deferred queue exists (enqueue_item, operator_tick drain,
@@ -70,80 +89,218 @@ Principle: the queue IS the multi-cycle mechanism. Each chunk is an
 ordinary deferred item with honest per-chunk dims; operator_tick drains
 across epochs; queued_position shows the model where each chunk stands;
 bind_item gives each chunk's launch a job_ref for grounding; discharge
-binds actuals per chunk job. All four surfaces already exist — the new
-shape is the MINTER, not the transport.
+binds actuals per chunk job. Those surfaces exist [WIRE]; the new
+shapes are the MINTER (§2.2, lazy frontier + plan column), the poll
+lens (§2.3), and ONE drain branch (§2.5, requeued — the fleet
+interplay the original sketch missed).
 
-2.1 CHUNK ITEM SHAPE (proposed)
-  queue_items row gains (or notes_json carries):
-    chunk_meta = { total_chunks, chunk_index, wordlist_path, offset,
-                   slice_size, parent_plan_id }
+2.1 CHUNK ITEM SHAPE (proposed; lazy frontier minting DECIDED 2026-11-06)
+  queue_items gains a real `parent_plan_id` column + index (a
+  23K-row notes_json LIKE scan per poll does not stay sane — the
+  parent lens must be O(index), and notes_json stays free for its
+  existing status notes). Chunk identity rides chunk_meta:
+    chunk_meta = { plan_id, total_chunks, chunk_index, wordlist_path,
+                   offset, slice_size }
+  Mints are WINDOWS, not totals: the minter enqueues only the next
+  W = min(total_chunks, per-plan window, default ~drain batch)
+  chunks; each finished-chunk observation (drain finished branch, or
+  budget_queue_status's advance sweep) mints the next absent index.
+  A 5M-14M-line list at max_single 600 = 8,333–23,333 chunks — eager
+  minting of totals was rejected (TTL sweeps, row churn, poll cost).
+  enqueue_item's ttl_hours is scaled to the plan's expected duration;
+  the plan envelope states expected tick count + plan TTL honestly.
+  Slices materialize at DISPATCH time (offset/limit in chunk_meta →
+  the wrapper cuts the slice file then), never at mint time — N full
+  copies of a rockyou-sized list is a disk bomb, and mint-time files
+  outlive the queue rows' honesty.
   Drain order stays priority DESC, requested ASC — chunk i inherits
-  parent priority, requested stamps make in-chunk order FIFO.
+  parent priority; in-chunk FIFO is stamped explicitly
+  (enqueue_item(now=now + i*epsilon)) — ties on requested are
+  otherwise unspecified under that ORDER BY.
 
-2.2 MINTER CONTRACT (proposed, wrapper-altitude entry point)
-  A run_ffuf-style wrapper, given a wordlist + constitution ceiling:
+2.2 MINTER CONTRACT (proposed; formula corrected 2026-11-06)
+  A run_ffuf-style wrapper, given a wordlist + constitution:
     - wc -l the wordlist (estimation basis, seeds tripwire)
-    - slice into per-cycle budgets: ceil(lines / ceiling_requests)
-      chunks, each declaring requests=slice_size truthfully
-    - mint N queue items (existing enqueue_item), return ONE
-      aggregate envelope: parent_plan_id + total_chunks + first qid
-      + "chunks drain across operator ticks; poll
-      budget_queue_status(parent_plan_id)"
-  Model sees ONE call; economy sees N bounded debits. The never-fit
-  guard becomes per-chunk (each chunk must individually fit) — which
-  is the honest allocation the current design never had for this
-  traffic class.
+    - NEVER-FIT SLICE SIZE = min(max_single[d]) across the lane's
+      BINDING dims — NOT the burst ceiling. Review-verified: never-fit
+      is governed by max_single_call (validate() caps ms ≤ ceiling but
+      authored ms < ceiling rejects full-chunk declarations → the
+      whole plan dead on arrival). ffuf-family: requests. Hydra-
+      family (web_login_brute included): auth_events is BINDING
+      (1:1 attempt→auth_event, auth max_single/ceiling=60 vs requests
+      600 — a 600-request hydra chunk is never-fit by auth). The plan
+      envelope quotes the binding dim + resulting chunk count.
+    - chunk declared vectors are honest per family: ffuf =
+      {requests: slice, bytes/packets/auth: None(open, L1-metered)};
+      hydra-class = {requests: slice, auth_events: slice, bytes: None}.
+    - GUARD: the chunk lane owns the wordlist flag — `-w`/`-L`/`-P`
+      inside the free-text options string is detected and REFUSED
+      (multi-list args fork the plan silently).
+    - lazy frontier minting (§2.1), return ONE aggregate envelope:
+      plan_id + total_chunks + first qid + window size + expected
+      tick count + "chunks drain across operator ticks; poll
+      budget_queue_status(plan_id=)"
+  Model sees ONE call; economy sees bounded per-chunk debits. The
+  never-fit guard becomes per-chunk (each chunk must individually
+  fit) — which is the honest allocation the current design never had
+  for this traffic class.
 
 2.3 PARENT JOB GROUNDING (proposed)
-  budget_queue_status gains (or keeps via notes filter) a
-  parent_plan_id lens: one poll returns every chunk's state, so the
-  model's "enqueued then nothing to poll" fear stays closed at plan
-  granularity, not just per-qid.
+  budget_queue_status gains a parent_plan_id lens (§2.1: real column
+  + index, not a notes filter): one poll returns the plan's chunk
+  states + per-index progress, so the model's "enqueued then nothing
+  to poll" fear stays closed at plan granularity, not just per-qid.
+  The existing terminal-lane allowlist already covers
+  utils.ration.* (review-verified) — polls survive tool-budget
+  exhaustion. The default limit-20 page is fine for PLAN lenses.
+  Who mints the next window: the drain's finished-chunk branch and
+  the status lane's advance sweep (ENGINE-side machinery), never a
+  model call (§8.2).
 
 2.4 TRUE-UP ALREADY FITS [WIRE]
   Each chunk is an ordinary debit; L1 reconcile + meter_draw lifecycle
   apply per chunk, unchanged. Exhausted-mid-flight per chunk means
-  that chunk's tool must end — the wrapper's resume hook (1.3) picks
-  up at offset for the NEXT chunk instead. The two features close
-  each other's loop.
+  that chunk's tool must end — the chunk delivery itself (next
+  dispatch at chunk_meta.offset across a fresh slice file) is the
+  resume, no wrapper hook needed. The two features close each
+  other's loop.
 
-## 3. SEQUENCING MENU (cheapest-first, no pushing)
+2.5 DRAIN CONTRACT — CHUNKS VS THE FLEET (DECIDED 2026-11-06:
+  work with TODAY'S drain; no fleet-key extension)
+  The chunk lane rides launch_job(target=...) → fleet request_unit.
+  Review-verified today's drain verdict behavior for the two
+  non-launch verdicts (utils/background_job.py launch envelope,
+  replkit/operator_cli.py:440-476 _dispatch, executor exception
+  conversion):
+  - fleet DUPLICATE returns {status:"duplicate", job_id:<sibling>}.
+    Canonical keys are shape-keyed (tool:host:path:param-NAMES hash)
+    — every chunk of one plan is IDENTICAL under it. Today's drain
+    maps inner job_id → bind_item → the slice is bound to the
+    sibling's job and NEVER RUNS (§7.3 "duplicate = satisfied" was
+    decided for other lanes; it silently thins chunk plans).
+  - fleet REFUSED (slots_exhausted | host_serialized_auth — both
+    TRANSIENT) returns {status:"refused"} with NO job_id → today's
+    drain falls through to {"finished": True} — the slice is
+    consumed as DONE without running.
+  - A tool-body raise CANNOT fix this: the executor converts
+    tool-body exceptions to Failed envelopes (executor.py:188-192),
+    which the drain also maps to finished. BudgetStillShort raised
+    in-body never reaches the drain.
+  CHUNK LANE CONTRACT (the one mechanism):
+  - The wordlist wrapper, on EITHER fleet verdict at chunk dispatch,
+    returns a REQUEUED envelope: status STAYS "duplicate"/"refused"
+    (executor's ration_discharge keys exactly on those — the
+    debit compensates per non-launch, review-verified, net-zero)
+    plus {requeued: true, requeue_reason, unit_key,
+    sibling_job_id} — the sibling id is named sibling_job_id so
+    NOTHING binds it to this item (no job_id key anywhere
+    _find_job_id can match).
+  - The drain _dispatch gains ONE branch: requeued → DECISION
+    "requeued", record it, keep the item queued — no finish, no
+    bind. Next tick re-dispatches; when the sibling's job is done,
+    request_unit acquires the freed slot and the slice launches.
+    That IS "append the queue when its sibling finishes".
+  - Cost model: a requeued chunk re-runs admit → debit → compensate
+    per re-observation (ledger churn, honest stamps; no net spend).
+  - Serialization is also the PACING answer: two concurrent slices
+    of one plan = 2× the epoch draw against the host; fleet slots
+    (default 2) would allow it, chunks must not overlap.
+  SCALE HONESTY: chunk-sized appetite (batch, windows, tick counts)
+  is THEORY until a live lab measures fleet-scale behavior; the
+  rhythm-validation wave (§3 U3) owns that evidence. Basic fuzzing
+  would stall under the current never-fit/credit-line impl — that
+  stall is the concrete motivation for this lane.
 
-  A. ESTIMATOR COVERAGE WAVE — register web_login_brute + a bounded
-     msf-class estimator skeleton (even count-of-dispatched-modules ×
-     requests-per-module basis) → ends 1.1 blind flying. Smallest
-     diff, biggest honesty delta. Customs tooling benefits same-day.
-  B. WORDLIST-AWARE ESTIMATORS — ffuf/hydra read -w/-W flags, wc -l,
-     declare estimation-basis (no longer credit_line) at dispatch;
-     tripwire gets a real seed. Closes half of 1.2.
-  C. CHUNKED-CYCLE MINTER — §2 sketch. Engine + wrapper work, real
-     design effort, do AFTER A+B give the fleet honest vectors to
-     chunk.
-  D. RESUME HOOKS — wrapper -o/-restore/offset replay wiring; pairs
-     with C's per-chunk exhaustion handoff. Can ship independently
-     for plain ffuf/hydra before C.
+## 3. SEQUENCING — UPGRADE WAVES (re-lettered 2026-11-06; the A–D
+   menu collided with evasion_design.md §15's phase ladder, whose
+   A–D are BUILT and E — the emissions-ledger differential harness —
+   remains open pending live-lab evidence. These are upgrade WAVES
+   over the shipped ladder, not new phases.)
+
+  U1. ESTIMATOR KEYS + COVERAGE — ✅ IMPLEMENTED (2026-11-06).
+      fix the STALE registrations
+      (auxiliaries.ffuf.*/auxiliaries.hydra.* → payloads.ffuf.*/ 
+      payloads.hydra.*, minted-id truth per 1.1), register
+      web_login_brute + the msf method id (payloads.metasploiting.
+      MetasploitClient.dispatch_metasploit). Open-ended None dims
+      for ALL of them — a fabricated requests-per-module guess
+      over-claims (§4.2 seeds err OPEN: "under-keying beats
+      over-claiming"); registration alone ends 1.1 blind flying by
+      putting the lanes into metering + the L1 lifecycle.
+      Smallest diff, biggest honesty delta. Zero behavior risk:
+      registered+open admits exactly as credit-line does today
+      (it IS credit-line semantics, now with the machinery engaged).
+  U2. CHUNKED-CYCLE LANE — ✅ IMPLEMENTED (2026-11-06; ffuf lane, wordlist
+      declarations only — hydra/web_login_brute/MSF stay open-ended and
+      whole-run: chunk adoption per lane is a follow-up wave).
+      §2 sketch, WITH the wordlist-aware
+      declaration folded in (the old "B first" sequencing is
+      REJECTED: wordlist-aware ffuf/hydra declarations before the
+      chunk lane exist would turn ≥max_single lists from
+      always-admit into permanent reject with NO alternative —
+      ffuf+rockyou simply stops working; honesty arrives with the
+      lane that makes honesty survivable). Deliverables: chunk
+      item shape (§2.1), minter (§2.2), parent lens (§2.3),
+      drain requeued-branch (§2.5), options wordlist-guard.
+      Where: utils/wordlist_chunking.py (lane_decision/mint/advance/
+      requeue), utils/ration_store.py (queue_plans + chunk columns,
+      enqueue_item shape), utils/ration.py (U1 seeds, discharge
+      requeued/chunk_plan branches, drain advance hook, plan lens),
+      payloads/ffuf.py (single/plan/chunk wrapper). Knobs:
+      BUDGET_PLAN_WINDOW (default 8), BUDGET_WORDLIST_CHUNK
+      (default on), BUDGET_PLAN_TTL_HOURS (default 24).
+  U3. LIVE-LAB VALIDATION — run a real fleet-scale plan, measure
+      rhythm (tick cadence, refill interaction, requeued churn),
+      feed the numbers back into defaults + the §15-E differential
+      harness. Chunk appetite leaves theory here. No new code
+      unless measurement says so.
 
 ## 4. HARD CONSTRAINTS (do not violate while building)
 
 - §13 stays: internal/budget tools never mint. Estimators only for
-  traffic-sending lanes.
+  traffic-sending lanes, keyed by MINTED tool_ids (a wrong key is
+  silently-dead registration — 1.1).
 - Model lane stays READ-ONLY (§8.2). Chunking is wrapper-initiated;
-  the model may see but never mint chunks directly.
+  the model may see but never mint chunks directly; window
+  advancement is engine-side (drain/status sweeps), never a
+  model-callable mint.
 - Never-fit semantics stay intact for honest single-shot requests —
   chunking is opt-in per tool lane, not a global escape hatch from
-  reject.
+  reject. Wordlist-aware single-shot declarations that exceed
+  max_single reject EXACTLY as before; the chunk lane is the
+  honest alternative, not a raised ceiling.
+- duplicate=satisfied (§7.3, other lanes) is NOT redefined. The
+  chunk lane adds requeued as its own decision; requeued envelopes
+  NEVER bind a sibling's job_id and NEVER consume their item.
 - Envelope honesty carries over: chunk parent envelopes must state
-  chunk counts + poll surface (same class as the held_pending
-  NOT-queued fix, 0e2b687).
+  chunk counts + poll surface + expected tick count + plan TTL
+  (same class as the held_pending NOT-queued fix, 0e2b687).
 - Scope gate unchanged: chunked traffic still passes the gate per
   dispatch; budget never substitutes for authorization.
+- Executor discharge contract is load-bearing for requeued chunks:
+  preserve top-level status ("duplicate"/"refused") so
+  ration_discharge compensates; assert no bindable job_id on the
+  requeued copy.
 
 Hand-picked verification anchors for when this lane reopens:
   utils/ration.py    :493-531 (register_estimator + fallback chain)
-  utils/ration.py    :602-635 (current estimator bodies)
-  utils/ration.py    :1018-1040 (preflight decision surface)
+  utils/ration.py    :602-635 (current estimator bodies — STALE ffuf/
+                      hydra keys live here, fix via U1)
+  utils/ration.py    :160-238 (dim + max_single defaults; validate's
+                      never-fit material)
+  utils/ration.py    :1018-1120 (preflight decision surface incl.
+                      held_pending + satisfied)
   utils/ration.py    :1360-1440 (L1 true-up + meter_draw + exhaustion)
-  utils/ration.py    :1790-1836 (_budget_envelope + position clause)
-  utils/ration_store.py :668+ enqueue_item | :734 bind_item |
-                          queued_position (0e2b687)
-  evasion_design.md  §7 (envelope truth), §13 (gate rules)
+  utils/ration.py    :1790-1880 (_budget_envelope + position clause)
+  utils/ration.py    :2124+ (ration_discharge — status=="duplicate"/
+                      "refused" compensation contract, _find_job_id)
+  utils/ration_store.py :668+ enqueue_item | :734 queued_position |
+                      bind_item (0e2b687)
+  utils/background_job.py :186-224 (fleet verdict launch envelopes)
+  daharness/executor.py  :188-192 (tool-body exception conversion —
+                      why requeued is a RESULT, not a raise)
+  replkit/operator_cli.py :406 (drain batch default) | :440-476
+                      (_budget_drain_dispatcher — the one new branch)
+  utils/tool_budget.py :43 (terminal allowlist incl. utils.ration.)
+  evasion_design.md  §7.3 (duplicate=satisfied, drain invariants),
+                      §15 (phase ladder A–D built, E open)

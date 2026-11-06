@@ -119,7 +119,35 @@ CREATE TABLE IF NOT EXISTS queue_items (
     agent_id TEXT NOT NULL, engagement TEXT,
     job_ref TEXT, no_reenqueue INTEGER NOT NULL DEFAULT 0,
     requested REAL NOT NULL, expires_at REAL NOT NULL,
-    notes_json TEXT
+    notes_json TEXT,
+    -- U2 wordlist chunk lane: chunk items point at their plan row;
+    -- non-chunk items carry NULL (no default agent_id — resolved callers
+    -- only, scale-doctrine Annex A).
+    parent_plan_id TEXT,
+    chunk_index INTEGER,
+    chunk_meta_json TEXT
+);
+-- U2: lazy frontier plans for wordlist-shaped traffic. The plan holds the
+-- base tool call + the frozen slice arithmetic; queue_items chunk rows are
+-- minted lazily (§2.1) as prior sibling chunks finish.
+CREATE TABLE IF NOT EXISTS queue_plans (
+    plan_id TEXT PRIMARY KEY,
+    tool TEXT NOT NULL,
+    arguments_json TEXT NOT NULL,
+    declared_json TEXT NOT NULL,
+    dims_json TEXT NOT NULL,
+    wordlist TEXT NOT NULL,
+    lines INTEGER NOT NULL,
+    chunk_size INTEGER NOT NULL,
+    total_chunks INTEGER NOT NULL,
+    binding_dim TEXT NOT NULL,
+    window INTEGER NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    agent_id TEXT NOT NULL,
+    engagement TEXT,
+    requested REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open'
 );
 CREATE TABLE IF NOT EXISTS emissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,6 +327,21 @@ class RationStore:
             self.conn.execute("ALTER TABLE emissions ADD COLUMN meter_state TEXT")
         if "metered_json" not in ecols:
             self.conn.execute("ALTER TABLE emissions ADD COLUMN metered_json TEXT")
+        # U2 wordlist chunk lane migrations (legacy queue_items dbs).
+        qcols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(queue_items)")}
+        for name, ddl in (("parent_plan_id", "TEXT"),
+                          ("chunk_index", "INTEGER"),
+                          ("chunk_meta_json", "TEXT")):
+            if name not in qcols:
+                self.conn.execute(
+                    f"ALTER TABLE queue_items ADD COLUMN {name} {ddl}")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS queue_items_plan "
+            "ON queue_items (parent_plan_id, chunk_index)")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS queue_items_plan_state "
+            "ON queue_items (parent_plan_id, status)")
         self.conn.commit()
         # Post-WAL heal per state_perms doctrine: the pragma above minted
         # (or would have minted) the -wal/-shm sidecars, which inherit the
@@ -670,19 +713,24 @@ class RationStore:
                      engagement: str | None, priority: int = 0,
                      ttl_hours: float = 24.0,
                      no_reenqueue: bool = False,
+                     parent_plan_id: str | None = None,
+                     chunk_index: int | None = None,
+                     chunk_meta: dict | None = None,
                      now: float | None = None) -> str:
         now = now if now is not None else time.time()
         qid = f"q-{uuid.uuid4().hex[:12]}"
         self.conn.execute(
             "INSERT INTO queue_items (qid, tool, arguments_json, declared_json, "
             "dims_json, reason, status, priority, agent_id, engagement, "
-            "no_reenqueue, requested, expires_at) VALUES (?,?,?,?,?,?,"
-            "'queued',?,?,?,?,?,?)",
+            "no_reenqueue, requested, expires_at, parent_plan_id, chunk_index, "
+            "chunk_meta_json) VALUES "
+            "(?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?)",
             (qid, tool, json.dumps(arguments or {}, sort_keys=True),
              json.dumps({d: (decl or {}).get(d) for d in DIMS}, sort_keys=True),
              json.dumps(dims, sort_keys=True), reason, priority,
              agent_id, engagement, 1 if no_reenqueue else 0, now,
-             now + ttl_hours * 3600.0))
+             now + ttl_hours * 3600.0, parent_plan_id, chunk_index,
+             json.dumps(chunk_meta, sort_keys=True) if chunk_meta else None))
         self.conn.commit()
         return qid
 
@@ -771,6 +819,121 @@ class RationStore:
         row = self.conn.execute(
             "SELECT * FROM queue_items WHERE qid=?", (qid,)).fetchone()
         return dict(row) if row is not None else None
+
+    # --- wordlist chunk plans (U2, §2 of the upgrade design) -----------------
+
+    def plan_insert(self, *, plan_id: str, tool: str, arguments: dict,
+                    decl: dict, dims: dict, wordlist: str, lines: int,
+                    chunk_size: int, total_chunks: int, binding_dim: str,
+                    window: int, agent_id: str, engagement: str | None,
+                    priority: int = 0, ttl_hours: float = 24.0,
+                    now: float | None = None) -> dict:
+        now = now if now is not None else time.time()
+        self.conn.execute(
+            "INSERT INTO queue_plans (plan_id, tool, arguments_json, "
+            "declared_json, dims_json, wordlist, lines, chunk_size, "
+            "total_chunks, binding_dim, window, priority, agent_id, "
+            "engagement, requested, expires_at, state) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open')",
+            (plan_id, tool, json.dumps(arguments or {}, sort_keys=True),
+             json.dumps({d: (decl or {}).get(d) for d in DIMS}, sort_keys=True),
+             json.dumps(dims, sort_keys=True), wordlist, lines, chunk_size,
+             total_chunks, binding_dim, window, priority, agent_id,
+             engagement, now, now + ttl_hours * 3600.0))
+        self.conn.commit()
+        return self.plan_get(plan_id)
+
+    def plan_get(self, plan_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM queue_plans WHERE plan_id=?", (plan_id,)).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["arguments"] = json.loads(out.pop("arguments_json") or "{}")
+        out["declared"] = json.loads(out.pop("declared_json") or "{}")
+        out["dims"] = json.loads(out.pop("dims_json") or "{}")
+        return out
+
+    def plan_counts(self, plan_id: str) -> dict:
+        """Minted-chunk ledger by state: minted (all ever-minted rows),
+        by_status per queue state, and the plan-relative arithmetic the
+        frontier logic needs (absent = never minted)."""
+        counts = {r["status"]: r["n"] for r in self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM queue_items "
+            "WHERE parent_plan_id=? GROUP BY status", (plan_id,))}
+        (minted,) = self.conn.execute(
+            "SELECT COUNT(DISTINCT chunk_index) FROM queue_items "
+            "WHERE parent_plan_id=? AND chunk_index IS NOT NULL",
+            (plan_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT total_chunks, state, expires_at FROM queue_plans "
+            "WHERE plan_id=?", (plan_id,)).fetchone()
+        total = int(row["total_chunks"]) if row is not None else 0
+        counts.update({"minted": int(minted), "total_chunks": total})
+        return counts
+
+    def plan_set_state(self, plan_id: str, state: str) -> None:
+        self.conn.execute(
+            "UPDATE queue_plans SET state=? WHERE plan_id=?", (state, plan_id))
+        self.conn.commit()
+
+    def get_item_by_plan_chunk(self, plan_id: str, chunk_index: int
+                               ) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM queue_items WHERE parent_plan_id=? "
+            "AND chunk_index=? ORDER BY requested DESC LIMIT 1",
+            (plan_id, chunk_index)).fetchone()
+        return dict(row) if row is not None else None
+
+    def release_item(self, qid: str) -> None:
+        """A 'launched' claim without a bound job is a crash-stale claim —
+        put it back in queue (stale-bind reclaim; idempotent no-op
+        otherwise)."""
+        cur = self.conn.execute(
+            "UPDATE queue_items SET status='queued', job_ref=NULL "
+            "WHERE qid=? AND status='launched' AND job_ref IS NULL",
+            (qid,))
+        self.conn.commit()
+        if cur.rowcount == 0:
+            logging.getLogger(__name__).debug(
+                "swallowed release_item (no stale claim) in %r", qid)
+
+    def plan_chunks(self, plan_id: str, *, status: str | None = None
+                    ) -> list[dict]:
+        sql = "SELECT * FROM queue_items WHERE parent_plan_id=?"
+        params: list[Any] = [plan_id]
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        sql += " ORDER BY chunk_index ASC"
+        return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def plan_next_index(self, plan_id: str) -> int | None:
+        """Smallest NEVER-MINTED chunk index, or None when the plan is fully
+        minted (the lazy frontier; cancelled old rows do not re-issue)."""
+        row = self.conn.execute(
+            "SELECT total_chunks FROM queue_plans WHERE plan_id=?",
+            (plan_id,)).fetchone()
+        if row is None:
+            return None
+        minted = {r[0] for r in self.conn.execute(
+            "SELECT chunk_index FROM queue_items "
+            "WHERE parent_plan_id=? AND chunk_index IS NOT NULL", (plan_id,))}
+        for i in range(int(row["total_chunks"])):
+            if i not in minted:
+                return i
+        return None
+
+    def cancel_plan(self, plan_id: str, note: str = "cancelled") -> int:
+        cur = self.conn.execute(
+            "UPDATE queue_items SET status='cancelled', notes_json=? "
+            "WHERE parent_plan_id=? AND status IN ('queued','launching')",
+            (f"plan {plan_id}: {note}", plan_id))
+        self.conn.execute(
+            "UPDATE queue_plans SET state='cancelled' WHERE plan_id=?",
+            (plan_id,))
+        self.conn.commit()
+        return int(cur.rowcount)
 
     # --- reserves (§9) --------------------------------------------------------
     # Operator-minted funds for engagement backlog. Mint/release are

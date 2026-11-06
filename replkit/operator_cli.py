@@ -447,7 +447,13 @@ def _budget_drain_dispatcher(manifests):
     the same chokepoint every lane uses — a ``budget_deferred`` envelope
     means still short (item stays queued, BudgetStillShort) and a
     ``budget_refused`` envelope means never-fit/fail-closed (item cancels,
-    BudgetRefused). An envelope that re-deferred NEVER maps to finished."""
+    BudgetRefused). An envelope that re-deferred NEVER maps to finished.
+
+    U2 wordlist lane: a chunk whose launch hit a fleet duplicate/transient
+    refusal returns a ``requeued`` envelope — the wrapper re-enqueued the
+    SAME chunk inside its plan; the tick records "requeued" (batch-pacing
+    churn) and the item stays queued for its next due turn (it must NOT
+    map to finished — the chunk would be silently consumed)."""
     from replkit.core import run_tool
     from utils.ration import BudgetRefused, BudgetStillShort
 
@@ -466,6 +472,10 @@ def _budget_drain_dispatcher(manifests):
                 raise BudgetStillShort(queue_id=inner.get("queue_id"))
             if inner.get("status") == "budget_refused":
                 raise BudgetRefused(reason=inner.get("reason") or "never fit")
+            if inner.get("requeued"):
+                return {"requeued": True,
+                        "plan_id": inner.get("plan_id"),
+                        "reason": inner.get("reason")}
             job = inner.get("job_id")
             if job:
                 return {"job_id": job}
