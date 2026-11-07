@@ -28,6 +28,8 @@ def engine(tmp_path, monkeypatch):
               "BUDGET_DRAIN_BATCH", "BUDGET_TRIPWIRE_WINDOW_S"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("BUDGET_TRIPWIRE_WINDOW_S", "300")
+    monkeypatch.setenv("BUDGET_CONSTITUTION",
+                       '{"release_jitter": {"min": 0.0, "max": 0.0}}')
     rt.reset_engine()
     yield rt.get_engine()
     rt.reset_engine()

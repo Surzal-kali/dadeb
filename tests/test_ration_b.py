@@ -24,6 +24,8 @@ def engine(tmp_path, monkeypatch):
               "BUDGET_EPOCH_SECONDS", "BUDGET_QUEUE_TTL_HOURS",
               "BUDGET_DRAIN_BATCH"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BUDGET_CONSTITUTION",
+                       '{"release_jitter": {"min": 0.0, "max": 0.0}}')
     rt.reset_engine()
     yield rt.get_engine()
     rt.reset_engine()
@@ -464,3 +466,182 @@ class TestQueuePosition:
         assert env.get("queue_id") is None
         assert "is queued" not in env["instruction"]
         assert "NOT queued" in env["instruction"], env["instruction"]
+
+
+# ─── §3.2 (2026-11-07): plan_minted mapping + chunk-keyed strictness ─────────
+
+import json
+
+
+class TestDrainPlanMintedMapping:
+    def _disp(self, monkeypatch, run_tool_result):
+        import replkit.core as core
+        import utils.budget_drain as bd
+
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                session_id=None):
+            assert session_id == "ration-drain", \
+                "drain lane must announce itself"
+            return run_tool_result
+        monkeypatch.setattr(core, "run_tool", fake_run_tool)
+        return bd.drain_dispatcher(())
+
+    def test_chunk_plan_top_level_is_plan_minted(self, monkeypatch):
+        """A whole-wordlist dispatch that minted a plan must surface as
+        plan_minted — NEVER as finished (the plan's queued chunks would be
+        silently consumed-and-done before launching)."""
+        d = self._disp(monkeypatch, {
+            "status": "chunk_plan", "plan_id": "wp-1"})
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out == {"plan_minted": True, "plan_id": "wp-1",
+                       "phantom": False}
+
+    def test_chunk_plan_inner_result_is_plan_minted(self, monkeypatch):
+        d = self._disp(monkeypatch, {
+            "status": "ok",
+            "result": {"status": "chunk_plan", "plan_id": "wp-2"}})
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out == {"plan_minted": True, "plan_id": "wp-2",
+                       "phantom": False}
+
+    def test_chunk_plan_keyed_item_is_phantom(self, monkeypatch):
+        """§3.1 phantom mint observed from the dispatcher: the item carried
+        chunk keys yet still re-minted — the envelope self-describes it."""
+        d = self._disp(monkeypatch, {
+            "status": "chunk_plan", "plan_id": "wp-ghost"})
+        keyed = {"chunk_plan_id": "wp-real", "chunk_index": 0,
+                 "chunk_offset": 0, "chunk_slice": 50,
+                 "chunk_total_chunks": 2}
+        out = asyncio.run(d({"tool": "t", "arguments_json":
+                             json.dumps(keyed)}))
+        assert out["plan_minted"] is True and out["plan_id"] == "wp-ghost"
+        assert out["phantom"] is True
+
+    def test_error_status_envelope_maps_failed(self, monkeypatch):
+        """§3.2: an honest tool error (e.g. a chunk plan that no longer
+        exists) used to fall through to finished; it must reach the
+        engine's bounded-failure ledger instead."""
+        d = self._disp(monkeypatch, {
+            "job_id": None, "status": "error",
+            "error": "chunk plan wp-gone no longer exists (expired)"},
+            )
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out["status"] == "Failed"
+        assert "no longer exists" in out["error"]
+        assert "finished" not in out
+
+    def test_unrecognized_envelope_keyed_item_never_finished(self, monkeypatch):
+        """§3.2 strictness: a chunk-keyed item whose envelope matches
+        NOTHING must be Failed — consuming it as done settles a plan over
+        work that never launched. Un-keyed rows keep the historical
+        catch-all (a swallowed successful inline work would double-run)."""
+        d = self._disp(monkeypatch, {"ok": True, "unparsed": True})
+        keyed = {"chunk_plan_id": "wp-real", "chunk_index": 0,
+                 "chunk_offset": 0, "chunk_slice": 50,
+                 "chunk_total_chunks": 2}
+        out = asyncio.run(d({"tool": "t", "arguments_json":
+                             json.dumps(keyed)}))
+        assert out["status"] == "Failed" and "§3.2" in out["error"]
+        out2 = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out2 == {"finished": True}
+
+    def test_requeued_still_wins_over_plan_id(self, monkeypatch):
+        """A requeued envelope that ALSO carries a plan_id (wrapper
+        re-enqueued a chunk) remains churn — never plan conversion."""
+        d = self._disp(monkeypatch, {
+            "status": "ok", "result": {"requeued": True,
+                                       "plan_id": "wp-x"}})
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out == {"requeued": True, "plan_id": "wp-x",
+                       "reason": None}
+
+
+class TestEnginePlanMintedBranch:
+    @staticmethod
+    def _plan_row(store, plan_id="wp-eng"):
+        store.conn.execute(
+            "INSERT INTO queue_plans (plan_id, tool, arguments_json,"
+            " declared_json, dims_json, wordlist, lines, chunk_size,"
+            " total_chunks, binding_dim, window, priority, agent_id,"
+            " engagement, requested, expires_at, state)"
+            " VALUES (?, 'payloads.ffuf.run_ffuf', '{}', '{}', '{}', '/w',"
+            " 650, 600, 2, 'requests', 2, 0, 'tester', NULL, 1000.0,"
+            " 99999.0, 'open')", (plan_id,))
+        store.conn.commit()
+
+    def test_keyed_item_phantom_mint_fails_item_and_plan(self, engine):
+        """§3.2: a keyed dispatch that STILL minted a plan is a phantom —
+        the item fails on first observation (deterministic arg-loss, no
+        retry budget: retries only produce more ghosts) and the fresh plan
+        is cancelled."""
+        import utils.budget_drain as bd
+        store = engine.store
+        self._plan_row(store, "wp-ghost")
+        store.enqueue_item(tool="payloads.ffuf.run_ffuf",
+                           dims={"host_axis": "10.0.0.7"},
+                           decl={"requests": 50, "packets": None,
+                                 "auth_events": None, "bytes": 50 * 8192},
+                           arguments={**_dims(), "chunk_plan_id": "wp-real",
+                                      "chunk_index": 0, "chunk_offset": 0,
+                                      "chunk_slice": 50,
+                                      "chunk_total_chunks": 2},
+                           reason="plan wp-real chunk 1/2",
+                           agent_id="tester", engagement=None, now=1000.0)
+        (qid,) = [i["qid"] for i in store.due_items(now=1000.0)]
+
+        async def tick():
+            return await engine.operator_tick(
+                dispatch=lambda item: {"plan_minted": True,
+                                       "plan_id": "wp-ghost",
+                                       "phantom": True},
+                now=1001.0, batch=1, sleep_fn=lambda s: None)
+
+        out = asyncio.run(tick())
+        assert [r["decision"] for r in out["results"]] == \
+            ["failed_phantom_plan"]
+        row = store.conn.execute(
+            "SELECT * FROM queue_items WHERE qid=?", (qid,)).fetchone()
+        assert row["status"] == "failed"
+        assert "phantom plan" in (row["notes_json"] or "")
+        plan = store.plan_get("wp-ghost")
+        assert plan["state"] == "cancelled"
+
+    def test_unkeyed_item_plan_mint_converts(self, engine):
+        """§3.2: an un-keyed (whole-wordlist) item minting a plan is
+        legitimate conversion — the item is consumed as done-converted and
+        the plan's chunk queue carries the work."""
+        store = engine.store
+        self._plan_row(store, "wp-conv")
+        store.enqueue_item(tool="payloads.ffuf.run_ffuf", dims=_dims(),
+                           decl=_decl(requests=600, bytes=600 * 8192),
+                           arguments={"url": "http://10.0.0.7/FUZZ",
+                                      "wordlist": "/w"},
+                           reason="whole wordlist",
+                           agent_id="tester", engagement=None, now=1000.0)
+        (qid,) = [i["qid"] for i in store.due_items(now=1000.0)]
+
+        async def tick():
+            return await engine.operator_tick(
+                dispatch=lambda item: {"plan_minted": True,
+                                       "plan_id": "wp-conv",
+                                       "phantom": False},
+                now=1001.0, batch=1, sleep_fn=lambda s: None)
+
+        out = asyncio.run(tick())
+        assert [r["decision"] for r in out["results"]] == \
+            ["converted_to_plan"]
+        row = store.conn.execute(
+            "SELECT * FROM queue_items WHERE qid=?", (qid,)).fetchone()
+        assert row["status"] == "cancelled"
+        assert "converted to plan wp-conv" in (row["notes_json"] or "")
+        assert store.plan_get("wp-conv")["state"] == "open"
+
+    def test_tick_result_carries_advance_summary(self, engine):
+        """Debt §4: the drain state/doctor need the plan-advance summary on
+        the tick result, not just the lens."""
+        async def tick():
+            return await engine.operator_tick(
+                dispatch=lambda item: {"finished": True},
+                now=1001.0, batch=1, sleep_fn=lambda s: None)
+        out = asyncio.run(tick())
+        assert out["advance"] == {"settled": [], "failed_plans": []}

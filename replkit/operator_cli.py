@@ -438,88 +438,13 @@ def _budget_engagement() -> str | None:
 
 
 def _budget_drain_dispatcher(manifests):
-    """Drain decision mapping: envelope carries a job_id → bind
-    ({"job_id": ...}); anything else ran to completion inline — report
-    {"finished": True} so operator_tick consumes the item as done (no
-    double-execution). Raises propagate; a raise keeps the item queued.
-
-    Ration-aware (§7 Phase D): a drain dispatch is re-admission-checked by
-    the same chokepoint every lane uses — a ``budget_deferred`` envelope
-    means still short (item stays queued, BudgetStillShort) and a
-    ``budget_refused`` envelope means never-fit/fail-closed (item cancels,
-    BudgetRefused). An envelope that re-deferred NEVER maps to finished.
-
-    U2 wordlist lane: a chunk whose launch hit a fleet duplicate/transient
-    refusal returns a ``requeued`` envelope — the wrapper re-enqueued the
-    SAME chunk inside its plan; the tick records "requeued" (batch-pacing
-    churn) and the item stays queued for its next due turn (it must NOT
-    map to finished — the chunk would be silently consumed).
-
-    Preflight rejections (executor arg-schema rejects) map onto the same
-    Failed seam: they are neither budget-deferred nor budget-refused, and
-    consuming one as finished silently destroys a plan's chunk indices
-    (the minter never re-mints a consumed index — 2026-11-06 ffuf drain)."""
-    from replkit.core import run_tool
-    from utils.ration import BudgetRefused, BudgetStillShort
-
-    async def _dispatch(item: dict) -> dict:
-        args = item.get("arguments_json")
-        arguments = json.loads(args) if isinstance(args, str) else (args or {})
-        res = await run_tool(item["tool"], arguments, manifests,
-                             session_id="ration-drain")
-        if isinstance(res, dict) and res.get("status") == "budget_deferred":
-            raise BudgetStillShort(queue_id=res.get("queue_id"))
-        if isinstance(res, dict) and res.get("status") == "budget_refused":
-            raise BudgetRefused(reason=res.get("reason") or "never fit")
-        inner = res.get("result") if isinstance(res, dict) else None
-        if isinstance(inner, dict):
-            if inner.get("status") == "budget_deferred":
-                raise BudgetStillShort(queue_id=inner.get("queue_id"))
-            if inner.get("status") == "budget_refused":
-                raise BudgetRefused(reason=inner.get("reason") or "never fit")
-            if inner.get("requeued"):
-                return {"requeued": True,
-                        "plan_id": inner.get("plan_id"),
-                        "reason": inner.get("reason")}
-            job = inner.get("job_id")
-            if job:
-                return {"job_id": job}
-        if isinstance(res, dict) and res.get("job_id"):
-            return {"job_id": res["job_id"]}
-        # Preflight-rejection seam (2026-11-06): an executor arg-schema
-        # reject returns {"status": "Rejected", "phase": "preflight"} —
-        # it matched NEITHER the budget checks NOR the Failed seam and fell
-        # through to {"finished": True}, consuming every rejected chunk as
-        # done-forever (plan indices never re-mint, the work just vanishes).
-        # Map the reject onto the Failed pathway: the engine stamps the
-        # attempt and the row exits visibly with the reject text past the
-        # retry budget.
-        from daharness.preflight import format_rejection as _fmt_rej
-        from daharness.preflight import is_rejection as _is_rej
-        for probe in (res, inner):
-            if _is_rej(probe):
-                return {"status": "Failed",
-                        "error": ("preflight rejected the drain dispatch: "
-                                  + _fmt_rej(probe))}
-        # Failed-tool envelope propagates to the ENGINE (§2.6 bounded
-        # failure ledger): run_tool wraps every raised tool-body error
-        # (incl. ScopeGateError) as {"status": "Failed"}. Consuming it as
-        # {"finished": True} here would mark the item done-forever despite
-        # nothing launching — the engine stamps the attempt and exits the
-        # item past BUDGET_RETRY_MAX with the error on the row. Do NOT
-        # pre-map it to BudgetRefused: a Failed envelope is often a
-        # transient tool-body mislaunch, and the retry budget (not the
-        # never-fit verdict) is the honest fate.
-        if (isinstance(res, dict) and res.get("status") == "Failed") \
-                or (isinstance(inner, dict)
-                    and inner.get("status") == "Failed"):
-            _ferr = (res.get("error") if isinstance(res, dict) else None) \
-                or (inner.get("error") if isinstance(inner, dict) else None) \
-                or "tool returned Failed"
-            return {"status": "Failed", "error": str(_ferr)}
-        return {"finished": True}
-
-    return _dispatch
+    """Back-compat delegate (2026-11-07): the mapping lives in
+    utils/budget_drain.py now, shared by the REPL ``budget drain`` command
+    and the always-on pacemaker loop so the two lanes cannot drift. The
+    mapping contract (job_id/bind, requeued/churn, Failed/preflight seams,
+    §3.2 plan_minted + chunk-keyed strictness) is documented there."""
+    from utils.budget_drain import drain_dispatcher as _moved
+    return _moved(manifests)
 
 
 async def _budget_command(rest: str):

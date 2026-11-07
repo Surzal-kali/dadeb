@@ -1,3 +1,39 @@
+daharness (0.2.0+pkg4) kali; urgency=medium
+
+  * Drum-steady law: the ration lane's default posture is now the
+    user-decided rhythmic drain profile (ration_lane_debt.md §2A):
+    - epoch 3600 s → 300 s; requests refill 100 → 150/epoch
+      (≈ 1800 req/h: a full 4614-line wordlist drains in ≈ 2.5 h, was
+      ≈ 40 h) — `utils/ration.py` + the packaged mirror
+      `packaging/reference/budget.constitution.yaml`.
+    - New authored release-jitter band, code default
+      `release_jitter = {min: 1.5, max: 6.0}` s: every real launch in a
+      tick leaves inside a drumbeat gap, not a volley; the env
+      `BUDGET_RELEASE_JITTER_CAP_S` can never crush an authored band
+      (authored max self-lifts). Authoring `{min: 0, max: 0}` explicitly
+      DECLINES the band and falls back to env pacing — the tested
+      operator opt-out; a band absent from an authoring file keeps the
+      drum.
+    - Daemon drain cadence: `BUDGET_DRAIN_INTERVAL_S` 60 → 30 s,
+      `BUDGET_DRAIN_BATCH` 8 → 2 (three literals +
+      `_DRAIN_BATCH_DEFAULT`): the queue drains 1-2 items per 30 s tick —
+      the coffee-loop metronome.
+    - packaging/etc/daharness.env: commented drum-knob documentation
+      block (BUDGET_DRAIN_AUTOSTART / INTERVAL_S / BATCH) with the new
+      code defaults noted.
+  * §3.1 behavioral body tests for the chunk lane: a keyed dispatch
+    LAUNCHES the plan's due slice (no `chunk_plan` mint at the boundary)
+    and a bogus plan errors honestly without minting anything — the UDS
+    discriminant now verified in-process (`tests/test_wordlist_chunk.py`).
+  * Suite hardening (stub-timing vs load): sqlmap-fleet fanout holds the
+    h4 slot with a 6 s stub (the 0.2 s default could be released by
+    sweep_stale mid-loop and flip the refused count), the job-store TTL
+    test observes terminal under the default TTL before shortening it,
+    and the worker-queue promotion test accepts all three lifecycle
+    states of a completed one-winner claim. Full suite: 613 passed.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 06 Nov 2026 22:03:00 -0700
+
 daharness (0.2.0+pkg3) kali; urgency=medium
 
   * Licensing carve-out: typeshed stub fork attribution (2026-11-03):

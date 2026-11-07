@@ -156,10 +156,16 @@ def test_sqlmap_status_releases_unit(fleet_env):
 # --- fleet twins -----------------------------------------------------------------
 
 
-def test_fleet_fanout_and_status(fleet_env):
+def test_fleet_fanout_and_status(fleet_env, monkeypatch):
     import payloads.sqlmap as sm
     from utils.agent_identity import agent_id_context
 
+    # The stub's default 0.2s life can END before the 4-unit request loop
+    # reaches `products` — sweep_stale then releases login's slot
+    # (poll-verified exit) and products ACQUIRES — the race flips `refused`
+    # to 0 under suite load. Hold the slot deterministically instead: a
+    # stub that outlives the whole request loop.
+    monkeypatch.setenv("STUB_SLEEP", "6")
     targets = [
         "http://h3.example/a?id=1",
         "http://h3.example/b?id=2",
@@ -176,8 +182,10 @@ def test_fleet_fanout_and_status(fleet_env):
     fleet_id = out["fleet_id"]
     assert fleet_id.startswith("fleet:")
 
-    for j in (out["units"]["0"]["job_id"], out["units"]["1"]["job_id"]):
-        _drain(j)
+    for j in (out["units"]["0"]["job_id"],
+              out["units"]["1"]["job_id"],
+              out["units"]["2"]["job_id"]):
+        _drain(j, timeout=30)
 
     with agent_id_context("fleet-user"):
         st = sm.sqlmap_fleet_status(fleet_id)

@@ -33,6 +33,10 @@ def engine(tmp_path, monkeypatch):
               "BUDGET_EPOCH_SECONDS", "BUDGET_QUEUE_TTL_HOURS",
               "BUDGET_DRAIN_BATCH"):
         monkeypatch.delenv(k, raising=False)
+    # decline the drum band — the engine's default 1.5-6.0s release jitter
+    # would slow multi-release ticks; zero-band authors env pacing back
+    monkeypatch.setenv("BUDGET_CONSTITUTION",
+                       '{"release_jitter": {"min": 0.0, "max": 0.0}}')
     rt.reset_engine()
     yield rt.get_engine()
     rt.reset_engine()
@@ -98,7 +102,7 @@ class TestAdmitAndDebit:
             _decl(requests=600), _dims(), tool="tests.t",
             policy=const.policy(), epoch_s=const.epoch_s,
             max_single=const.max_single(), now=1000.0)
-        # one epoch later the node refilled 100 → a 50 call fits now
+        # one epoch later the node refilled 150 → a 50 call fits now
         receipt = engine.store.debit_vector(
             _decl(requests=50), _dims(), tool="tests.t",
             policy=const.policy(), epoch_s=const.epoch_s,
@@ -568,11 +572,11 @@ class TestQueue:
 class TestHoldMode:
     def test_hold_accrues_at_refill_drip_not_floor(self, engine):
         """2026-11-06 ffuf drain starvation: HOLD accrual at the floor alone
-        (2/h) could never reach a 600-request chunk while the node held its
+        (2/epoch) could never reach a 600-request chunk while the node held its
         OWN backlog (apply_backlog_modes holds on any queued item) — the
         math could never admit a chunk, so the drain looped on still_short
         forever. Held nodes now accrue at the CONSTITUTIONAL DRIP (the
-        normal refill rate, 100/epoch here); the floor stays the guarantee
+        normal refill rate, 150/epoch here); the floor stays the guarantee
         for floors RAISED above the drip (max(floor, refill))."""
         const = rt.constitution()
         kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
@@ -582,7 +586,7 @@ class TestHoldMode:
                               tool="tests.h", now=1000.0, **kw)["committed"]
         n = s.set_phase(mode="hold", host_axis="10.0.0.42")
         assert n == 1
-        # one full epoch under HOLD grants the +100 drip, not the +2 floor
+        # one full epoch under HOLD grants the +150 drip, not the +2 floor
         receipt = s.debit_vector(_decl(requests=100),
                                  _dims(target="10.0.0.42"),
                                  tool="tests.h", now=1000.0 + const.epoch_s,

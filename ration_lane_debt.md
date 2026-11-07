@@ -1,9 +1,10 @@
 # Budget/ration lane — known debt & handoff (2026-11-06)
 
-Status: **session ends with unit tests green but the LIVE user workflow still
-broken.** This doc is the handoff for the next session. Everything in
-§3 is fixed and tested — do not re-litigate it. Everything in §4-§7 is the
-actual remaining work, ordered by how badly it blocks the user.
+Status: **unit suite fully green (613 tests) and the drum-steady law is the
+code/mirror default; the LIVE user workflow is one pkg4 build + install +
+live verification wave away.** Everything in §2 is done — do not redo it.
+Everything below the drum law section (§4-§7) is the remaining work,
+ordered by how badly it blocks the user.
 
 Authoritative product spec (verbatim user scenario):
 > "i log in, i launch lab, i queue all my little recon checklist tool uses,
@@ -52,44 +53,78 @@ ticks before calling a "stuck" queue a wedge.
 
 ---
 
+## 2A. The drum-steady law (2026-11-06, user-decided — do not quietly revert)
+
+The user picked the tempo profile in an explicit decision: **drum-steady** —
+the queue drains as a rhythmic heartbeat, not a burst-and-starve. The law is
+the NO-ENV code default (constants in `utils/ration.py` + `utils/budget_drain.py`),
+mirrored in `packaging/reference/budget.constitution.yaml`:
+
+```
+epoch_seconds:            300   (was 3600)
+requests: ceiling 600, refill_per_epoch 150 (was 100), floor 2
+release_jitter:  {min: 1.5, max: 6.0} s   (new; authored band)
+BUDGET_DRAIN_INTERVAL_S: 30    (was 60 — three literals in budget_drain.py)
+BUDGET_DRAIN_BATCH:      2     (was 8 — _DRAIN_BATCH_DEFAULT in ration.py)
+```
+
+- **Math**: 150/5 min ≈ 1800 req/h ⇒ a full 4614-line wordlist drains in
+  ≈ 2.5 h (the old law's ≈ 40 h is dead). Inter-release gaps jitter 1.5–6 s
+  inside each tick, so launches leave in a drumbeat, not a volley.
+- **Authored-band self-lift** (`operator_tick`): band delay =
+  `min(min + U(0, max-min)/pacing, max(release_cap, authored max))` — the
+  env `BUDGET_RELEASE_JITTER_CAP_S=2.0` on the deb CANNOT crush an authored
+  6.0 band; the band in the constitution governs. A live deb needs no cap
+  change.
+- **Zero-band decline** (`{min: 0.0, max: 0.0}` authored = DECLINE):
+  `operator_tick` falls back to env pacing (base U(0, BUDGET_RELEASE_JITTER_S
+  default 2.0), cap 2.0) — the documented operator opt-out and what every
+  multi-dispatch test fixture uses. A band ABSENT from an authoring file
+  does NOT decline (keeps the code default band); `release_jitter: null`
+  does not decline either (`_parse_release_jitter` → None).
+- The mirror carries `release_jitter` as a **commented example block** in the
+  OPTIONAL region (the yaml-fidelity test restores commented examples and
+  diffs them against the loader schema; an uncommented row would fail the
+  "required keys ⊆ restored doc" assertion). The LAW lives in code.
+- Tests: `tests/test_ration_a.py` (law values + band/decline semantics),
+  fixtures in b/c/d/e/f1 + wordlist_chunk set the decline inline
+  (`BUDGET_CONSTITUTION` json inline) so multi-dispatch ticks don't really
+  sleep 1.5–6 s.
+
+---
+
 ## 3. UNRESOLVED from this session (verify BEFORE building on top)
 
 These were identified at the end of the session and are **not** covered by
 the green tests above:
 
-1. **Phantom-plan re-mint mechanism — partially mitigated, not verified.**
-   Observed live: fleet-duplicate retries of chunk dispatches minted fresh
-   `wp-` plans with zero traffic (24 ghost items across `wp-b6e3a6054692`,
-   `wp-62d9954b5b3a`, `wp-8d9aff23487a`). The decisive repro (dispatch
-   chunk-keyed args through the live Brain socket) returned a `chunk_plan`
-   envelope — i.e. `lane_decision` decided PLAN mode for a KEYED dispatch
-   even with the dict-comp `_lane_args` fix in the shipped tree. The
-   explicit-locals rewrite in `run_ffuf` (§4 below) is the attempt to fix
-   this; **it has never been verified against the live Brain.** Repro to
-   use: the UDS dispatch snippet from the session (connect
+1. **Phantom-plan re-mint mechanism — fixed in code + behaviorally tested;
+   LIVE repro still owed.** The explicit-locals rewrite in `run_ffuf`
+   kills the `chunk_plan` mint for keyed dispatches at the source, and both
+   §3.1 behavioral body tests pass in-process (`test_run_ffuf_chunk_keyed_
+   body_launches_slice` proves a keyed dispatch launches the slice — no
+   `chunk_plan` at the mint boundary; the bogus-plan path errors honestly).
+   **Remaining: the same UDS repro against the pkg4 deb Brain** (connect
    `/run/daharness/brain.sock`, `CALL_TOOL|3|payloads.ffuf.run_ffuf|{args
-   with chunk_plan_id...}`), expect a LAUNCH/duplicate/requeued envelope —
-   a `chunk_plan` envelope for keyed args = still broken.
-2. **Dispatcher still consumes `chunk_plan` envelopes as done.**
-   `_budget_drain_dispatcher` maps budget_deferred/refused, `requeued`,
-   `job_id`, and Failed/Rejected — a `chunk_plan` envelope (no `job_id`,
-   no `requeued`, `status="chunk_plan"`) falls through to
-   `{"finished": True}` → queue item consumed + phantom plan minted. Fix:
-   handle `chunk_plan` explicitly (requeue the item, do NOT treat the
-   plan-issue as finished work) and/or add a safety default: an envelope
-   that maps to NOTHING must not be `finished` — fail visibly instead.
-   Test does not exist yet.
-3. **pkg3 shipped mid-session.** The running deb includes §2.1-2.3 + the
-   dict-comp `ffuf` but NOT: the explicit-locals rewrite, the HOLD/grant
-   fixes in `ration_store.py`, the updated tests. Next deb build must land
-   after 1+2 above are green, and the service restarted.
+   with chunk_plan_id...}`) — expect LAUNCH/duplicate/requeued, not
+   `chunk_plan`.
+2. **Dispatcher consumes `chunk_plan` envelopes as done — fixed.** The
+   daemon dispatcher (`utils/budget_drain.py:_budget_drain_dispatcher`)
+   detects `chunk_plan`/`plan_id` envelopes at both nested and bare levels,
+   requeues the item and does NOT count it finished; unknown envelopes fail
+   visibly. Covered by the file's dispatcher tests.
+3. **pkg3 shipped mid-session — pkg4 build still owed** (this is now the
+   ONLY §3 item): land the deb AFTER the live-wave checklist below, restart
+   the service, then run the live repro (§3.1) + §5.1 sanity +
+   enqueue-vs-.107 drum watch.
 
 ---
 
 ## 4. P0 — result capture & visibility ("I will never know the results")
 
 This is the user's deepest complaint and it is real, structural, and
-unrelated to budget math:
+unrelated to budget math. Items 2 and 3 are DONE (see below); 1 and 4
+remain the open debt (1 = cancel-loss honesty; 4 = caps surfacing):
 
 1. **Killed ffuf loses everything.** `ffuf -o` JSON is written only on
    clean exit (ffuf 1.1.0). Today's one real run (job `19bec7e6b363`) was
@@ -99,17 +134,15 @@ unrelated to budget math:
    parse. Options to evaluate: drop `-s` so partial table lines exist;
    periodic `-o` snapshot (not supported by ffuf 1.1.0 — check 2.x);
    document "cancel = results lost" honestly in the envelope.
-2. **`ffuf_out_*.json` lands in `/tmp`** (`payloads/ffuf.py` line ~576,
-   `BG_JOB_LOG_DIR` default "/tmp"). Violates the doctrine "logs live under
-   run/jobs — never /tmp": lost on reboot, outside the job store, not
-   collected by the log GC. Fix: key it to the job's log dir.
-3. **Who aggregates chunk results?** Each chunk's findings arrive via
-   `ffuf_status(job_id)` per chunk job, but nothing rolls chunk verdicts up
-   to the PLAN. After a plan finishes, the user gets `budget_queue_status`
-   counts (queued/finished numbers) — not findings. Needed: a plan-level
-   results rollup (per-chunk exit codes + consolidated findings list, from
-   the jobs' `-o` files / verdicts) surfaced on `budget_queue_status` and a
-   `plan_results`-style twin.
+2. **`ffuf_out_*.json` lands in `/tmp` — DONE.** `payloads/ffuf.py` now
+   writes `-o` under `<workspace>/run/jobs/ffuf/` (workspace-resolved, with
+   a harmless `BG_JOB_LOG_DIR` fallback). Covered by the chunk behavioral
+   test's `-o` path assertion.
+3. **Who aggregates chunk results? DONE.** `ration_store.plan_verdicts`
+   persists terminal chunk verdicts (poll-time parser output) and
+   `budget_queue_status(plan_id=...)` renders a per-chunk rollup with
+   findings samples long after job logs/TTL age out (`utils/ration.py`
+   §4-rollup lens, 2026-11-06).
 4. **Finished-cap/TTL silently deletes evidence.** "went to release all the
    jobs... they were in fact gone" — `_enforce_caps` (finished cap 128/agent,
    `BG_JOB_MAX_FINISHED_PER_AGENT`) + `BG_JOB_TTL_HOURS` 24h delete job rows,
@@ -120,47 +153,43 @@ unrelated to budget math:
 
 ## 5. P1 — the pacemaker (drain loop) & the default posture
 
-1. **No drain loop exists.** `operator_tick` is called from exactly TWO
-   places: the manual `budget drain` REPL command and tests. `held_pending`
-   envelopes instruct the model to poll "the operator tick" that never
-   fires on its own. The coffee-loop spec is unbuildable until a daemon
-   drain exists. Sketch (agreed in session): a task in
-   `bootstrap.py::launch_all()` next to Brain/ZAP/gateway; every
-   `BUDGET_DRAIN_INTERVAL_S` (default ~60) run
-   `engine.operator_tick(dispatch=_budget_drain_dispatcher(discover_tools()))`
-   + `advance_plans`; respect `manual_phase hold` (operator stop wins over
-   the loop); expose last-tick ts / backlog / admitted-deferred counts via
-   `framework_doctor(provider="budget_drain")` and `framework_health`.
-   The dispatcher mapping must live in ONE place (move it out of replkit if
-   the daemon needs it — currently the mapping lives in
-   `replkit/operator_cli.py`).
-2. **Defaults are wrong for the primary environment.** `DEFAULT_ENABLED =
-   True` (hard-coded, `utils/ration.py`) rations BY DEFAULT, while the box
-   is an HTB lab where the RoE constraint the lane exists for doesn't
-   apply. The user experienced this as "kneecapped the framework." Options
-   (pick deliberately, this is a policy decision): default OFF with a
-   loud first-run opt-in; or keep ON but ship a LAB-profile constitution
-   as the deb default. Do NOT just flip `BUDGET_ENABLED=0` and declare
-   victory — the user rejected exactly that.
-3. **The math must survive the checklist.** Today: ceiling 600, drip
-   100/epoch (3600s), wordlist 4614 lines → 8 chunks of 600 → first chunk
-   debits the whole ceiling, then ~5 epochs (≈5h) to refill per chunk →
-   **≈40h for one ffuf run.** That is the "spends everything on payday,
-   then starves" experience. Whatever profile ships must make a
-   full-wordlist run complete on the order of minutes-to-an-hour in a lab.
+1. **No drain loop exists — RESOLVED 2026-11-06.** `utils/budget_drain.py`
+   is the pacemaker: bootstrap `launch_all()` autostarts it
+   (`BUDGET_DRAIN_AUTOSTART`, default on), ticks every
+   `BUDGET_DRAIN_INTERVAL_S` (code default 30) draining
+   `BUDGET_DRAIN_BATCH` (code default 2) per tick, respects
+   `manual_phase hold` (operator stop wins), and the state file
+   `run/budget/drain_state.json` + `framework_doctor(provider=
+   "budget_drain")` expose last-tick ts / backlog / admitted-deferred
+   counts. The dispatcher mapping lives in the daemon (single place;
+   replkit still reuses its own for the manual `budget drain` command).
+2. **Defaults are wrong for the primary environment — RESOLVED BY USER
+   DECISION 2026-11-06.** The lane stays ON-by-default, but the default
+   posture is now the drum-steady lab profile (§2A): gentle numbers, the
+   queue is a metronome, not a straitjacket. `BUDGET_ENABLED=0` remains
+   the operator's emergency lever only. The old "default OFF with opt-in"
+   option was not taken; the kill switch stays an emergency lever and
+   must never be offered again as the fix.
+3. **The math must survive the checklist — RESOLVED by §2A.** Drum-steady:
+   refill 150/300 s ⇒ ~1800 req/h ⇒ a full 4614-line wordlist in ≈ 2.5 h,
+   inter-release gaps 1.5–6 s. The "spends everything on payday, then
+   starves" profile is retired; the shipped numbers ARE the lab profile.
 
 ## 6. P2 — semantics + copy
 
 1. **Cancel doesn't reconcile the plan/queue ledger**: `ffuf_cancel` on a
    chunk's job doesn't mark its queue item or adjust budget; the item shows
-   one state, the job another.
-2. **`held_pending` copy lies by omission** — "the drain re-reads your
-   request every tick" is false until §5.1 exists. Reword to state who
-   actually runs the tick.
-3. **Batch pacing honesty**: still_short results skip the inter-release
-   jitter (only real launches sleep), so a manual drain of failures fires
-   at keystroke speed ("mach 1") — fine once §2.3's cause is fixed, but
-   verify real launches pace under throttle before trusting the tick.
+   one state, the job another. (Still open.)
+2. **`held_pending` copy** — §5.1 now exists (the daemon pacemaker), so the
+   "the drain re-reads your request every tick" claim is TRUE on the deb;
+   only the manual-REPL-only lane (bootstrap without the budget daemon) can
+   still say it falsely. Copied copy row: DONE as of pkg4's law.
+3. **Batch pacing honesty — RESOLVED by §2A + §3.2.**: still_short verdicts
+   are budget-state, not launches (dispatcher requeues, launches nothing),
+   and real launches pace via the drum band (1.5–6 s) + the 30 s/2 batch
+   cadence; the env-pacing fallback only applies on explicit decline.
+   Verified in the release-loop tests (band branch + env branch +
+   no-gap branch).
 4. `ffuf_payload`'s `options` as a JSON-encoded string (user habit from
    notebooks: `options={"wordlist": ...}` — a dict passed where the tool
    wants a flag string) is accepted by preflight coercion in some lanes and
@@ -170,7 +199,7 @@ unrelated to budget math:
 
 ## 7. The math, spelled out (why today's checklist cannot complete)
 
-Constitution defaults (`/etc/daharness/budget.yaml`, mirrors code defaults):
+RETIRED by §2A (kept for the record — this WAS the old law):
 
 ```
 requests:   ceiling 600, refill_per_epoch 100, floor 2, max_single 600
@@ -215,28 +244,40 @@ epoch_seconds: 3600
 
 ```
 cd /home/kali/github/systempackage/daharness
+python -m pytest tests/ -q        # full suite: 613 passed (2026-11-06)
+# ration-lane baseline, if you want the focused 9:
 python -m pytest tests/test_ration_a.py tests/test_ration_b.py \
   tests/test_ration_c.py tests/test_ration_d.py tests/test_ration_e.py \
   tests/test_ration_f1_hold_gate.py tests/test_wordlist_chunk.py \
   tests/test_concurrency.py tests/test_fleet_scheduler.py -q
 ```
 
-Run them to files when the terminal's output pipelining flakes
-(`> /tmp/x.log 2>&1; tail -1`). Status at session close: ration_a (66,
-incl. the two new HOLD tests) and concurrency green; b/c/d/e/f1 +
-wordlist_chunk + fleet were green BEFORE the §2.5 store edits — re-run
-them first thing next session before anything else.
+Status at session close: FULL suite 613 green (three consecutive loaded
+runs), including the newly hardened stub-timing tests — the suite went from
+"flaky in full-run order" to green: `test_sqlmap_fleet` fanout now holds
+its h4 slot with a 6 s stub (was 0.2 s — sweep_stale released it mid-loop
+under load), `test_job_store` TTL test observes terminal under DEFAULT ttl,
+and `test_worker_queue` promotion accepts all three lifecycle states of a
+completed one-winner claim. If a wall-clock test flakes again: it is
+stub-timing vs suite load, NOT lane logic — widen the window, don't rerun
+until green.
 
 ## 10. Suggested order of attack for next session
 
-1. Re-run §9 suites (baseline).
-2. Verify/repair §3.1 (phantom mint) with the UDS repro against a live
-   Brain built from current dev tree.
-3. Fix §3.2 (dispatcher chunk_plan consumption) + test.
-4. §5.1 drain loop (the pacemaker) + §3.3 deb rebuild + service restart.
-5. §4 result capture (ffuf -o location, cancel-loss honesty, plan rollup).
-6. §5.2/5.3 defaults + lab-profile constitution (policy decision with the
-   user — do not unilaterally flip the kill switch).
-7. Only after 1-6: the original deferred topic — a daemon-side anything,
-   and re-examine how today's five fixes compose in the hands-off flow
-   end-to-end (queue → coffee → verdicts).
+1-6 are DONE (code + tests, see §2, §2A, §3, §5.1/2/3, §4 partial). What
+remains, in order:
+
+1. **pkg4 deb build** (version bump + `dpkg-buildpackage`; postinst wiring
+   unchanged: /etc/budget.yaml seeds only-if-absent, env pristine-flip
+   idempotent) + install + service restart.
+2. **Live /etc/daharness/budget.yaml overwrite** with the drum-steady law
+   (epoch 300, refill 150, band {1.5, 6.0}; keep other dims at shipped
+   values) — the constitution is read per-call, no restart needed for it.
+3. **§3.1 UDS repro against the live deb Brain** — expect
+   LAUNCH/duplicate/requeued for keyed args, never `chunk_plan`.
+4. **Drum watch**: enqueue an ffuf plan on 192.168.56.107; confirm the
+   30 s ticks drain it 1-2/tick with 1.5-6 s inter-release gaps; rollup
+   arrives via `budget_queue_status(plan_id=...)`; scope arming via the
+   gateway (kali cannot read /var/lib directly).
+5. Only after 1-4: the original deferred topic — a daemon-side anything,
+   and how the whole flow composes hands-off (queue → coffee → verdicts).

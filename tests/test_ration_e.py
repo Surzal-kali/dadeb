@@ -36,6 +36,8 @@ def engine(tmp_path, monkeypatch):
               "BUDGET_ACCRUE_TICK_EPOCHS", "BUDGET_MONO_CLOCK",
               "BUDGET_DRAW_TTL_HOURS"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BUDGET_CONSTITUTION",
+                       '{"release_jitter": {"min": 0.0, "max": 0.0}}')
     rt.reset_engine()
     yield rt.get_engine()
     rt.reset_engine()
@@ -77,7 +79,8 @@ class TestM4Clock:
         bal = s._accrue(node, 1000.0 + 21 * const.epoch_s,
                         const.epoch_s)
         assert bal["requests"]["remaining"] == pytest.approx(
-            100.0, abs=0.5), "clock-jump must not grant 21 epochs of credit"
+            const.defaults["requests"]["refill_per_epoch"], abs=0.5), \
+            "clock-jump must not grant 21 epochs of credit"
 
     def test_budget_now_ignores_wall_clock_jumps(self, engine, monkeypatch):
         fake = [1000.0]

@@ -153,6 +153,16 @@ CREATE TABLE IF NOT EXISTS queue_plans (
     expires_at REAL NOT NULL,
     state TEXT NOT NULL DEFAULT 'open'
 );
+CREATE TABLE IF NOT EXISTS plan_verdicts (
+    plan_id TEXT NOT NULL,
+    qid TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    job_ref TEXT,
+    status TEXT,
+    verdict_json TEXT,
+    ts REAL NOT NULL,
+    PRIMARY KEY (plan_id, qid)
+);
 CREATE TABLE IF NOT EXISTS emissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL, tool TEXT NOT NULL,
@@ -988,6 +998,56 @@ class RationStore:
             (plan_id,))
         self.conn.commit()
         return int(cur.rowcount)
+
+    # --- plan verdict rollup (§4 P0, 2026-11-07) ------------------------------
+
+    @staticmethod
+    def _trim_verdict_payload(envelope: dict) -> str:
+        """Verdict envelopes are verdict-parser OUTPUT (already a summary) —
+        but a findings list can still be long, so cap it (~120 entries) and
+        keep the rollup json bounded."""
+        payload = {k: v for k, v in (envelope or {}).items()
+                   if k not in ("log", "log_path", "scratch_ref", "_raw")}
+        findings = payload.get("findings")
+        if isinstance(findings, list) and len(findings) > 120:
+            counts = payload.get("findings_count")
+            try:
+                count_n = int(counts or len(findings))
+            except (TypeError, ValueError):
+                count_n = len(findings)
+            payload["findings"] = findings[:120]
+            payload["findings_truncated"] = count_n
+        try:
+            return json.dumps(payload, default=str)
+        except (TypeError, ValueError):
+            return json.dumps({"note": "unserializable verdict payload"},
+                              default=str)
+
+    def record_plan_verdict(self, plan_id: str, qid: str,
+                            *, chunk_index: int, job_ref: str,
+                            envelope: dict) -> None:
+        """§4 P0 rollup (2026-11-07): advance_plans previously discarded
+        everything from the poll envelope except ``.status`` — plan results
+        lived only in a job log that TTL sweeps delete. Terminal chunk
+        observations get their verdict parser output stored HERE at
+        observation time, so budget_queue_status(plan_id=...) can roll up a
+        finished plan without the log. Idempotent by (plan_id, qid)."""
+        self.conn.execute(
+            "INSERT INTO plan_verdicts (plan_id, qid, chunk_index, job_ref,"
+            " status, verdict_json, ts) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(plan_id, qid) DO UPDATE SET job_ref=excluded.job_ref,"
+            " status=excluded.status, verdict_json=excluded.verdict_json,"
+            " ts=excluded.ts",
+            (plan_id, qid, int(chunk_index or 0), job_ref,
+             str((envelope or {}).get("status") or ""),
+             self._trim_verdict_payload(envelope), time.time()))
+        self.conn.commit()
+
+    def plan_verdicts(self, plan_id: str) -> list[dict]:
+        """Stored per-chunk verdict payloads for a plan's lens."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM plan_verdicts WHERE plan_id=? "
+            "ORDER BY chunk_index ASC", (plan_id,))]
 
     # --- reserves (§9) --------------------------------------------------------
     # Operator-minted funds for engagement backlog. Mint/release are

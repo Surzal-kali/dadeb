@@ -19,6 +19,7 @@ payloads.* ids registered) and the budget_queue_status plan lens.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -60,6 +61,8 @@ def engine(tmp_path, monkeypatch):
               "BUDGET_EPOCH_SECONDS", "BUDGET_QUEUE_TTL_HOURS",
               "BUDGET_DRAIN_BATCH", "BUDGET_PLAN_TTL_HOURS"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BUDGET_CONSTITUTION",
+                       '{"release_jitter": {"min": 0.0, "max": 0.0}}')
     rt.reset_engine()
     rt.reset_ration_store()
     yield rt.get_engine()
@@ -477,3 +480,81 @@ def test_queue_status_plan_lens(engine, tmp_path):
     text = rt.budget_queue_status(plan_id=plan["plan_id"])
     assert plan["plan_id"] in text and "lines=650" in text
     assert "total=2" in text and "chunk 1/2" in text
+
+
+# --- §3.1 verified behaviorally (2026-11-07) ---------------------------------
+
+def test_run_ffuf_chunk_keyed_body_launches_slice(engine, tmp_path,
+                                                  monkeypatch):
+    """§3.1, behavioral (the 2026-11-06 UDS discriminant in-process): with
+    a REAL plan minted, a body call carrying its chunk keys must launch the
+    SLICE (the -w arg is the plan's materialized slice file for this
+    index) and NEVER re-mint or mint extra plans. A keyed call that
+    returns a chunk_plan envelope is the phantom-mint bug; error-status is
+    the honest degenerate (missing plan)."""
+    import inspect
+    import os
+
+    import utils.scope_gate as sg
+    from payloads.ffuf import run_ffuf
+
+    wl = _wordlist(tmp_path, "big.txt", 650)
+    plan = _plan(engine, wl)
+    pid = plan["plan_id"]
+    store = rt.get_ration_store()
+    items = store.due_items()
+    assert items, "plan mint pre-mints its first lazy window"
+    item = items[0]
+    args = json.loads(item["arguments_json"])
+    assert args.get("chunk_plan_id") == pid
+
+    captured = {}
+
+    def fake_launch(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        return {"job_id": 4242}
+
+    monkeypatch.setattr(sg, "check_scan", lambda target: (True, ""))
+    monkeypatch.setattr("payloads.ffuf.launch_job", fake_launch)
+
+    minted_before = store.plan_counts(pid)["minted"]
+    out = inspect.unwrap(run_ffuf)(**args)
+    assert out.get("job_id") == 4242, \
+        f"keyed dispatch must LAUNCH, not re-mint: {out}"
+    assert out.get("chunk_plan_id") == pid
+    assert out.get("chunk_index") == item["chunk_index"] + 1
+    wl_arg = captured["command"][captured["command"].index("-w") + 1]
+    assert wl_arg.endswith(f"{pid}/{item['chunk_index']}.txt"), \
+        f"slice file must be the launched wordlist, got {wl_arg}"
+    assert out.get("wordlist") == wl_arg
+    # results never live in /tmp (debt §4 P0): -o lands in the job dir
+    o_arg = captured["command"][captured["command"].index("-o") + 1]
+    assert f"{os.sep}run{os.sep}jobs{os.sep}ffuf" in o_arg and o_arg not in (
+        "/tmp",), "ffuf -o must live under <workspace>/run/jobs/ffuf"
+    # no plan growth: the keyed call never re-minted (+no window bump)
+    assert store.plan_counts(pid)["minted"] == minted_before
+
+
+def test_run_ffuf_keyed_bogus_plan_honest_error(engine, tmp_path,
+                                                monkeypatch):
+    """§3.1 negative: a keyed call whose plan is gone returns the honest
+    error envelope — and mints NOTHING (the phantom-mint shape)."""
+    import inspect
+
+    import utils.scope_gate as sg
+    from payloads.ffuf import run_ffuf
+
+    wl = _wordlist(tmp_path, "small.txt", 3)
+    monkeypatch.setattr(sg, "check_scan", lambda target: (True, ""))
+    args = {"url": "http://10.0.0.5/FUZZ", "wordlist": wl,
+            "chunk_plan_id": "wp-nope", "chunk_index": 0,
+            "chunk_offset": 0, "chunk_slice": 3, "chunk_total_chunks": 1}
+    out = inspect.unwrap(run_ffuf)(**args)
+    assert out.get("job_id") is None
+    assert out.get("status") == "error"
+    assert "no longer exists" in out.get("error", "")
+    store = rt.get_ration_store()
+    n_plans = store.conn.execute(
+        "SELECT COUNT(*) FROM queue_plans").fetchone()[0]
+    assert n_plans == 0, "an honest-error keyed call must not mint a plan"

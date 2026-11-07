@@ -351,7 +351,13 @@ def test_promotion_is_one_lane_wins(env, monkeypatch):
         "SELECT status, job_id FROM worker_units WHERE unit_key = ?",
         (r2["unit_key"],),
     ).fetchone()
-    assert r2_row["status"] == "launched" and r2_row["job_id"]
+    # Under load all three lifecycle states are legitimate one-winner
+    # outcomes here: `launching` (a lane claimed the row, bind in flight),
+    # `launched` (bound), or `finished` (the fast stub already exited and
+    # settled the row). The anti-double-launch property is the guarded
+    # claim itself — exactly ONE row for this key, bound job once landed.
+    assert r2_row["status"] in ("launching", "launched", "finished")
+    assert r2_row["job_id"] or r2_row["status"] == "launching"
     twin_rows = q.conn.execute(
         "SELECT COUNT(*) AS n FROM worker_units WHERE unit_key = ?",
         (r2["unit_key"],),

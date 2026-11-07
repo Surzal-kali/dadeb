@@ -376,13 +376,25 @@ def advance_plans(*, now: float | None = None, limit: int = 8) -> dict:
                 continue
             try:
                 from utils.background_job import poll_job
-                status = str((poll_job(ref) or {}).get("status") or "")
+                env = poll_job(ref) or {}
+                status = str(env.get("status") or "")
             except Exception:
                 logger.debug("swallowed poll in advance_plans (%s)", ref,
                              exc_info=True)
                 continue
             out["observed"] += 1
             if status.lower() in ("done", "failed"):
+                # §4 P0 rollup (2026-11-07): harvest the verdict envelope at
+                # observation time — the log file it points at is TTL-swept,
+                # so the plan lens needs its own copy to roll up results.
+                try:
+                    store.record_plan_verdict(
+                        plan_id, chunk["qid"],
+                        chunk_index=int(chunk.get("chunk_index") or 0),
+                        job_ref=str(ref or ""), envelope=dict(env))
+                except Exception:
+                    logger.debug("swallowed plan-verdict record (%s)", ref,
+                                 exc_info=True)
                 store.finish_item(chunk["qid"])
                 out["finished"] += 1
         out["minted"] += mint_window(plan_id, now=now)

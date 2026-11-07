@@ -136,19 +136,22 @@ def test_finished_cap_evicts_oldest_never_running(store, tmp_path, monkeypatch):
 
 
 def test_ttl_sweep_removes_old_finished_rows(store, tmp_path, monkeypatch):
-    monkeypatch.setenv("BG_JOB_TTL_HOURS", "0.0001")  # ~0.36s
+    # Observe the terminal transition with the DEFAULT TTL active: a slow
+    # poll (loaded suite) would otherwise delete the row inside its own
+    # done-observing poll's cap sweep (TTL 0.36s < poll latency) and the
+    # explicit sweep below would have nothing left to expire.
     j = store.launch(_quick_cmd(tmp_path), tool_name="t", agent_id="ttl", timeout=60)
     deadline = time.time() + 5
     while time.time() < deadline:
         if store.poll(j["job_id"])["status"] == "done":
             break
         time.sleep(0.1)
-    # Age the finished row past the short-TTL cutoff: sweep() reads the
-    # env at call time, so the row must be OLDER than the 0.36s cutoff.
+    # NOW shorten the TTL: sweep() reads the env at call time, so the row
+    # must only be OLDER than the 0.36s cutoff when the sweep runs.
+    monkeypatch.setenv("BG_JOB_TTL_HOURS", "0.0001")  # ~0.36s
     time.sleep(0.6)
-    # Sweep UNDER the short TTL — the reset-to-24h happens after.
     removed = store.sweep()
-    monkeypatch.setenv("BG_JOB_TTL_HOURS", "24")
+
     assert removed["expired"] >= 1
     assert store.get(j["job_id"]) is None
 

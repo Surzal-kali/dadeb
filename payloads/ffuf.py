@@ -9,15 +9,18 @@ immediately; ``ffuf_status`` polls until ``status: "done"``.
 from __future__ import annotations
 
 import json as _json
+import logging
 import os
 import re
 import subprocess
 import uuid
 from typing import Any
 
-from constants import framework_tool
+from constants import framework_tool, resolve_workspace_root
 from utils.background_job import launch_job, poll_job, terminate_job, register_verdict_parser
 from utils.wordlists import resolve_default_wordlist, resolve_wordlist
+
+logger = logging.getLogger(__name__)
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -572,9 +575,18 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     # fail fast before the launch+poll cycle burns time on a path ffuf will
     # reject with "could not read wordlist".
 
-    out_path = os.path.join(
-        os.getenv("BG_JOB_LOG_DIR", "/tmp"), f"ffuf_out_{uuid.uuid4().hex[:8]}.json"
-    )
+    # The -o json path lives under the harness jobs dir (§4: results never
+    # default to /tmp) — ffuf only writes it on a clean exit, so the verdict
+    # parser reads it at poll time. Falls back to BG_JOB_LOG_DIR if the
+    # workspace is unreadable.
+    try:
+        out_dir = os.path.join(resolve_workspace_root(), "run", "jobs", "ffuf")
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError:
+        logger.debug("ffuf output dir fell back to BG_JOB_LOG_DIR",
+                     exc_info=True)
+        out_dir = os.getenv("BG_JOB_LOG_DIR", "/tmp")
+    out_path = os.path.join(out_dir, f"ffuf_out_{uuid.uuid4().hex[:8]}.json")
 
     opt_list = shlex.split(options) if options else []
     opt_list, _rr_stripped = _strip_follow_redirects(opt_list)
@@ -799,6 +811,13 @@ def ffuf_cancel(job_id: str) -> dict[str, Any]:
         "message": (
             f"ffuf job {job_id} terminated"
             if terminated
-            else f"no live ffuf job with id {job_id!r} (already finished or evicted)"
-        ),
+            else f"no live ffuf job with id {job_id!r} (already finished or evicted)"),
+        # Honesty (§4 P0): ffuf writes the -o json summary only on a clean
+        # exit — a cancelled run's summary file may never exist. Partial
+        # result lines survive in the job log (verbatim, no -o), readable
+        # via ffuf_status; treat them as the ground truth after a cancel.
+        "results_note": (
+            "cancel semantics: the -o json summary is written only on a "
+            "clean exit and may never exist for this run; the job log's "
+            "partial result rows remain readable via ffuf_status"),
     }

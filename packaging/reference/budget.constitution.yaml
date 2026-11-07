@@ -30,7 +30,7 @@
 per_dim:
   requests:
     ceiling: 600             # burst top-up
-    refill_per_epoch: 100    # drip per epoch (floor keeps HOLD-mode alive)
+    refill_per_epoch: 150    # drip per epoch (floor keeps HOLD-mode alive)
     floor: 2
   packets:
     ceiling: 2000000
@@ -51,15 +51,18 @@ max_single_call:             # a single declared call above this is REJECTed
   auth_events: 60
   bytes: 268435456
 
-epoch_seconds: 3600          # refill epoch length (0 < n)
+epoch_seconds: 300           # refill epoch length (0 < n); the lab drum-steady
+                             # default -- 150 requests/5 min ≈ 1800/h, a full
+                             # 4614-line wordlist ≈ 2.5h (was 3600/100 ≈ 40h+)
 
 store: "sqlite"              # validated literal -- the sole leg; do not edit
 
 # ----------------------- everything below is OPTIONAL -----------------------
 # absent = engine default as noted on each block.
 
-# release_jitter: {min: 1.0, max: 8.0}      # drain pacing jitter window, s;
-#                                           # absent = release-jitter env pacing
+# release_jitter: {min: 1.5, max: 6.0}     # drum-steady release band, s;
+#                                           # code default -- decline with
+#                                           # {min: 0, max: 0} for env pacing
 
 # controller:                               # dynamic pacing authority bounds
 #   max_transitions_per_hour: 12            # >= 1; authority ring on transitions

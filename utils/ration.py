@@ -77,9 +77,9 @@ def _lazy_fleet():
 # design (ALWAYS L0); flip to 0 to shelve enforcement without uninstalling.
 DEFAULT_ENABLED = True
 
-_EPOCH_S_DEFAULT = 3600.0
+_EPOCH_S_DEFAULT = 300.0
 _QUEUE_TTL_H_DEFAULT = 24.0
-_DRAIN_BATCH_DEFAULT = 8
+_DRAIN_BATCH_DEFAULT = 2
 # Bounded-failure exit (2026-11-06 seam close): how many consecutive
 # dispatch_failed ticks an item may survive before it is consumed as
 # 'failed' with the last error surfaced. 0 = fail on the first raise.
@@ -169,7 +169,7 @@ _DRAW_TTL_H_DEFAULT = 24.0
 # ─── Constitution (§8) ────────────────────────────────────────────────────────
 
 _DIM_DEFAULTS = {
-    "requests":    {"ceiling": 600.0, "refill_per_epoch": 100.0, "floor": 2.0},
+    "requests":    {"ceiling": 600.0, "refill_per_epoch": 150.0, "floor": 2.0},
     "packets":     {"ceiling": 2_000_000.0, "refill_per_epoch": 250_000.0, "floor": 500.0},
     "auth_events": {"ceiling": 60.0, "refill_per_epoch": 5.0, "floor": 0.2},
     "bytes":       {"ceiling": 268_435_456.0, "refill_per_epoch": 33_554_432.0,
@@ -181,6 +181,12 @@ _MAX_SINGLE_CALL = {
     "auth_events": 60.0,
     "bytes": 268_435_456.0,
 }
+
+# Drum-steady release band (2026-11-07 lab profile): the no-env law authors
+# a 1.5-6.0s jitter window between drain releases — entropy BETWEEN launches
+# is the drum, not a fixed cadence. An authoring may override it; authoring
+# {min: 0, max: 0} DECLINES the band (operator_tick falls back to env pacing).
+_RELEASE_JITTER_DEFAULT = {"min": 1.5, "max": 6.0}
 
 
 @dataclass(frozen=True)
@@ -196,7 +202,11 @@ class Constitution:
     defaults: dict[str, dict[str, float]]
     max_single_call: dict[str, float]
     epoch_s: float
-    release_jitter: dict[str, float] | None = None   # {"min": s, "max": s}
+    release_jitter: dict[str, float] | None = None   # {"min": s, "max": s};
+                                                      # the no-env law carries
+                                                      # _RELEASE_JITTER_DEFAULT
+                                                      # (drum band); {0,0}
+                                                      # declines it
     controller: dict[str, Any] | None = None          # authority bounds
     reserve_partitions: dict[str, Any] | None = None  # entry/exit sizing
     cdn_origin_keys: dict[str, str] | None = None     # M5 dimension pins
@@ -408,7 +418,7 @@ def constitution(
                 raise
     elif raw:
         overrides = json.loads(raw)
-    rj: dict[str, float] | None = None
+    rj: dict[str, float] | None = dict(_RELEASE_JITTER_DEFAULT)
     ctrl: dict[str, Any] | None = None
     parts: dict[str, Any] | None = None
     cdn: dict[str, str] | None = None
@@ -442,7 +452,9 @@ def constitution(
                 raise ValueError("constitution epoch_seconds must be a "
                                  "positive number")
             epoch_s = float(es)
-        rj = _parse_release_jitter(overrides.get("release_jitter"))
+        authored_rj = _parse_release_jitter(overrides.get("release_jitter"))
+        if authored_rj is not None:
+            rj = authored_rj  # band absent in the authoring keeps the drum
         ctrl = _parse_controller(overrides.get("controller"))
         parts = _parse_partitions(overrides.get("reserve_partitions"))
         cdn = _parse_cdn_keys(overrides.get("cdn_origin_keys"))
@@ -1256,10 +1268,12 @@ class RationEngine:
             jitter_hi=epoch_s * (1.0 + spread))
         # U2: observe wordlist-plan chunk jobs BEFORE selecting the batch —
         # finished siblings free their slots and mint the next lazy window
-        # so the same tick can carry the plan forward.
+        # so the same tick can carry the plan forward. The advance summary
+        # rides the tick result (pacemaker state file + doctor lens).
+        _adv: dict = {}
         try:
             from utils.wordlist_chunking import advance_plans
-            advance_plans(now=now)
+            _adv = advance_plans(now=now) or {}
         except Exception:
             logger.debug("swallowed plan advance in operator_tick",
                          exc_info=True)
@@ -1416,6 +1430,56 @@ class RationEngine:
                                 "reason": out.get("reason")})
                 dispatched += 1
                 continue
+            if out.get("plan_minted"):
+                # §3.2 seam (2026-11-07): a dispatch minted a wordlist plan
+                # at drain. The dispatcher maps it to plan_minted (never
+                # finished/requeued) and the ENGINE decides fate by
+                # re-deriving chunk-keyed-ness from the item's OWN args
+                # (authoritative; the envelope's phantom flag is only
+                # observability):
+                #   keyed   → PHANTOM mint: a chunk re-decided plan mode
+                #             whole-wordlist (deterministic arg-loss — the
+                #             plan's minter would do it the same every
+                #             pass). Fail the item on FIRST observation and
+                #             cancel the minted plan; no retry budget — a
+                #             retry's only product is another empty plan.
+                #   unkeyed → legitimate conversion: the whole-wordlist
+                #             item minted the plan its work lives in;
+                #             consumed as done-converted, chunk queue
+                #             carries it under BUDGET_DRAIN_BATCH pacing.
+                _keyed = False
+                try:
+                    from utils.budget_drain import item_carries_chunk_keys
+                    _keyed = item_carries_chunk_keys(item)
+                except Exception:
+                    logger.debug("swallowed keyed-ness probe at drain",
+                                 exc_info=True)
+                _pid = str(out.get("plan_id") or "")
+                if _keyed:
+                    self.store.fail_item(
+                        qid, f"phantom plan re-mint at drain — plan {_pid} "
+                             f"re-decided plan mode for a chunk-keyed item; "
+                             f"phantom plan cancelled; item failed "
+                             f"(deterministic arg-loss)")
+                    try:
+                        self.store.cancel_plan(
+                            _pid, note=f"phantom mint from keyed item {qid}")
+                    except Exception:
+                        logger.debug("swallowed phantom-plan cancel",
+                                     exc_info=True)
+                    results.append({"qid": qid,
+                                    "decision": "failed_phantom_plan",
+                                    "plan_id": _pid})
+                    dispatched += 1
+                    continue
+                self.store.cancel_item(
+                    qid, note=(f"converted to plan {_pid} — work continues "
+                               f"as its chunk items; poll "
+                               f"budget_queue_status(plan_id=\"{_pid}\")"))
+                results.append({"qid": qid, "decision": "converted_to_plan",
+                                "plan_id": _pid})
+                dispatched += 1
+                continue
             if str(out.get("status") or "").strip().lower() == "failed":
                 # Failed-envelope seam close (2026-11-06): run_tool wraps
                 # every raised tool-body error (incl. ScopeGateError) as a
@@ -1474,27 +1538,35 @@ class RationEngine:
             # Sync sleep callables return None; asyncio.sleep is awaitable —
             # both work, the loop never freezes.
             dispatched += 1
-            if release_base > 0.0 and dispatched < _eff_batch:
-                if authored_jitter:
-                    # M2 constitution-authored release band: the min is the
-                    # floor interval, the max the spread — pacing scaling
-                    # and the cap still apply (cap lifts only to fit the
-                    # authored max).
-                    delay = min(
-                        authored_jitter["min"] + random.uniform(
-                            0.0, max(0.0, authored_jitter["max"]
-                                     - authored_jitter["min"]))
-                        * (1.0 / pacing),
-                        max(release_cap, authored_jitter["max"]))
-                else:
-                    delay = min(random.uniform(0.0, release_base)
-                                * (1.0 / pacing), release_cap)
-                if delay > 0.0:
-                    out_s = sleep_fn(delay)
-                    if hasattr(out_s, "__await__"):
-                        await out_s
+            if dispatched >= _eff_batch:
+                continue
+            if authored_jitter and (authored_jitter["min"] > 0.0
+                                    or authored_jitter["max"] > 0.0):
+                # M2 constitution-authored release band: the min is the
+                # floor interval, the max the spread — pacing scaling and
+                # the cap still apply (cap lifts only to fit the authored
+                # max).
+                delay = min(
+                    authored_jitter["min"] + random.uniform(
+                        0.0, max(0.0, authored_jitter["max"]
+                                 - authored_jitter["min"]))
+                    * (1.0 / pacing),
+                    max(release_cap, authored_jitter["max"]))
+            elif release_base > 0.0:
+                delay = min(random.uniform(0.0, release_base)
+                            * (1.0 / pacing), release_cap)
+            else:
+                # declined band {0,0} + no env pacing → no inter-release gap
+                continue
+            if delay > 0.0:
+                out_s = sleep_fn(delay)
+                if hasattr(out_s, "__await__"):
+                    await out_s
         return {"decision": "drained", "results": results,
-                "backlog_remaining": max(0, len(items) - len(results))}
+                "backlog_remaining": max(0, len(items) - len(results)),
+                "advance": {"settled": list(_adv.get("settled") or []),
+                            "failed_plans": list(_adv.get("failed_plans")
+                                                 or [])}}
 
     # -- L1 reconcile (§10) -----------------------------------------------------
 
@@ -1922,6 +1994,37 @@ def budget_queue_status(tool: str = "",
                     f"job={c.get('job_ref') or '-'}")
             if len(chunk_rows) > limit:
                 plan_section += f"\n  … {len(chunk_rows) - limit} more chunks"
+            # §4 P0 verdict rollup (2026-11-07): terminal chunks carry their
+            # poll-time verdict parser output in plan_verdicts, so a settled
+            # plan reads its results here long after the job logs TTL out.
+            try:
+                verdicts = store.plan_verdicts(plan_id)
+            except Exception:
+                logger.debug("swallowed plan-verdict read in lens",
+                             exc_info=True)
+                verdicts = []
+            for v in verdicts[:limit]:
+                payload = {}
+                try:
+                    payload = json.loads(v.get("verdict_json") or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                findings = payload.get("findings") or []
+                samples = []
+                for f in findings[:5]:
+                    if isinstance(f, dict):
+                        samples.append(str(f.get("path") or f.get("url") or "?"))
+                fc = payload.get("findings_count")
+                try:
+                    fc_n = int(fc) if fc is not None else len(findings)
+                except (TypeError, ValueError):
+                    fc_n = len(findings)
+                plan_section += (
+                    f"\n  verdict {v['qid']} chunk"
+                    f" {int(v.get('chunk_index') or 0) + 1}/{total}"
+                    f" [{v.get('status') or '-'}] findings={fc_n}"
+                    + (" sample=" + ",".join(x for x in samples if x)
+                       if samples else ""))
     rows_sql = None
     if state and state != "all":
         rows = store.conn.execute(
