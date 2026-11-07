@@ -74,6 +74,38 @@ def _inject_noninteractive(extra: list[str]) -> list[str]:
     return extra
 
 
+def _inject_wire_pacing(tokens: list, slice_lines: int) -> dict[str, Any] | None:
+    """pkg7 — the drum's WIRE leg. A chunk pays exactly what one epoch
+    funds; pace its requests across that epoch (``-t 1 -rate N``) so the
+    target sees a slow continuous stream instead of ffuf's default burst
+    pool (which emptied a 600-request slice in seconds). Caller-provided
+    ``-t`` / ``-rate`` win per-flag; None = law unreadable (launch stays
+    unshaped, exactly as before pkg7)."""
+    try:
+        from utils.wordlist_chunking import epoch_pacing
+        pace = epoch_pacing(slice_lines)
+    except Exception:
+        logger.debug("swallowed epoch_pacing read for wire pacing",
+                     exc_info=True)
+        return None
+    if pace is None:
+        return None
+    lower = {t.lower() for t in tokens}
+    applied: list[str] = []
+    caller_wins: list[str] = []
+    if "-rate" not in lower:
+        tokens.extend(["-rate", str(pace["rate_per_second"])])
+        applied.append("rate")
+    else:
+        caller_wins.append("rate")
+    if "-t" not in lower:
+        tokens.extend(["-t", "1"])
+        applied.append("threads")
+    else:
+        caller_wins.append("threads")
+    return {**pace, "applied": applied, "caller_wins": caller_wins}
+
+
 def _inject_scan_config(extra: list[str], url: str,
                         scope_handle: str | None,
                         scope_platform: str | None) -> tuple[list[str], dict[str, Any] | None]:
@@ -526,6 +558,7 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
             "wordlist": wordlist,
             "lines": int(plan["lines"]),
             "chunk_size": int(plan["chunk_size"]),
+            "paced": bool(_decision.get("pace_epoch_s")),
             "total_chunks": total,
             "binding_dim": plan["binding_dim"],
             "window": window,
@@ -539,7 +572,10 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
                 "through the full gate (per-chunk debits), minting the next "
                 "window as sibling chunks finish. Chunks re-slice this "
                 "wordlist at dispatch; recursion/multi-wordlist actuals are "
-                "metered L1 against the declared slice. Do NOT re-issue the "
+                "metered L1 against the declared slice. Each chunk is paced "
+                "on the wire across its funding epoch (ffuf -t 1 -rate) — "
+                "the target sees a slow stream per beat, not a burst. "
+                "Do NOT re-issue the "
                 "call — poll budget_queue_status(plan_id=...)"),
         }
 
@@ -589,6 +625,13 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     out_path = os.path.join(out_dir, f"ffuf_out_{uuid.uuid4().hex[:8]}.json")
 
     opt_list = shlex.split(options) if options else []
+    # pkg7 wire pacing — chunk dispatches only; a caller -rate/-t wins
+    # per-flag (checked inside the helper), and the scan-config lane
+    # below sees the injected rate and leaves it alone.
+    _wire_pacing = None
+    if _decision and _decision["mode"] == "chunk":
+        _wire_pacing = _inject_wire_pacing(opt_list,
+                                           int(_decision["chunk_size"]))
     opt_list, _rr_stripped = _strip_follow_redirects(opt_list)
     opt_list = _inject_noninteractive(opt_list)
     opt_list = _inject_ignore_comments(opt_list)
@@ -657,6 +700,8 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     # default) so the secretary model knows to swap in a targeted list.
     job["wordlist"] = wordlist
     job["default_wordlist_used"] = default_used
+    if _wire_pacing:
+        job["wire_pacing"] = _wire_pacing
     if scan_cfg:
         job["scan_config_applied"] = scan_cfg
     return job

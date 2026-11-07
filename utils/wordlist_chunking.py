@@ -203,24 +203,82 @@ def lane_decision(tool_id: str, arguments: dict | None,
                          for d, v in vector.items()}}
     # Sliced: chunk size = the largest n where EVERY dim's n×per-unit
     # stays under max_single (§2.2 — min across dims, clamped ≥1); the
-    # binding dim is the tightest one.
+    # binding dim is the tightest one. pkg7: the slice then shrinks to
+    # what ONE epoch funds (min over dims of refill_per_epoch ÷ per-unit)
+    # whenever tighter — the burst-ceiling slice emptied a funded chunk
+    # at the tool's own wire speed while the ledger refilled exactly one
+    # epoch per chunk (bursts separated by dead air). An epoch-funded
+    # slice is payable the moment it is minted, and epoch_pacing spreads
+    # it across that epoch instead of bursting it.
     best_dim, best_n = None, lines
     for d, v in vector.items():
         if v is None or v <= 0:
             continue
         cap = ms.get(d, math.inf)
+        if not math.isfinite(cap):
+            continue     # unbounded dim cannot bind (pkg7: partial max_single)
         n = max(1, int(math.floor(cap / v)))
         if n < best_n or (n == best_n and best_dim is None):
             best_n, best_dim = n, d
     chunk_size = max(1, best_n)
+    pace_epoch_s = None
+    funding = epoch_funding()
+    if funding is not None:
+        epoch_s, refills = funding
+        for d, v in vector.items():
+            if v is None or v <= 0:
+                continue
+            refill = refills.get(d, 0.0)
+            if refill <= 0:
+                continue
+            n = max(1, int(math.floor(refill / v)))
+            if n < chunk_size:
+                chunk_size, best_dim, pace_epoch_s = n, d, epoch_s
     total_chunks = int(math.ceil(lines / chunk_size))
     return {"mode": "plan", "lines": lines, "chunk_size": chunk_size,
+            "pace_epoch_s": pace_epoch_s,
             "total_chunks": total_chunks, "wordlist": str(wordlist),
             "binding_dim": best_dim or "requests",
             "window": min(total_chunks, plan_window_default()),
             "slices": {d: (None if (v is None or v <= 0)
                            else chunk_size * v)
                        for d, v in vector.items()}}
+
+
+def epoch_funding() -> tuple[float, dict[str, float]] | None:
+    """``(epoch_seconds, {dim: refill_per_epoch})`` from the LIVE law, or
+    ``None`` when the constitution is unreadable — callers must keep the
+    max_single slice in that case, never guess (same contract as
+    max_single_vector)."""
+    try:
+        from utils.ration import constitution
+        c = constitution()
+        policy = c.policy()
+    except Exception:
+        logger.debug("swallowed constitution read in epoch_funding",
+                     exc_info=True)
+        return None
+    refills = {d: float(spec.get("refill_per_epoch", 0.0))
+               for d, spec in policy.items()}
+    return float(c.epoch_s), refills
+
+
+def epoch_pacing(slice_lines: int) -> dict | None:
+    """The wire leg of the drum (pkg7): pace ONE chunk's requests across
+    the epoch that funds it. ffuf's ``-rate`` is an integer req/s, so the
+    rate floors at 1 — a slower law (slice/epoch < 1) still gets 1/s, and
+    per-epoch funding governs launch cadence, not ffuf's burst pool.
+    ``None`` = constitution unreadable (launch stays unshaped)."""
+    if slice_lines <= 0:
+        return None
+    funding = epoch_funding()
+    if funding is None:
+        return None
+    epoch_s, _refills = funding
+    if epoch_s <= 0:
+        return None
+    rate = max(1, int(math.floor(slice_lines / epoch_s)))
+    return {"rate_per_second": rate, "epoch_s": epoch_s}
 
 
 def _budget_lane_ready(tool_id: str) -> bool:

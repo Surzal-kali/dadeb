@@ -1,3 +1,31 @@
+daharness (0.2.0+pkg7) kali; urgency=high
+
+  * The drum's WIRE leg (shape fix, .107 diagnosis: chunk 1 launched at
+    22:55:55 and 600 requests hit the target in seconds — the meter
+    stops at the launch). Two seams, same law, same throughput:
+    (1) the wordlist minter slices plans to what ONE epoch funds
+    (utils/wordlist_chunking.py: epoch_folding of refill_per_epoch over
+    dims, clamped >= 1, taken whenever tighter than the max_single
+    slice; epoch_funding()/epoch_pacing() helpers) instead of the burst
+    ceiling — beat #1 fires on the first tick and every later beat
+    funds within its own epoch, killing the 20-30 min budget_short
+    dead-air walls; (2) ffuf chunk dispatches are paced on the wire
+    (payloads/ffuf.py:_inject_wire_pacing: -t 1 -rate max(1,
+    floor(slice/epoch_s)); caller/scan-config -t/-rate win per-flag;
+    envelope stamps wire_pacing, chunk_plan envelope gains paced) so a
+    chunk spreads across its funding epoch instead of bursting — the
+    target sees a slow stream per beat, not a burst. Unreadable law
+    degrades to the unshaped launch (no guessed rates). Single-call
+    dispatches are never paced. Also fixes a latent OverflowError in
+    the slice calc when max_single_call omits a dim (unbounded dims
+    could not bind). Regression: tests/test_wordlist_chunk.py pkg7
+    block (epoch slice vs law, rate math, caller-wins, degenerate-law
+    passthrough, wired chunk dispatch, single-mode untouched) + slice
+    fixtures re-based to the epoch law. Install note: sudo dpkg -i the
+    new deb; pure-code change, no re-index needed.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 07 Nov 2026 07:05:00 -0700
+
 daharness (0.2.0+pkg6) kali; urgency=high
 
   * Drum starvation fix (the .107 watch: zero launches for 1h12m of

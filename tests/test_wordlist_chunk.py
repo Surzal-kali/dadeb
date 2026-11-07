@@ -116,12 +116,15 @@ def test_lane_decision_oversized_is_plan(engine, tmp_path):
     decision = wlc.lane_decision("payloads.ffuf.run_ffuf", _ffuf_args(wl), wl)
     assert decision["mode"] == "plan"
     assert decision["lines"] == 650
-    assert decision["chunk_size"] == 600            # binding dim: requests
+    # pkg7: the slice binds on what ONE epoch funds (requests refill 150
+    # per code default), not the 600-request burst ceiling
+    assert decision["chunk_size"] == 150            # binding dim: requests
     assert decision["binding_dim"] == "requests"
-    assert decision["total_chunks"] == 2            # ceil(650 / 600)
+    assert decision["total_chunks"] == 5            # ceil(650 / 150)
     assert decision["window"] == 2                  # min(2, BUDGET_PLAN_WINDOW)
-    assert decision["slices"]["requests"] == 600
-    assert decision["slices"]["bytes"] == 600 * 8192
+    assert decision["pace_epoch_s"] == 300.0
+    assert decision["slices"]["requests"] == 150
+    assert decision["slices"]["bytes"] == 150 * 8192
     assert decision["slices"]["auth_events"] is None
 
 
@@ -193,9 +196,9 @@ def test_lane_decision_unknown_wordlist_is_none(engine, tmp_path):
 
 
 def test_mint_is_lazy_and_advance_settles(engine, tmp_path, monkeypatch):
-    wl = _wordlist(tmp_path, "huge.txt", 2000)      # ceil(2000/600) = 4
+    wl = _wordlist(tmp_path, "huge.txt", 2000)      # ceil(2000/150) = 14
     plan = _plan(engine, wl)
-    assert plan["total_chunks"] == 4
+    assert plan["total_chunks"] == 14
     # lazy frontier: only the FIRST window (2) is minted
     assert engine.store.plan_counts(plan["plan_id"])["queued"] == 2
     # window cap: mint_window refuses to over-mint past outstanding+window
@@ -224,8 +227,8 @@ def test_mint_is_lazy_and_advance_settles(engine, tmp_path, monkeypatch):
     assert counts["minted"] == 3                    # frontier idx 2
 
     # keep paying + minting the lazy window until the frontier drains →
-    # plan settles 'finished' with all 4 chunks done
-    for _ in range(8):
+    # plan settles 'finished' with all 14 chunks done
+    for _ in range(120):
         if rt.get_ration_store().plan_get(plan["plan_id"])["state"] == \
                 "finished":
             break
@@ -234,8 +237,8 @@ def test_mint_is_lazy_and_advance_settles(engine, tmp_path, monkeypatch):
         wlc.advance_plans()                         # still 'launched'
         wlc.advance_plans()                         # verified done → + mint
     counts = engine.store.plan_counts(plan["plan_id"])
-    assert counts["finished"] == 4
-    assert counts["minted"] == 4                    # frontier covered fully
+    assert counts["finished"] == 14
+    assert counts["minted"] == 14                   # frontier covered fully
     fresh = rt.get_ration_store().plan_get(plan["plan_id"])
     assert fresh["state"] == "finished"
 
@@ -281,7 +284,7 @@ def test_get_item_by_plan_chunk_and_release(engine, tmp_path):
     store.release_item(row["qid"])
     assert store.get_item_by_plan_chunk(plan["plan_id"], 0)["status"] == \
         "launched"
-    assert store.plan_counts(plan["plan_id"])["total_chunks"] == 4
+    assert store.plan_counts(plan["plan_id"])["total_chunks"] == 14
 
 
 # --- requeued envelope (fleet duplicate / transient refusal) -----------------
@@ -380,13 +383,21 @@ def test_advance_settles_fully_cancelled_plan_as_failed(engine, tmp_path):
     and every chunk is terminal-without-completion, the plan settles
     'failed' instead of sitting 'open' forever with nothing left to drain."""
     wl = _wordlist(tmp_path, "dead.txt", 650)
-    plan = _plan(engine, wl)                        # 2 chunks, window 2
+    plan = _plan(engine, wl)
     store = rt.get_ration_store()
-    chunks = store.plan_chunks(plan["plan_id"], status="queued")
-    for c in chunks:
-        store.cancel_item(c["qid"], note="retry budget exhausted — gate "
-                                          "blocked")
-    out = wlc.advance_plans()
+    # cancel every chunk as it is lazily minted until the frontier runs
+    # out (window 2 of 5); the advance that settles the plan reports it
+    out = {"failed_plans": []}
+    for _ in range(64):
+        leftovers = store.plan_chunks(plan["plan_id"], status="queued")
+        if not leftovers:
+            break
+        for c in leftovers:
+            store.cancel_item(c["qid"], note="retry budget exhausted — gate "
+                                             "blocked")
+        out = wlc.advance_plans()
+        if out["failed_plans"]:
+            break
     fresh = store.plan_get(plan["plan_id"])
     assert fresh["state"] == "failed"
     assert out["failed_plans"] and out["failed_plans"][0]["plan_id"] == \
@@ -421,12 +432,13 @@ def test_run_ffuf_plan_mode_mints_without_launching(engine, tmp_path,
     def _boom(*a, **k):
         raise AssertionError("plan mode must never reach launch_job")
 
-    big = _wordlist(tmp_path, "seam.txt", 700)      # 700 > 600-request ceiling
+    big = _wordlist(tmp_path, "seam.txt", 700)      # 700 > 150-epoch slice
     monkeypatch.setattr(ffuf_mod, "resolve_wordlist", lambda p: str(p))
     monkeypatch.setattr(ffuf_mod, "launch_job", _boom)
     res = ffuf_mod.run_ffuf("http://10.0.0.5/FUZZ", wordlist=big)
     assert res["status"] == "chunk_plan"
-    assert res["total_chunks"] == 2
+    assert res["total_chunks"] == 5
+    assert res["paced"] is True
     assert res["window"] == 2
     assert res["minted_first_window"] == 2          # lazy first window minted
     assert "budget_queue_status(plan_id=" in res["poll"]
@@ -479,7 +491,7 @@ def test_queue_status_plan_lens(engine, tmp_path):
     plan = _plan(engine, wl)
     text = rt.budget_queue_status(plan_id=plan["plan_id"])
     assert plan["plan_id"] in text and "lines=650" in text
-    assert "total=2" in text and "chunk 1/2" in text
+    assert "total=5" in text and "chunk 1/5" in text
 
 
 # --- §3.1 verified behaviorally (2026-11-07) ---------------------------------
@@ -558,3 +570,185 @@ def test_run_ffuf_keyed_bogus_plan_honest_error(engine, tmp_path,
     n_plans = store.conn.execute(
         "SELECT COUNT(*) FROM queue_plans").fetchone()[0]
     assert n_plans == 0, "an honest-error keyed call must not mint a plan"
+
+
+# --- pkg7: epoch-bound slices + wire pacing ----------------------------------
+
+
+@pytest.fixture
+def law_engine(tmp_path, monkeypatch):
+    """The engine fixture, with an explicit law: requests refill 80 per
+    epoch over a 200s epoch; sizes otherwise at code defaults."""
+    (tmp_path / "budget").mkdir()
+    monkeypatch.setenv("BUDGET_STORE_DIR", str(tmp_path / "budget"))
+    monkeypatch.setenv("BUDGET_ENABLED", "1")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("BUDGET_PLAN_WINDOW", "2")
+    for k in ("BUDGET_CONSTITUTION", "BUDGET_CONSTITUTION_FILE",
+              "BUDGET_EPOCH_SECONDS", "BUDGET_QUEUE_TTL_HOURS",
+              "BUDGET_DRAIN_BATCH", "BUDGET_PLAN_TTL_HOURS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BUDGET_CONSTITUTION", (
+        '{"per_dim": {'
+        '"requests": {"ceiling": 600, "refill_per_epoch": 80, "floor": 2}, '
+        '"packets": {"ceiling": 2000000, "refill_per_epoch": 250000, '
+        '"floor": 500}, '
+        '"auth_events": {"ceiling": 60, "refill_per_epoch": 5, '
+        '"floor": 0.2}, '
+        '"bytes": {"ceiling": 268435456, "refill_per_epoch": 33554432, '
+        '"floor": 262144}}, '
+        '"max_single_call": {"requests": 600}, "epoch_seconds": 200}'))
+    rt.reset_engine()
+    rt.reset_ration_store()
+    yield rt.get_engine()
+    rt.reset_engine()
+    rt.reset_ration_store()
+
+
+def test_lane_slices_to_epoch_refill_not_ceiling(law_engine, tmp_path):
+    """pkg7 core shape change: a never-fit plan slices to what ONE epoch
+    funds (the law's refill_per_epoch, 80 here), NOT the burst ceiling —
+    the 600-request ceiling slice emptied a funded chunk at ffuf's own
+    wire speed while the ledger refilled one epoch per chunk (bursts
+    separated by minutes of dead air)."""
+    wl = _wordlist(tmp_path, "law.txt", 650)
+    decision = wlc.lane_decision("payloads.ffuf.run_ffuf", _ffuf_args(wl), wl)
+    assert decision["mode"] == "plan"
+    assert decision["chunk_size"] == 80
+    assert decision["total_chunks"] == 9            # ceil(650 / 80)
+    assert decision["pace_epoch_s"] == 200.0
+    assert decision["slices"]["requests"] == 80
+
+
+def test_lane_slice_clamps_to_one_request(engine, tmp_path):
+    """A law whose refill is below one request's cost still yields a
+    payable slice (floored at 1) — never a zero-n mint loop."""
+
+    def _starved_law():
+        from utils.ration import Constitution
+        return Constitution(
+            defaults={d: {"ceiling": 600.0, "refill_per_epoch": 0.5,
+                          "floor": 2.0} for d in DIMS},
+            max_single_call={"requests": 600},
+            epoch_s=300.0, release_jitter={"min": 0.0, "max": 0.0})
+
+    import utils.ration as rt_mod
+    orig = rt_mod.constitution
+    rt_mod.constitution = _starved_law
+    try:
+        wl = _wordlist(tmp_path, "clamped.txt", 700)
+        decision = wlc.lane_decision("payloads.ffuf.run_ffuf",
+                                     _ffuf_args(wl), wl)
+    finally:
+        rt_mod.constitution = orig
+    assert decision is not None
+    # 700 lines never fit max_single, but the refill band (0.5 per epoch)
+    # floors the slice at 1 — a slice must never be unpayable
+    assert decision["mode"] == "plan"
+    assert decision["chunk_size"] == 1
+    assert decision["total_chunks"] == 700
+
+
+def test_epoch_pacing_math(engine):
+    assert wlc.epoch_pacing(150) == {"rate_per_second": 1, "epoch_s": 300.0}
+    assert wlc.epoch_pacing(1200)["rate_per_second"] == 4   # 1200/300s
+    assert wlc.epoch_pacing(0) is None
+    assert wlc.epoch_pacing(-5) is None
+
+
+def test_wire_pacing_degrades_without_law(monkeypatch):
+    """Constitution unreadable → pacing returns None and the launch stays
+    unshaped (exactly the pkg6 behavior) — never a guessed rate."""
+
+    def _boom():
+        raise RuntimeError("law is gone")
+
+    monkeypatch.setattr("utils.ration.constitution", _boom)
+    assert wlc.epoch_funding() is None
+    assert wlc.epoch_pacing(150) is None
+    # and the ffuf helper propagates the degenerate case
+    from payloads.ffuf import _inject_wire_pacing
+    tokens: list = []
+    assert _inject_wire_pacing(tokens, 150) is None
+    assert tokens == []          # nothing injected on a failed law read
+
+
+def test_wire_pacing_injection_respects_caller():
+    from payloads.ffuf import _inject_wire_pacing
+    tokens: list = []
+    out = _inject_wire_pacing(tokens, 150)
+    assert tokens == ["-rate", "1", "-t", "1"]
+    assert out["applied"] == ["rate", "threads"]
+    assert out["caller_wins"] == []
+
+    tokens = ["-t", "80"]
+    out = _inject_wire_pacing(tokens, 150)          # caller threads win
+    assert tokens == ["-t", "80", "-rate", "1"]
+    assert out["applied"] == ["rate"]
+    assert out["caller_wins"] == ["threads"]
+
+    tokens = ["-rate", "5"]
+    out = _inject_wire_pacing(tokens, 150)          # caller rate win
+    assert tokens == ["-rate", "5", "-t", "1"]
+    assert out["caller_wins"] == ["rate"]
+
+
+def test_chunk_dispatch_paces_the_wire(engine, tmp_path, monkeypatch):
+    """The pkg7 point: a dispatched chunk's ffuf command carries the
+    epoch pacing (-t 1 -rate slice/epoch) — the wire no longer bursts 150
+    requests at default concurrency."""
+    import inspect
+
+    import utils.scope_gate as sg
+    from payloads.ffuf import run_ffuf
+
+    wl = _wordlist(tmp_path, "paced.txt", 2000)
+    plan = _plan(engine, wl)
+    store = rt.get_ration_store()
+    item = store.get_item_by_plan_chunk(plan["plan_id"], 0)
+    args = json.loads(item["arguments_json"])
+
+    captured = {}
+
+    def fake_launch(command, **kwargs):
+        captured["command"] = list(command)
+        return {"job_id": 4242}
+
+    monkeypatch.setattr(sg, "check_scan", lambda target: (True, ""))
+    monkeypatch.setattr("payloads.ffuf.launch_job", fake_launch)
+
+    out = inspect.unwrap(run_ffuf)(**args)
+    assert out.get("job_id") == 4242
+    cmd = captured["command"]
+    assert cmd[cmd.index("-rate") + 1] == "1"       # 150-slice, 300s epoch
+    assert cmd[cmd.index("-t") + 1] == "1"
+    pacing = out.get("wire_pacing")
+    assert pacing["rate_per_second"] == 1 and pacing["epoch_s"] == 300.0
+    assert pacing["applied"] == ["rate", "threads"]
+    # -t/-rate stay inside options: the json output tail is still last
+    assert cmd[-2] == "-o"
+
+
+def test_chunk_dispatch_single_mode_leaves_wire_alone(engine, tmp_path,
+                                                      monkeypatch):
+    """Zero behavior change outside the chunk lane: a single-call (fits-in
+    one) dispatch is NOT paced — pkg7 shapes chunks only."""
+    import inspect
+
+    import utils.scope_gate as sg
+    from payloads.ffuf import run_ffuf
+
+    wl = _wordlist(tmp_path, "small.txt", 3)
+    captured = {}
+
+    def fake_launch(command, **kwargs):
+        captured["command"] = list(command)
+        return {"job_id": 7}
+
+    monkeypatch.setattr(sg, "check_scan", lambda target: (True, ""))
+    monkeypatch.setattr("payloads.ffuf.launch_job", fake_launch)
+    out = inspect.unwrap(run_ffuf)("http://10.0.0.5/FUZZ", wordlist=wl)
+    assert out.get("job_id") == 7
+    cmd = captured["command"]
+    assert "-rate" not in cmd and "-t" not in cmd
+    assert "wire_pacing" not in out

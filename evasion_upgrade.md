@@ -350,3 +350,47 @@ Hand-picked verification anchors for when this lane reopens:
   utils/tool_budget.py :43 (terminal allowlist incl. utils.ration.)
   evasion_design.md  §7.3 (duplicate=satisfied, drain invariants),
                       §15 (phase ladder A–D built, E open)
+
+## 10. pkg7 — THE DRUM'S WIRE LEG (the shape change, 2026-11-07)
+
+[WIRE] pkg6 fixed funding; pkg7 fixes SHAPE. Two changes, same law, same
+throughput:
+
+1. **Minter slices to the epoch budget, not the burst ceiling**
+   (`utils/wordlist_chunking.py`): the never-fit plan's chunk size was
+   "largest n under max_single" — a 600-request burst — while the
+   ledger refilled exactly one epoch per chunk. Result: a funded chunk
+   emptied at ffuf's own wire speed (default ~40 workers, seconds for
+   600 requests), then minutes of dead air while refill caught up; the
+   only visible log line in the window was `budget_short`. The plan
+   branch now also folds in `refill_per_epoch` (min over dims,
+   clamped ≥ 1, via the new `epoch_funding()`) and shrinks the slice
+   whenever the epoch fund is tighter. A slice == one epoch's funding ⇒
+   beat #1 fires on the very first tick (cold nodes project full
+   ceiling in admit) and every later beat funds in its own epoch.
+
+2. **Chunk launches are paced on the wire**
+   (`payloads/ffuf.py:_inject_wire_pacing`): a dispatched chunk carries
+   `-t 1 -rate N` with `N = max(1, floor(slice/epoch_s))` — the slice
+   spreads across its funding epoch instead of bursting. Caller- and
+   scan-config-provided `-t`/`-rate` win per-flag (the helper checks
+   before injecting; the scan-config lane sees the injected rate and
+   stands down). The envelope reports `wire_pacing` and the chunk_plan
+   envelope reports `paced`. Unreadable law ⇒ pacing returns None and
+   the launch stays exactly as before pkg7 (no guessed rates).
+
+   Honest limit: ffuf's `-rate` is an integer req/s — a law slower than
+   1 req/epoch-second still gets 1/s (the wire floor); per-epoch
+   *funding* remains the drum's real governor, and `-t 1` keeps the
+   stream from bypassing the rate.
+
+Zero behavior change off the chunk lane: single (fits-in-one) calls are
+never paced. `binding_dim`/windows/discharge semantics unchanged; the
+slice numbers in older fixtures moved (600 → 150 under code defaults
+because requests refill 150 < ceiling 600 binds).
+
+Wire-shaping generalization note: this is ONE tool of ~200. The seam is
+written so a tool's chunk body can adopt `_inject_wire_pacing` (rate =
+slice/epoch) plus the same minter call — but every other vector-mapped
+tool body must be wired individually before it is shaped. Nothing else
+inherits pacing implicitly.
