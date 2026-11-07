@@ -221,6 +221,65 @@ def test_sweep_keeps_healthy_running_jobs(sched, tmp_path, monkeypatch):
     assert r["unit_key"] not in out["stale_reclaimed"]
 
 
+def test_sweep_reclaims_unstamped_dead_job_after_observer_restart(sched, tmp_path, monkeypatch):
+    """2026-11-06 ffuf incident: a reboot kills the unit's child TOGETHER
+    with the process that launched it — the jobs row is never stamped
+    (exit_code stays NULL; nobody observes the dead pid), and the old
+    exit-code-only check wedged the dedupe key as 'duplicate' until TTL.
+    sweep_stale must observe the row through the store's pid-probe
+    discipline, stamp it finished, and reclaim the unit in one pass."""
+    import os
+
+    import utils.job_store as js
+    from utils.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    r = sched.request_unit("t", "http://h/1", agent_id="a")
+    j = jobs.launch(["sleep", "30"], tool_name="t", agent_id="a", timeout=1800)
+    sched.bind_job(r["unit_key"], j["job_id"])
+
+    # Simulate the crash: the launching process is GONE — no live Popen
+    # handle exists to observe with (cross-lane path), and the child is
+    # reaped by somebody else, so the recorded pid fully vanishes.
+    with js._LIVE_CHILDREN_LOCK:
+        js._LIVE_CHILD_PROCS.pop(j["job_id"], None)
+        js._LIVE_LOG_FHS.pop(j["job_id"], None)
+    os.kill(int(j["pid"]), 9)
+    os.waitpid(int(j["pid"]), 0)
+
+    out = sched.sweep_stale()
+    assert r["unit_key"] in out["stale_reclaimed"]
+    # The jobs row itself got durably stamped by the observation pass —
+    # the ledger is coherent for every later lane.
+    row = jobs.get(j["job_id"])
+    assert row["exit_code"] is not None
+    # Freed slot: a new unit on the host acquires immediately.
+    assert sched.request_unit("t", "http://h/2", agent_id="b")["decision"] == "acquired"
+
+
+def test_sweep_leaves_running_job_unstamped_by_observe(sched, tmp_path, monkeypatch):
+    """The sweep's new observe() pass must be inert for genuinely live
+    units: a running process's row keeps exit_code NULL and the unit keeps
+    its slot (dedupe must still see it)."""
+    import utils.job_store as js
+    from utils.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    r = sched.request_unit("t", "http://h/1", agent_id="a")
+    j = jobs.launch(["sleep", "20"], tool_name="t", agent_id="a", timeout=1800)
+    sched.bind_job(r["unit_key"], j["job_id"])
+    # Cross-lane observation path: drop the live handle, the probe must
+    # report the child alive and leave the row unstamped.
+    with js._LIVE_CHILDREN_LOCK:
+        js._LIVE_CHILD_PROCS.pop(j["job_id"], None)
+        js._LIVE_LOG_FHS.pop(j["job_id"], None)
+    observed = jobs.observe(j["job_id"])
+    assert observed is not None and observed["exit_code"] is None
+    out = sched.sweep_stale()
+    assert r["unit_key"] not in out["stale_reclaimed"]
+    jobs.stop(j["job_id"], force=True)
+
+
 # --- observability -------------------------------------------------------------------
 
 

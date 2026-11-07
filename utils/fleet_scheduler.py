@@ -951,7 +951,23 @@ class FleetScheduler:
 
                 jobs = get_store()
                 for r in with_job:
-                    jr = jobs.get(r["job_id"])
+                    # Observe FIRST (fleet incident 2026-11-06): a reboot
+                    # kills the unit's child together with the process that
+                    # launched it — the jobs row stays exit_code-NULL because
+                    # NOTHING observes the dead pid, and the exit-code-only
+                    # check below then wedges the dedupe key as 'duplicate'
+                    # until TTL. The store's observation primitive carries
+                    # the zombie + PID-reuse discipline; a vanished-or-
+                    # recycled recorded pid is stamped finished there and
+                    # the unit reclaims in the same pass, so the very next
+                    # request for this key proceeds instead of duplicate.
+                    try:
+                        jr = jobs.observe(r["job_id"])
+                    except Exception:
+                        logging.getLogger(__name__).debug(
+                            "swallowed exception in sweep_stale observe",
+                            exc_info=True)
+                        jr = jobs.get(r["job_id"])
                     # Reclaim ONLY on a verified finished exit. A MISSING
                     # row is not proof of completion (this lane may not
                     # hold the job store's history, or the ref is stale);

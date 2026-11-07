@@ -749,6 +749,29 @@ class JobStore:
         row = self._row(job_id)
         return int(row["pid"]) if row is not None and row["pid"] else None
 
+    def observe(self, job_id: str) -> dict[str, Any] | None:
+        """One public observation pass for a row (cross-lane bookkeeping).
+
+        Runs the same ``_observe`` liveness stamp the reaper pass and poll
+        use — the live-Popen path when THIS process holds the handle, the
+        row-pid probe (with the PID-reuse fence) when it doesn't. Returns
+        the fresh row dict, or None when the job is unknown.
+
+        Why a public primitive: a job whose launching process DIED (reboot,
+        crashed lane) is observed by nobody — its row stays ``exit_code``
+        NULL forever, which wedged every downstream dedupe consumer (fleet
+        ``sweep_stale`` treated the unstamped row as 'not proven finished'
+        and kept the unit's slot: 2026-11-06 ffuf incident, every post-
+        reboot ``run_ffuf`` returned ``duplicate`` until TTL). Any lane may
+        stamp the recorded pid's true state durably; liveness rules stay in
+        ONE place (_observe) — callers add no pid logic of their own.
+        """
+        row = self._row(job_id)
+        if row is None:
+            return None
+        fresh = self._observe(row)
+        return dict(fresh)
+
     def list_jobs(self, agent_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         """Recent jobs for one agent (or all agents when ``agent_id`` is None
         — operator/tooling view). Running jobs first."""

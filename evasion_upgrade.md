@@ -211,6 +211,48 @@ interplay the original sketch missed).
   would stall under the current never-fit/credit-line impl — that
   stall is the concrete motivation for this lane.
 
+2.6 BOUNDED FAILURE EXIT + DEAD-PLAN SETTLE (DECIDED 2026-11-06,
+  SHIPPED): the drain's dispatch_failed branch used to keep the
+  item queued forever ("item survives for the next tick") with the
+  error only in the engine's own log — a deterministic failure
+  (ScopeGateError on a deblocked host, tool misconfig, bad
+  transport) wedged a 24h plan silently: every tick spent the batch
+  on chunk slots that could never run, and budget_queue_status
+  showed a healthy-looking queued line with no why. Fixed at THREE
+  layers, all under the honest-retry principle (transient hiccups
+  keep a real retry budget; permanent failures exit with their
+  story):
+  - BOUNDED LEDGER (utils/ration_store.py): queue_items gains an
+    attempts column (schema + migration, default 0). Every
+    dispatch_failed tick stamps attempts+1 AND rewrites notes_json
+    with the last error — a queued-but-broken row is readable in
+    the lens on tick 1, not only at exit. Past BUDGET_RETRY_MAX
+    (default 3, 0 = fail on first raise) the item EXITS as status
+    'failed' with "retry budget exhausted (n attempts; max m) —
+    last error: ..." on the row. store gains cancel_item→bool,
+    fail_item, stamp_attempt.
+  - FAILED-ENVELOPE MAPPING (utils/ration.py operator_tick): run_tool
+    wraps raised tool-body errors as {"status": "Failed"} envelopes
+    instead of raising, so lanes that don't map exceptions consumed
+    such items as inline successes (finish_item) — a second silent
+    wedge shape. operator_tick now reads out["status"] directly:
+    Failed → attempt-stamp + same bounded fate (decisions
+    "tool_failed" then "failed_exhausted"); a raise maps to
+    "dispatch_failed" then same. No per-lane dispatcher changes
+    needed — the engine is the single chokepoint.
+  - DEAD-PLAN SETTLE (utils/wordlist_chunking.py advance_plans): a
+    plan whose whole frontier is minted and whose minted chunks are
+    ALL terminal-without-completion (cancelled/failed) settles
+    state='failed' with the terminal chunk's note surfaced in
+    advance's result + the budget_queue_status plan lens (no
+    eternally-open plan with nothing left to drain or mint). A plan
+    with un-minted frontier chunks stays open (operator
+    partial-cancels must still lazily mint successors).
+  Evidence base: trashcan.ipynb 2026-11-06 session — 16 ffuf
+  chunks against an un-scoped host waited 42 min with zero
+  dispatch feedback; the model lane had no surface ("just
+  erroring without any tell why").
+
 ## 3. SEQUENCING — UPGRADE WAVES (re-lettered 2026-11-06; the A–D
    menu collided with evasion_design.md §15's phase ladder, whose
    A–D are BUILT and E — the emissions-ledger differential harness —
@@ -241,14 +283,18 @@ interplay the original sketch missed).
       ffuf+rockyou simply stops working; honesty arrives with the
       lane that makes honesty survivable). Deliverables: chunk
       item shape (§2.1), minter (§2.2), parent lens (§2.3),
-      drain requeued-branch (§2.5), options wordlist-guard.
+      drain requeued-branch (§2.5), options wordlist-guard,
+      bounded failure exit + dead-plan settle (§2.6).
       Where: utils/wordlist_chunking.py (lane_decision/mint/advance/
-      requeue), utils/ration_store.py (queue_plans + chunk columns,
-      enqueue_item shape), utils/ration.py (U1 seeds, discharge
-      requeued/chunk_plan branches, drain advance hook, plan lens),
-      payloads/ffuf.py (single/plan/chunk wrapper). Knobs:
-      BUDGET_PLAN_WINDOW (default 8), BUDGET_WORDLIST_CHUNK
-      (default on), BUDGET_PLAN_TTL_HOURS (default 24).
+      requeue/dead-plan settle), utils/ration_store.py (queue_plans +
+      chunk columns, enqueue_item shape, attempts ledger/fail_item/
+      stamp_attempt), utils/ration.py (U1 seeds, discharge
+      requeued/chunk_plan branches, drain advance hook, plan lens,
+      drain Failed-envelope mapping + retry budget), payloads/ffuf.py
+      (single/plan/chunk wrapper). Knobs: BUDGET_PLAN_WINDOW
+      (default 8), BUDGET_WORDLIST_CHUNK (default on),
+      BUDGET_PLAN_TTL_HOURS (default 24),
+      BUDGET_RETRY_MAX (default 3; 0 = fail on first raise).
   U3. LIVE-LAB VALIDATION — run a real fleet-scale plan, measure
       rhythm (tick cadence, refill interaction, requeued churn),
       feed the numbers back into defaults + the §15-E differential

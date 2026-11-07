@@ -343,7 +343,7 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
              scope_handle: str | None = None,
              scope_platform: str | None = None,
              chunk_plan_id: str = "", chunk_index: int = 0,
-             chunk_offset: int = 0, chunk_size: int = 0,
+             chunk_offset: int = 0, chunk_slice: int = 0,
              chunk_total_chunks: int = 0) -> dict[str, Any]:
     """Launch ffuf against ``url`` and return immediately.
 
@@ -391,7 +391,10 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
             to. Set by the budget queue's drain, never by hand.
         chunk_index: Internal — 0-based slice index for this dispatch.
         chunk_offset: Internal — 0-based first line index of the slice.
-        chunk_size: Internal — slice line count for this dispatch.
+        chunk_slice: Internal — slice line count for this dispatch (the
+            chunk lane's canonical argument key; a dispatch's slice count
+            is NOT spelled ``chunk_size`` — that name is plan-level
+            geometry and preflight rejects it at the manifest).
         chunk_total_chunks: Internal — total slices in the parent plan.
     """
     import shlex
@@ -446,9 +449,28 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     # slice at dispatch, then launch the slice file).
     from utils import wordlist_chunking as wlc
 
+    # The lane predicate reads THIS dispatch's own arguments — chunk keys
+    # included (2026-11-06 drain incident: the tool's named parameters
+    # (chunk_plan_id/chunk_index/…) were stripped out of _lane_args, so
+    # every DRAIN chunk dispatch re-decided PLAN mode, minted a fresh plan
+    # with zero traffic, and returned the chunk_plan envelope; the drain
+    # consumed it as an inline finish while the debit stood. The chunk
+    # keys are internal plumbing minted by THIS lane, not caller data —
+    # nothing untrusted rides in them (preflight already validated each
+    # one against the manifest schema).
     _lane_args = {"url": url, "wordlist": wordlist, "options": options,
                   "scope_handle": scope_handle,
                   "scope_platform": scope_platform}
+    # Chunk keys are internal plumbing minted by THIS lane — this dispatch's
+    # own named parameters, not caller data (preflight validates them against
+    # the manifest). Explicit reads, not a locals() comprehension: the dict
+    # comp sees them today, but the lane's honesty must not ride a scope
+    # quirk a future CPython frame change could silently break.
+    for _ck in ("chunk_plan_id", "chunk_index", "chunk_offset",
+                "chunk_slice", "chunk_total_chunks"):
+        _cv = locals().get(_ck)
+        if _cv is not None:
+            _lane_args[_ck] = _cv
     _decision = wlc.lane_decision("payloads.ffuf.run_ffuf", _lane_args,
                                   wordlist)
     if _decision and _decision["mode"] in ("plan", "chunk"):

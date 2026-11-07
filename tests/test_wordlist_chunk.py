@@ -27,6 +27,28 @@ from utils import wordlist_chunking as wlc
 from utils.ration_store import DIMS, RationStore
 
 
+def test_chunk_lane_keys_declared_on_tool_manifest():
+    """2026-11-06 ffuf drain: the lane minted chunk items keyed
+    ``chunk_slice`` while run_ffuf declared the slice count as
+    ``chunk_size`` — preflight rejected EVERY chunk dispatch
+    ('unknown argument(s): [chunk_slice]') and the drain dispatcher
+    consumed the rejects as finished. Invariant: every CHUNK_KEYS key any
+    vector-mapped wordlist tool can receive must be a declared parameter
+    of that tool. A key rename on the lane side without the tool side
+    re-breaks this test instead of silently wedge-draining."""
+    from payloads.ffuf import run_ffuf
+
+    import inspect
+    fn = inspect.unwrap(run_ffuf)
+    sig = inspect.signature(fn)
+    declared = set(sig.parameters)
+    for key in wlc.CHUNK_KEYS:
+        assert key in declared, (
+            f"chunk lane key {key!r} is not a declared parameter of "
+            f"payloads.ffuf.run_ffuf (declared: {sorted(declared)}) — "
+            "preflight would reject every minted chunk dispatch")
+
+
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     (tmp_path / "budget").mkdir()
@@ -98,6 +120,42 @@ def test_lane_decision_oversized_is_plan(engine, tmp_path):
     assert decision["slices"]["requests"] == 600
     assert decision["slices"]["bytes"] == 600 * 8192
     assert decision["slices"]["auth_events"] is None
+
+
+def test_ffuf_body_lane_args_carry_chunk_keys(engine):
+    """2026-11-06 drain incident: run_ffuf built _lane_args WITHOUT the
+    chunk params, so every drain chunk dispatch re-decided PLAN mode —
+    minted a fresh plan (zero traffic) and returned the chunk_plan
+    envelope while the slice debit stood; the drain consumed it as an
+    inline finish (chunk_plan carries no job_id/requeued Failed marker).
+    The body MUST let the lane predicate see this dispatch's own chunk
+    keys so a keyed dispatch decides CHUNK mode."""
+    import inspect
+
+    from payloads.ffuf import run_ffuf
+
+    body_src = inspect.getsource(inspect.unwrap(run_ffuf))
+    # The body reads its own chunk params explicitly (the 2026-11-06 fix);
+    # guard on the explicit-locals merge either via the chunk-key loop or a
+    # CHUNK_KEYS reference — both prove the lane predicate can see them.
+    has_merge = (any(k in body_src for k in wlc.CHUNK_KEYS)
+                 or "CHUNK_KEYS" in body_src)
+    assert has_merge, (
+        "run_ffuf's _lane_args no longer merges the chunk keys — a chunk "
+        "dispatch will re-decide plan mode and the drain will consume it "
+        "as finished (regression of the 2026-11-06 partitioning incident)")
+
+    # And behaviorally: the merged-args construction must decide chunk
+    # for keyed args exactly like a direct lane_decision call.
+    args = {"url": "http://h/FUZZ", "wordlist": "wl",
+            "chunk_plan_id": "wp-x", "chunk_index": 0, "chunk_offset": 0,
+            "chunk_slice": 50, "chunk_total_chunks": 4}
+    merged = dict(args)
+    merged = {**{k: merged[k] for k in merged if k not in wlc.CHUNK_KEYS}}
+    merged.update({k: args[k] for k in wlc.CHUNK_KEYS})
+    decision = wlc.lane_decision("payloads.ffuf.run_ffuf", merged, None)
+    assert decision is not None and decision["mode"] == "chunk"
+    assert decision["chunk_size"] == 50
 
 
 def test_lane_decision_chunk_keys_declare_slice(engine, tmp_path):
@@ -309,6 +367,45 @@ def test_drain_requeued_keeps_item_for_next_tick(engine, tmp_path):
     assert tick2["results"][0]["job_id"] == "job-real"
     assert store.get_item_by_plan_chunk(plan["plan_id"], 0)["status"] == \
         "launched"
+
+
+# --- dead-plan settle (2026-11-06 seam close) --------------------------------
+
+
+def test_advance_settles_fully_cancelled_plan_as_failed(engine, tmp_path):
+    """Bounded-failure exits cancel chunks; once the frontier is exhausted
+    and every chunk is terminal-without-completion, the plan settles
+    'failed' instead of sitting 'open' forever with nothing left to drain."""
+    wl = _wordlist(tmp_path, "dead.txt", 650)
+    plan = _plan(engine, wl)                        # 2 chunks, window 2
+    store = rt.get_ration_store()
+    chunks = store.plan_chunks(plan["plan_id"], status="queued")
+    for c in chunks:
+        store.cancel_item(c["qid"], note="retry budget exhausted — gate "
+                                          "blocked")
+    out = wlc.advance_plans()
+    fresh = store.plan_get(plan["plan_id"])
+    assert fresh["state"] == "failed"
+    assert out["failed_plans"] and out["failed_plans"][0]["plan_id"] == \
+        plan["plan_id"]
+    assert "retry budget exhausted" in out["failed_plans"][0]["reason"]
+    # the status lens names the why so a dead plan is never a bare 'failed'
+    lens = rt.budget_queue_status(plan_id=plan["plan_id"])
+    assert "[failed]" in lens and "retry budget exhausted" in lens
+
+
+def test_open_plan_with_live_chunks_never_settles_failed(engine, tmp_path):
+    """A plan whose frontier still has un-minted chunks stays open even
+    when some minted chunks were cancelled (operator cancel-partial)."""
+    wl = _wordlist(tmp_path, "partial.txt", 1300)   # 3 chunks, window 2
+    plan = _plan(engine, wl)
+    store = rt.get_ration_store()
+    chunks = store.plan_chunks(plan["plan_id"], status="queued")
+    store.cancel_item(chunks[0]["qid"], note="operator stop")
+    out = wlc.advance_plans()
+    # frontier idx 2 is un-minted → plan must REMAIN open
+    assert store.plan_get(plan["plan_id"])["state"] == "open"
+    assert out["failed_plans"] == []
 
 
 # --- run_ffuf wrapper seam ----------------------------------------------------

@@ -218,6 +218,79 @@ class TestDrainDispatcherMapping:
         out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
         assert out == {"finished": True}
 
+    def test_failed_envelope_propagates_not_finished(self, monkeypatch):
+        """§2.6 seam close: a Failed-tool envelope (run_tool wraps raised
+        tool bodies, incl. ScopeGateError) must reach the engine's bounded
+        ledger — the dispatcher returns it verbatim instead of consuming
+        the item as an inline success."""
+        import replkit.core as core
+        import replkit.operator_cli as cli
+
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            return {"status": "Failed",
+                    "error": "Exception during execution: scope gate: "
+                             "host not blessed"}
+        monkeypatch.setattr(core, "run_tool", fake_run_tool)
+        d = cli._budget_drain_dispatcher(())
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out["status"] == "Failed"
+        assert "scope gate" in out["error"]
+        assert "finished" not in out      # NEVER consumed as done
+
+    def test_failed_inner_envelope_propagates(self, monkeypatch):
+        import replkit.core as core
+        import replkit.operator_cli as cli
+
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            # inner-result shape (executor-wrapped transports)
+            return {"status": "ok",
+                    "result": {"status": "Failed", "error": "brain refused"}}
+        monkeypatch.setattr(core, "run_tool", fake_run_tool)
+        d = cli._budget_drain_dispatcher(())
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out["status"] == "Failed" and "brain refused" in out["error"]
+
+    def test_preflight_rejected_envelope_propagates_not_finished(self, monkeypatch):
+        """2026-11-06 ffuf drain: a preflight arg-schema reject
+        ({'status': 'Rejected', 'phase': 'preflight'}) matched neither the
+        budget checks nor the Failed seam and fell through to
+        {'finished': True} — every rejected chunk was consumed done-forever
+        while plan indices never re-mint. The reject must map onto the
+        Failed pathway with the reject text on the row."""
+        import replkit.core as core
+        import replkit.operator_cli as cli
+
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            return {"status": "Rejected", "phase": "preflight",
+                    "tool_id": "payloads.ffuf.run_ffuf",
+                    "error": "unknown argument(s): ['chunk_slice']",
+                    "accepted_keys": ["url", "wordlist"], "required": []}
+        monkeypatch.setattr(core, "run_tool", fake_run_tool)
+        d = cli._budget_drain_dispatcher(())
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out["status"] == "Failed"
+        assert "chunk_slice" in out["error"]
+        assert "finished" not in out      # NEVER consumed as done
+
+    def test_preflight_rejected_inner_envelope_propagates(self, monkeypatch):
+        import replkit.core as core
+        import replkit.operator_cli as cli
+
+        async def fake_run_tool(tool_id, arguments, manifests,
+                                 session_id=None):
+            # executor-transport wrappers nest the reject under "result"
+            return {"status": "ok",
+                    "result": {"status": "Rejected", "phase": "preflight",
+                               "error": "bad arg", "accepted_keys": [],
+                               "required": []}}
+        monkeypatch.setattr(core, "run_tool", fake_run_tool)
+        d = cli._budget_drain_dispatcher(())
+        out = asyncio.run(d({"tool": "t", "arguments_json": "{}"}))
+        assert out["status"] == "Failed" and "bad arg" in out["error"]
+
 
 # ─── restart-resume (§13) ────────────────────────────────────────────────────
 

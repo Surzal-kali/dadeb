@@ -137,12 +137,15 @@ class TestCascadeAtomicity:
         # accrue-time) and exactly one emission row exists
         host = [n for n in _nodes(s).values()
                 if n["host_axis"] == "10.0.0.1"][0]
-        assert host["remaining_requests"] == pytest.approx(599.0)
+        # 2026-11-06 grant-persistence: a SHORT attempt now materializes the
+        # drip it earned (600 here — host starts ceiling-clamped) WITHOUT
+        # charging the debit; emissions stay untouched (2 committed only).
+        assert host["remaining_requests"] == pytest.approx(600.0)
         node = s._node_row(host["node_key"])
         assert s._accrue(node, 1000.0 + 1800, const.epoch_s)["requests"][
             "remaining"] == pytest.approx(600.0)  # clamped projection
         # two committed debits, two emission rows — the rolled-back attempt
-        # wrote nothing
+        # charged nothing
         assert len(_emissions(s)) == 2
 
     def test_shortfall_at_host_reports_level(self, engine):
@@ -447,6 +450,85 @@ class TestQueue:
         assert res["results"][0]["decision"] == "flagged_for_human"
         assert dispatched == []
 
+    # ── bounded-failure exit (2026-11-06 seam close) ──
+
+    def test_dispatch_failed_stamps_attempt_and_survives(self, engine):
+        self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: (_ for _ in ()).throw(RuntimeError("jvm")),
+            now=1005.0))
+        assert res["results"][0]["decision"] == "dispatch_failed"
+        (item,) = engine.store.due_items(now=1006.0)
+        assert item["status"] == "queued"
+        assert item["attempts"] == 1
+        assert "jvm" in (item["notes_json"] or "")   # last error visible NOW
+
+    def test_failed_envelope_exhausts_to_failed_status(self, engine,
+                                                       monkeypatch):
+        """Default budget 3: four Failed-envelope ticks consume the item as
+        'failed' with the last tool error on the row."""
+        def _fail(item):
+            return {"status": "Failed", "error": "tool body raised: crash"}
+        out = self._short_call(engine)
+        for tick in range(4):
+            res = asyncio_run(engine.operator_tick(dispatch=_fail,
+                                                   now=1006.0 + tick))
+            last = res["results"][0]["decision"]
+        assert last == "failed_exhausted"
+        item = engine.store.get_item(out["queue_id"])
+        assert item["status"] == "failed"
+        assert "crash" in (item["notes_json"] or "")
+        assert engine.store.due_items(now=1006.0 + 4) == []
+
+    def test_retry_budget_exhaustion_exits_queue(self, engine, monkeypatch):
+        monkeypatch.setenv("BUDGET_RETRY_MAX", "2")
+        out = self._short_call(engine)
+        for tick in range(3):                       # 3 raises > budget 2
+            asyncio_run(engine.operator_tick(
+                dispatch=lambda item: (_ for _ in ()).throw(
+                    RuntimeError("gate")),
+                now=1006.0 + tick))
+        item = engine.store.get_item(out["queue_id"])
+        assert item["status"] == "failed"
+        assert "retry budget exhausted" in (item["notes_json"] or "")
+        assert "gate" in (item["notes_json"] or "")
+        assert engine.store.due_items(now=1006.0 + 3) == []   # queue moves on
+
+    def test_zero_retry_budget_fails_on_first_raise(self, engine,
+                                                    monkeypatch):
+        monkeypatch.setenv("BUDGET_RETRY_MAX", "0")
+        out = self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: (_ for _ in ()).throw(RuntimeError("x")),
+            now=1005.0))
+        assert res["results"][0]["decision"] == "failed_exhausted"
+        assert engine.store.get_item(out["queue_id"])["status"] == "failed"
+
+    def test_success_resets_nothing_but_item_exits_normally(self, engine):
+        """A dispatch that succeeds is never touched by the retry ledger."""
+        out = self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: {"job_id": 1}, now=1005.0))
+        assert res["results"][0]["decision"] == "dispatched"
+        item = engine.store.get_item(out["queue_id"])
+        assert item["status"] == "launched"
+        assert item["attempts"] == 0
+
+    def test_fail_envelope_maps_to_bounded_fate(self, engine):
+        """A scope-gate-class Failed envelope from the dispatch lane is no
+        longer consumed as an inline success — it stamps an attempt, keeps
+        the item queued with the error visible, and exits after the budget."""
+        self._short_call(engine)
+        res = asyncio_run(engine.operator_tick(
+            dispatch=lambda item: {"status": "Failed",
+                                   "error": "scope gate: host not blessed"},
+            now=1005.0))
+        assert res["results"][0]["decision"] == "tool_failed"
+        (item,) = engine.store.due_items(now=1006.0)
+        assert item["status"] == "queued"          # still bounded-retrying
+        assert item["attempts"] == 1
+        assert "scope gate" in (item["notes_json"] or "")
+
     def test_sweep_expired_cancels_only_queued(self, engine, tmp_path,
                                               monkeypatch):
         const = rt.constitution()
@@ -484,7 +566,14 @@ class TestQueue:
 # ─── HOLD mode (§6.2) ────────────────────────────────────────────────────────
 
 class TestHoldMode:
-    def test_hold_accrues_at_floor_not_refill(self, engine):
+    def test_hold_accrues_at_refill_drip_not_floor(self, engine):
+        """2026-11-06 ffuf drain starvation: HOLD accrual at the floor alone
+        (2/h) could never reach a 600-request chunk while the node held its
+        OWN backlog (apply_backlog_modes holds on any queued item) — the
+        math could never admit a chunk, so the drain looped on still_short
+        forever. Held nodes now accrue at the CONSTITUTIONAL DRIP (the
+        normal refill rate, 100/epoch here); the floor stays the guarantee
+        for floors RAISED above the drip (max(floor, refill))."""
         const = rt.constitution()
         kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
                   max_single=const.max_single())
@@ -493,17 +582,35 @@ class TestHoldMode:
                               tool="tests.h", now=1000.0, **kw)["committed"]
         n = s.set_phase(mode="hold", host_axis="10.0.0.42")
         assert n == 1
-        # normal refill would be +100; HOLD accrues at the +2 floor
-        receipt = s.debit_vector(_decl(requests=4),
+        # one full epoch under HOLD grants the +100 drip, not the +2 floor
+        receipt = s.debit_vector(_decl(requests=100),
                                  _dims(target="10.0.0.42"),
                                  tool="tests.h", now=1000.0 + const.epoch_s,
                                  **kw)
-        assert receipt["committed"] is False, "4 > floor 2 → still short (HOLD)"
-        receipt = s.debit_vector(_decl(requests=2),
-                                 _dims(target="10.0.0.42"),
-                                 tool="tests.h", now=1000.0 + const.epoch_s,
-                                 **kw)
-        assert receipt["committed"] is True
+        assert receipt["committed"] is True, (
+            "HOLD must accrue at the refill drip so a self-held backlog can "
+            "drain — floor-only accrual starves the queue forever")
+
+    def test_hold_backlog_drain_eventually_admits_ceiling_chunk(self, engine):
+        """The live incident as a test: burst ceiling 600, chunk needs 600,
+        node HOLDs on its own backlog. The drain must reach 600 again via
+        drip accrual — six epochs — and admit; the loop is finite."""
+        const = rt.constitution()
+        kw = dict(policy=const.policy(), epoch_s=const.epoch_s,
+                  max_single=const.max_single())
+        s = engine.store
+        assert s.debit_vector(_decl(requests=600), _dims(target="10.0.0.42"),
+                              tool="tests.h", now=1000.0, **kw)["committed"]
+        s.set_phase(mode="hold", host_axis="10.0.0.42")
+        admit = False
+        for tick in range(1, 21):
+            r = s.debit_vector(_decl(requests=600), _dims(target="10.0.0.42"),
+                               tool="tests.h", now=1000.0 + tick * const.epoch_s,
+                               **kw)
+            if r["committed"]:
+                admit = True
+                break
+        assert admit, "600/epoch drip must re-fill the ceiling within 6 epochs"
 
     def test_hold_never_zero_floor(self, engine):
         engine.store.set_phase(mode="hold", host_axis="10.0.0.42") \

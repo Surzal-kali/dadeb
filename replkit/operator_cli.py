@@ -453,7 +453,12 @@ def _budget_drain_dispatcher(manifests):
     refusal returns a ``requeued`` envelope — the wrapper re-enqueued the
     SAME chunk inside its plan; the tick records "requeued" (batch-pacing
     churn) and the item stays queued for its next due turn (it must NOT
-    map to finished — the chunk would be silently consumed)."""
+    map to finished — the chunk would be silently consumed).
+
+    Preflight rejections (executor arg-schema rejects) map onto the same
+    Failed seam: they are neither budget-deferred nor budget-refused, and
+    consuming one as finished silently destroys a plan's chunk indices
+    (the minter never re-mints a consumed index — 2026-11-06 ffuf drain)."""
     from replkit.core import run_tool
     from utils.ration import BudgetRefused, BudgetStillShort
 
@@ -481,6 +486,37 @@ def _budget_drain_dispatcher(manifests):
                 return {"job_id": job}
         if isinstance(res, dict) and res.get("job_id"):
             return {"job_id": res["job_id"]}
+        # Preflight-rejection seam (2026-11-06): an executor arg-schema
+        # reject returns {"status": "Rejected", "phase": "preflight"} —
+        # it matched NEITHER the budget checks NOR the Failed seam and fell
+        # through to {"finished": True}, consuming every rejected chunk as
+        # done-forever (plan indices never re-mint, the work just vanishes).
+        # Map the reject onto the Failed pathway: the engine stamps the
+        # attempt and the row exits visibly with the reject text past the
+        # retry budget.
+        from daharness.preflight import format_rejection as _fmt_rej
+        from daharness.preflight import is_rejection as _is_rej
+        for probe in (res, inner):
+            if _is_rej(probe):
+                return {"status": "Failed",
+                        "error": ("preflight rejected the drain dispatch: "
+                                  + _fmt_rej(probe))}
+        # Failed-tool envelope propagates to the ENGINE (§2.6 bounded
+        # failure ledger): run_tool wraps every raised tool-body error
+        # (incl. ScopeGateError) as {"status": "Failed"}. Consuming it as
+        # {"finished": True} here would mark the item done-forever despite
+        # nothing launching — the engine stamps the attempt and exits the
+        # item past BUDGET_RETRY_MAX with the error on the row. Do NOT
+        # pre-map it to BudgetRefused: a Failed envelope is often a
+        # transient tool-body mislaunch, and the retry budget (not the
+        # never-fit verdict) is the honest fate.
+        if (isinstance(res, dict) and res.get("status") == "Failed") \
+                or (isinstance(inner, dict)
+                    and inner.get("status") == "Failed"):
+            _ferr = (res.get("error") if isinstance(res, dict) else None) \
+                or (inner.get("error") if isinstance(inner, dict) else None) \
+                or "tool returned Failed"
+            return {"status": "Failed", "error": str(_ferr)}
         return {"finished": True}
 
     return _dispatch
@@ -584,12 +620,21 @@ async def _budget_command(rest: str):
                 except ValueError:
                     print(f"  --batch {tail[i + 1]!r} is not an int — using {batch}")
         from replkit.core import discover_tools
-        results = await engine.operator_tick(
-            dispatcher=_budget_drain_dispatcher(discover_tools()), batch=batch)
-        if not results:
+        tick = await engine.operator_tick(
+            dispatch=_budget_drain_dispatcher(discover_tools()), batch=batch)
+        # operator_tick returns a SUMMARY envelope ({decision, results,
+        # backlog_remaining}), not a bare list — printing `results` directly
+        # printed its repr's keys and the "(queue drained)" fast-path never
+        # fired. Read the envelope honestly, per-item lines verbatim.
+        if tick.get("decision") == "noop":
             print("  Queue drained (or nothing due).")
-        for r in results:
+            return
+        for r in tick.get("results") or []:
             print("  " + json.dumps(r, default=str))
+        backlog = tick.get("backlog_remaining")
+        if isinstance(backlog, int) and backlog > 0:
+            print(f"  ... backlog remaining: {backlog} (tick batched — "
+                  f"run 'budget drain' again for the rest)")
 
     elif sub == "set-phase":
         if len(parts) < 2 or parts[1] not in ("normal", "hold"):

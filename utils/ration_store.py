@@ -120,6 +120,10 @@ CREATE TABLE IF NOT EXISTS queue_items (
     job_ref TEXT, no_reenqueue INTEGER NOT NULL DEFAULT 0,
     requested REAL NOT NULL, expires_at REAL NOT NULL,
     notes_json TEXT,
+    -- Drain failure accounting (2026-11-06 design seam): every dispatch_failed
+    -- tick increments this; BUDGET_RETRY_MAX exhaustions cancel the item with
+    -- the last error surfaced instead of looping silently to TTL.
+    attempts INTEGER NOT NULL DEFAULT 0,
     -- U2 wordlist chunk lane: chunk items point at their plan row;
     -- non-chunk items carry NULL (no default agent_id — resolved callers
     -- only, scale-doctrine Annex A).
@@ -332,7 +336,8 @@ class RationStore:
             "PRAGMA table_info(queue_items)")}
         for name, ddl in (("parent_plan_id", "TEXT"),
                           ("chunk_index", "INTEGER"),
-                          ("chunk_meta_json", "TEXT")):
+                          ("chunk_meta_json", "TEXT"),
+                          ("attempts", "INTEGER NOT NULL DEFAULT 0")):
             if name not in qcols:
                 self.conn.execute(
                     f"ALTER TABLE queue_items ADD COLUMN {name} {ddl}")
@@ -409,7 +414,7 @@ class RationStore:
         # (ration.budget_now); the per-tick cap is the only grant bound here.
         elapsed = min(max(0.0, float(now) - start), tick_epochs * epoch_s)
         if node["mode"] == "hold":
-            refill = dict(floor)
+            refill = {d: max(floor[d], refill[d]) for d in DIMS}
         out = {}
         for d in DIMS:
             rem = float(node[rem_col[d]] or 0.0)
@@ -610,6 +615,7 @@ class RationStore:
                 debit_vals = {d: decl[d] for d in DIMS if decl[d] is not None}
                 deficit: dict[str, float] = {}
                 short_levels: list[str] = []
+                level_writes: list[tuple] = []
                 for label, ldims in self._levels(dims):
                     key = _node_key(engagement, ldims.get("entry_partition"),
                                     ldims.get("exit_id"), ldims.get("range_axis"),
@@ -627,26 +633,14 @@ class RationStore:
                             deficit[d] = deficit.get(d, 0.0) + round(
                                 debit_vals[d] - avail, 6)
                             short_levels.append(label)
-                            updates[d] = round(avail - min(avail, decl[d]), 6)
                         else:
-                            updates[d] = round(avail - decl[d], 6)
-                    if updates:
-                        c.execute(
-                            "UPDATE nodes SET remaining_requests=?, "
-                            "remaining_packets=?, remaining_auth=?, "
-                            "remaining_bytes=?, last_refill=? WHERE node_key=?",
-                            (updates.get(DIMS[0],
-                                         balances[DIMS[0]]["remaining"]),
-                             updates.get(DIMS[1],
-                                         balances[DIMS[1]]["remaining"]),
-                             updates.get(DIMS[2],
-                                         balances[DIMS[2]]["remaining"]),
-                             updates.get(DIMS[3],
-                                         balances[DIMS[3]]["remaining"]),
-                             now, key))
+                            updates[d] = round(avail - debit_vals[d], 6)
+                    level_writes.append((label, key, balances, updates))
                     traces.append({"level": label, "node_key": key,
                                    "balances_after": {
-                                       d: (updates[d] if d in updates
+                                       d: (updates.get(d,
+                                           balances[d]["remaining"])
+                                           if d in debit_vals
                                            else balances[d]["remaining"])
                                        for d in DIMS}})
                 reserve_cover = None
@@ -654,7 +648,27 @@ class RationStore:
                     reserve_cover = self._released_reserve_cover(
                         deficit, dims=dims, engagement=engagement, now=now)
                     if reserve_cover is None:
-                        c.rollback()
+                        # SHORT attempt: persist the accrued-but-unspent
+                        # GRANT (projected balance) and stamp last_refill so
+                        # the next attempt accrues ON TOP of it. Burning the
+                        # grant (pre-2026-11-06) starved the queue forever:
+                        # each failed drain reset accrual, and the capped
+                        # 1-epoch projection recomputed from the stored 0
+                        # balance never accumulated past the drip. Charging
+                        # nothing — the debit did NOT commit; only the drip
+                        # the node legitimately earned is materialized.
+                        for (label, key, bals, _upd_unused) in level_writes:
+                            c.execute(
+                                "UPDATE nodes SET remaining_requests=?, "
+                                "remaining_packets=?, remaining_auth=?, "
+                                "remaining_bytes=?, last_refill=? "
+                                "WHERE node_key=?",
+                                (bals[DIMS[0]]["remaining"],
+                                 bals[DIMS[1]]["remaining"],
+                                 bals[DIMS[2]]["remaining"],
+                                 bals[DIMS[3]]["remaining"],
+                                 now, key))
+                        c.commit()
                         return {"committed": False, "decision": "enqueue",
                                 "level": short_levels[0],
                                 "shortfall_dims": sorted(deficit),
@@ -662,6 +676,21 @@ class RationStore:
                                 "reason": f"budget_short@{short_levels[0]}"}
                     self._consume_reserve(reserve_cover["token_id"],
                                           reserve_cover["consume"])
+                # BALANCE WRITE on the COMMIT path: a committed debit
+                # consumes its projected accrual per level (balance minus
+                # the debit). The pre-2026-11-06 shape wrote this BEFORE the
+                # deficit check, which is what let short attempts burn the
+                # grant.
+                for (label, key, _bals, upd) in level_writes:
+                    c.execute(
+                        "UPDATE nodes SET remaining_requests=?, "
+                        "remaining_packets=?, remaining_auth=?, "
+                        "remaining_bytes=?, last_refill=? WHERE node_key=?",
+                        (upd.get(DIMS[0], _bals[DIMS[0]]["remaining"]),
+                         upd.get(DIMS[1], _bals[DIMS[1]]["remaining"]),
+                         upd.get(DIMS[2], _bals[DIMS[2]]["remaining"]),
+                         upd.get(DIMS[3], _bals[DIMS[3]]["remaining"]),
+                         now, key))
                 cur = c.execute(
                     "INSERT INTO emissions (ts, tool, engagement, agent_id, "
                     "entry_partition, exit_id, range_axis, host_axis, principal, "
@@ -809,11 +838,36 @@ class RationStore:
             "UPDATE queue_items SET status='finished' WHERE qid=?", (qid,))
         self.conn.commit()
 
-    def cancel_item(self, qid: str, note: str = "cancelled") -> None:
-        self.conn.execute(
+    def cancel_item(self, qid: str, note: str = "cancelled") -> bool:
+        cur = self.conn.execute(
             "UPDATE queue_items SET status='cancelled', notes_json=? "
             "WHERE qid=?", (note, qid))
         self.conn.commit()
+        return bool(cur.rowcount)
+
+    def fail_item(self, qid: str, note: str) -> bool:
+        """Terminal failure exit (§7.2 seam close, 2026-11-06): the item has
+        exhausted its bounded retry budget — consume it as FAILED with the
+        last error carried in notes_json, never silent-looping to TTL."""
+        cur = self.conn.execute(
+            "UPDATE queue_items SET status='failed', notes_json=? WHERE qid=?",
+            (note, qid))
+        self.conn.commit()
+        return bool(cur.rowcount)
+
+    def stamp_attempt(self, qid: str, note: str) -> int:
+        """One bounded-failure tick against the item; returns the NEW attempt
+        count. The note rides notes_json every tick so a queued item's last
+        error is always visible in budget_queue_status, not just at exit."""
+        cur = self.conn.execute(
+            "UPDATE queue_items SET attempts=attempts+1, notes_json=? "
+            "WHERE qid=?", (note, qid))
+        self.conn.commit()
+        if not cur.rowcount:
+            return 0
+        (n,) = self.conn.execute(
+            "SELECT attempts FROM queue_items WHERE qid=?", (qid,)).fetchone()
+        return int(n)
 
     def get_item(self, qid: str) -> dict | None:
         row = self.conn.execute(

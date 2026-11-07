@@ -349,7 +349,7 @@ def advance_plans(*, now: float | None = None, limit: int = 8) -> dict:
         "SELECT plan_id FROM queue_plans WHERE state='open' "
         "ORDER BY requested LIMIT ?", (limit,))]
     out = {"observed": 0, "finished": 0, "minted": 0, "settled": [],
-           "expired": []}
+           "expired": [], "failed_plans": []}
     ttl_s = plan_ttl_hours() * 3600.0
     for prow in plans:
         plan_id = prow["plan_id"]
@@ -393,6 +393,26 @@ def advance_plans(*, now: float | None = None, limit: int = 8) -> dict:
         if total > 0 and minted >= total and finished >= total:
             store.plan_set_state(plan_id, "finished")
             out["settled"].append(plan_id)
+            continue
+        # Dead-plan seam close (2026-11-06): bounded-failure exits cancel
+        # chunks; when EVERY minted chunk is terminal (finished/cancelled/
+        # failed) and the whole frontier is minted, the plan is unrunnable —
+        # settle it 'failed' with the terminal chunk's note surfaced in the
+        # advance result, instead of an eternally 'open' plan nothing will
+        # ever drain or mint. budget_queue_status then reads the truth.
+        cancelled = int(counts.get("cancelled") or 0)
+        failed = int(counts.get("failed") or 0)
+        done = finished + cancelled + failed
+        if total > 0 and minted >= total and done >= total:
+            reason = "all chunks terminal without completion"
+            for chunk in store.plan_chunks(plan_id, status="failed") + \
+                    store.plan_chunks(plan_id, status="cancelled"):
+                if chunk.get("notes_json"):
+                    reason = f"chunk {chunk['qid']}: {chunk['notes_json']}"
+                    break
+            store.plan_set_state(plan_id, "failed")
+            out["failed_plans"].append({"plan_id": plan_id,
+                                        "reason": reason})
     return out
 
 

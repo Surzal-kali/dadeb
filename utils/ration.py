@@ -80,6 +80,10 @@ DEFAULT_ENABLED = True
 _EPOCH_S_DEFAULT = 3600.0
 _QUEUE_TTL_H_DEFAULT = 24.0
 _DRAIN_BATCH_DEFAULT = 8
+# Bounded-failure exit (2026-11-06 seam close): how many consecutive
+# dispatch_failed ticks an item may survive before it is consumed as
+# 'failed' with the last error surfaced. 0 = fail on the first raise.
+_RETRY_MAX_DEFAULT = 3
 # Cadence between operator ticks lands Phase C (jittered controller loop);
 # kept as the named knob the docstring promised so the constant stays the
 # single place to set the floor.
@@ -519,6 +523,7 @@ def resolve_declaration(
     Unregistered tools run FULL credit-line mode (all-open-ended) — the
     honest default: never guessed, always metered at L1."""
     arguments = arguments or {}
+    ensure_seed_estimators()  # cold-start ordering — see _estimator_engaged
     with _ESTIMATORS_LOCK:
         est = _ESTIMATORS.get(tool_id)
     if est is None:
@@ -1349,10 +1354,46 @@ class RationEngine:
                 dispatched += 1
                 continue
             except Exception as exc:
-                logger.warning("[ration] drain dispatch raised (%s) — "
-                               "item stays queued for the next tick", exc)
-                results.append({"qid": qid, "decision": "dispatch_failed",
-                                "error": str(exc)})
+                # Bounded-failure seam close (2026-11-06): a dispatch that
+                # RAISES is often deterministic (ScopeGateError, tool
+                # misconfig, bad transport) — looping it to TTL wedges the
+                # queue for 24h with zero surface. Each failure stamps an
+                # attempt; past BUDGET_RETRY_MAX the item EXITS as 'failed'
+                # with the last error on the row (budget_queue_status and
+                # the tick result both say why). Transient hiccups still
+                # get their full retry budget; the drain is never silent.
+                attempts = 0
+                try:
+                    attempts = self.store.stamp_attempt(
+                        qid, f"dispatch_failed: {exc}")
+                except Exception:
+                    logger.debug("swallowed attempt stamp at drain",
+                                 exc_info=True)
+                max_retries = _env_int("BUDGET_RETRY_MAX", _RETRY_MAX_DEFAULT,
+                                       minimum=0)
+                if attempts > max_retries:
+                    try:
+                        self.store.fail_item(
+                            qid, f"retry budget exhausted ({attempts} "
+                            f"attempts; max {max_retries}) — last error: "
+                            f"{exc}")
+                        results.append({"qid": qid,
+                                        "decision": "failed_exhausted",
+                                        "error": str(exc)})
+                    except Exception:
+                        logger.debug("swallowed fail-exit at drain",
+                                     exc_info=True)
+                        results.append({"qid": qid,
+                                        "decision": "dispatch_failed",
+                                        "error": str(exc)})
+                else:
+                    logger.warning("[ration] drain dispatch raised (%s) — "
+                                   "item stays queued for the next tick "
+                                   "(attempt %s/%s)", exc, attempts,
+                                   max_retries)
+                    results.append({"qid": qid,
+                                    "decision": "dispatch_failed",
+                                    "error": str(exc)})
                 dispatched += 1
                 continue
             if out.get("brain_timeout"):
@@ -1373,6 +1414,43 @@ class RationEngine:
                 results.append({"qid": qid, "decision": "requeued",
                                 "plan_id": out.get("plan_id"),
                                 "reason": out.get("reason")})
+                dispatched += 1
+                continue
+            if str(out.get("status") or "").strip().lower() == "failed":
+                # Failed-envelope seam close (2026-11-06): run_tool wraps
+                # every raised tool-body error (incl. ScopeGateError) as a
+                # {"status": "Failed"} envelope instead of raising — lanes
+                # that don't map exceptions would otherwise consume the
+                # item as an inline success. Same bounded-ledger fate as a
+                # dispatch raise: attempts increment, past BUDGET_RETRY_MAX
+                # the item EXITS as 'failed' with the tool's error text.
+                _ferr = str(out.get("error") or "tool returned Failed")
+                attempts = 0
+                try:
+                    attempts = self.store.stamp_attempt(
+                        qid, f"tool error: {_ferr}")
+                except Exception:
+                    logger.debug("swallowed attempt stamp (Failed envelope)",
+                                 exc_info=True)
+                max_retries = _env_int("BUDGET_RETRY_MAX", _RETRY_MAX_DEFAULT,
+                                       minimum=0)
+                if attempts > max_retries:
+                    try:
+                        self.store.fail_item(
+                            qid, f"retry budget exhausted ({attempts} "
+                            f"attempts; max {max_retries}) — last error: "
+                            f"{_ferr}")
+                        results.append({"qid": qid,
+                                        "decision": "failed_exhausted",
+                                        "error": _ferr})
+                    except Exception:
+                        logger.debug("swallowed fail-exit (Failed envelope)",
+                                     exc_info=True)
+                        results.append({"qid": qid, "decision": "tool_failed",
+                                        "error": _ferr})
+                else:
+                    results.append({"qid": qid, "decision": "tool_failed",
+                                    "error": _ferr})
                 dispatched += 1
                 continue
             if out.get("finished"):
@@ -1787,7 +1865,9 @@ def budget_queue_status(tool: str = "",
 
     Args:
         tool: Case-insensitive substring filter on the tool id; empty = all.
-        state: queued|launched|finished|cancelled|all (default queued).
+        state: queued|launched|finished|cancelled|failed|all (default
+            queued). 'failed' = items that exhausted BUDGET_RETRY_MAX and
+            exited the queue with their last error on the row (§2.6).
         limit: Max rows returned (default 20).
         plan_id: wordlist-plan lens (U2): observe + advance that plan's
             chunk ladder first, then report its frontier arithmetic.
@@ -1823,6 +1903,15 @@ def budget_queue_status(tool: str = "",
                 f"total={total} minted={minted} "
                 + " ".join(f"{k}={v}" for k, v in sorted(counts.items())
                            if k not in ("total_chunks", "minted")))
+            if plan.get("state") == "failed":
+                # Dead-plan traceability (2026-11-06 seam close): the lens
+                # names the WHY on the settled plan so a drained-dead plan
+                # is never a bare 'failed' with no story.
+                term_rows = store.plan_chunks(plan_id, status="failed") + \
+                    store.plan_chunks(plan_id, status="cancelled")
+                for c in term_rows[:1]:
+                    if c.get("notes_json"):
+                        plan_section += f" — {c['notes_json']}"
             chunk_rows = store.plan_chunks(plan_id)
             for c in chunk_rows[:limit]:
                 meta = json.loads(c.get("chunk_meta_json") or "{}")
@@ -1860,9 +1949,13 @@ def budget_queue_status(tool: str = "",
             _p = store.queued_position(d["qid"])
             if _p is not None:
                 pos = f" pos={_p}"  # standing in the drain's launch order
+        # §2.6: a bounded-failing item shows its attempts + last error
+        # INLINE, so a wedged row is diagnosable from the lens on tick 1.
+        _att = int(d.get("attempts") or 0)
+        _att_s = f" attempts={_att}" if _att else ""
         out.append(
             f"  {d['qid']} [{d['status']}]{pos} {d['tool']} "
-            f"prio={d['priority']} waited={age:.1f}m "
+            f"prio={d['priority']} waited={age:.1f}m{_att_s} "
             f"job={d.get('job_ref') or '-'} reason={d['reason']}"
             + (f" notes={d['notes_json']}" if d.get("notes_json") else ""))
     counts = store.conn.execute(
@@ -1903,6 +1996,15 @@ _GATE_DEBIT_STAMP = {
 
 
 def _estimator_engaged(tool_id: str) -> bool:
+    # Seed FIRST (cold-start ordering, 2026-11-06 ffuf circle-back): the
+    # registry used to fill ONLY inside RationEngine.__init__ — but every
+    # consult site (ration_gate, the U2 lane's _budget_lane_ready)
+    # checked engagement BEFORE ever constructing the engine, so a fresh
+    # process (the Brain above all: its body-side plan-mode branch gates
+    # exactly here) consulted a permanently empty registry, engaged
+    # nothing, and never reached the code that would seed it. The seed is
+    # idempotent (Event-guarded) and near-free after the first call.
+    ensure_seed_estimators()
     with _ESTIMATORS_LOCK:
         return tool_id in _ESTIMATORS
 
