@@ -267,9 +267,18 @@ until green.
 1-6 are DONE (code + tests, see §2, §2A, §3, §5.1/2/3, §4 partial). What
 remains, in order:
 
-1. **pkg4 deb build** (version bump + `dpkg-buildpackage`; postinst wiring
-   unchanged: /etc/budget.yaml seeds only-if-absent, env pristine-flip
-   idempotent) + install + service restart.
+0. **pkg5 live-crash fix (2026-11-06 22:04 incident)**: the deb service
+   lane reads `/etc/daharness/daharness.env` via a systemd EnvironmentFile,
+   which keeps inline `# …` comments inside the value; an operator
+   uncommenting the packaged `#BUDGET_DRAIN_BATCH=2   # items per tick`
+   row crashed the drain loop on `_env_float` before tick one. The
+   helpers now strip a trailing `#` comment (residue-blank → unset, so an
+   operator's cleared value is a default, not an error; `false # off` is
+   honestly false now; garbage `abc#def` still raises) — regression tests
+   in `tests/test_budget_drain_loop.py`, shipped in pkg5. Install pkg5 and
+   the live file's uncommented rows parse as authored.
+1. **pkg4 deb build** DONE as pkg4 (built + installed 22:02-22:04); see
+   item 0 for the pkg5 follower (same build + install + service restart).
 2. **Live /etc/daharness/budget.yaml overwrite** with the drum-steady law
    (epoch 300, refill 150, band {1.5, 6.0}; keep other dims at shipped
    values) — the constitution is read per-call, no restart needed for it.

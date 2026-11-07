@@ -228,3 +228,38 @@ def test_drain_state_file_is_0600(lane):
     bd.write_drain_state({"ts": 1.0})
     st = bd.drain_state_path()
     assert (bd.os.stat(st).st_mode & 0o777) == 0o600
+
+
+# --- env parse: systemd EnvironmentFile inline comments (2026-11-06) ---
+# The deb unit reads /etc/daharness/daharness.env with systemd, which does
+# NOT strip trailing "# ..." comments — an operator who uncomments the
+# packaged `#BUDGET_DRAIN_BATCH=2   # items per tick` row feeds
+# "2   # items per tick" to the parser. Live crash (22:04:45): the drain
+# loop died on _env_int("BUDGET_DRAIN_BATCH") before its first tick.
+
+
+def test_env_numeric_strips_inline_comment(lane, monkeypatch):
+    monkeypatch.setenv("BUDGET_TEST_NUM", "30   # tick cadence, s (code default 30)")
+    assert rt._env_float("BUDGET_TEST_NUM", 7.0) == 30.0
+    monkeypatch.setenv("BUDGET_TEST_NUM", "2\t# items per tick (code default 2)")
+    assert rt._env_int("BUDGET_TEST_NUM", 9) == 2
+
+
+def test_env_numeric_blank_goes_default(lane, monkeypatch):
+    monkeypatch.setenv("BUDGET_TEST_NUM", "   # operator cleared the value")
+    monkeypatch.setenv("BUDGET_TEST_NUM_EMPTY", "")
+    assert rt._env_float("BUDGET_TEST_NUM", 30.0) == 30.0
+    assert rt._env_float("BUDGET_TEST_NUM_EMPTY", 30.0) == 30.0
+
+
+def test_env_numeric_garbage_still_raises(lane, monkeypatch):
+    monkeypatch.setenv("BUDGET_TEST_NUM", "abc#def")
+    with pytest.raises(ValueError):
+        rt._env_float("BUDGET_TEST_NUM", 1.0)
+
+
+def test_env_bool_strips_inline_comment(lane, monkeypatch):
+    monkeypatch.setenv("BUDGET_TEST_FLAG", "1  # default on -- bootstrap task")
+    assert rt._env_bool("BUDGET_TEST_FLAG", False) is True
+    monkeypatch.setenv("BUDGET_TEST_FLAG", "false  # off")
+    assert rt._env_bool("BUDGET_TEST_FLAG", True) is False

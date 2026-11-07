@@ -1,3 +1,21 @@
+daharness (0.2.0+pkg5) kali; urgency=high
+
+  * Live crash fix (drain loop died before its first tick): the numeric
+    env helpers (`utils/ration.py:_env_float`/`_env_bool`, shared by
+    `_env_int`) now strip an inline trailing `# comment` suffix and treat
+    the residue-blank case as unset→default. The deb service lane reads
+    `/etc/daharness/daharness.env` via a systemd EnvironmentFile, which
+    — unlike python-dotenv — keeps trailing comments inside the value; an
+    operator who uncommented the packaged
+    `#BUDGET_DRAIN_BATCH=2   # items per tick` row fed
+    `"2   # items per tick (code default 2)"` to float() and the
+    pacemaker raised ValueError before tick one (22:04:45 incident).
+    Genuine garbage (`abc#def`) still raises honestly; `false # off`
+    now parses as false (previously truthy). Regression tests added to
+    `tests/test_budget_drain_loop.py`; template comment notes the safety.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 06 Nov 2026 22:07:30 -0700
+
 daharness (0.2.0+pkg4) kali; urgency=medium
 
   * Drum-steady law: the ration lane's default posture is now the

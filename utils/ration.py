@@ -92,7 +92,11 @@ _PRINCIPAL_WINDOW_H_DEFAULT = 168.0
 
 
 def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
-    raw = os.getenv(name, "").strip()
+    # Inline "# comment" suffixes are stripped before parse: the deb service
+    # lane reads its env via systemd EnvironmentFile, which (unlike
+    # python-dotenv) keeps trailing comments inside the value — the packaged
+    # /etc/daharness/daharness.env examples carry them on active rows.
+    raw = os.getenv(name, "").split("#", 1)[0].strip()
     if not raw:
         return default
     try:
@@ -109,7 +113,7 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name, "").strip().lower()
+    raw = os.getenv(name, "").split("#", 1)[0].strip().lower()
     if not raw:
         return default
     return raw not in ("0", "false", "no", "off")
