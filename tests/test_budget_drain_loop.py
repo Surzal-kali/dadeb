@@ -3,6 +3,8 @@ state-file contract, disabled-lane fast path, per-tick error survival,
 cancel, manifest refresh on unknown-tool, and the doctor lens."""
 
 import asyncio
+import json
+import os
 import time
 import types
 
@@ -263,3 +265,148 @@ def test_env_bool_strips_inline_comment(lane, monkeypatch):
     assert rt._env_bool("BUDGET_TEST_FLAG", False) is True
     monkeypatch.setenv("BUDGET_TEST_FLAG", "false  # off")
     assert rt._env_bool("BUDGET_TEST_FLAG", True) is False
+
+
+# --- §6.2 drum drip (2026-11-06 live incident) --------------------------------
+#
+# The .107 drum watch: a 600-request chunk queued for >1h12m of 30s ticks
+# with zero launches and a STALL stamp. admit_vector is contractually
+# read-only, so its ``enqueue`` verdict never reached debit_vector's
+# short-grant persistence — every tick recomputed the accrued refill from
+# the same stale stored balance and discarded it. The one operator writer
+# now materializes the drip for due items' nodes before the batch runs.
+
+
+def _drainlaw_engine():
+    """Default-law engine (ceiling 600 requests, refill 150/epoch, epoch
+    300s — the shipped law) on whatever store dir the fixture set."""
+    rt.reset_engine()
+    rt.reset_ration_store()
+    return rt.get_engine()
+
+
+def _starved_chunk_item(engine, *, decl_requests=600.0):
+    """One queued ffuf CHUNK on a zero-balance node (the live box's
+    post-lane-spend leftover). Chunk-keyed args so the estimator declares
+    the slice vector deterministically (600 requests) with no wordlist."""
+    from utils.ration_store import _node_key
+
+    t_dims = rt.dims_for_target("10.0.0.5")
+    dims = ({"engagement": None, **t_dims} if "engagement" not in t_dims
+            else t_dims)
+    args = {"url": "http://10.0.0.5/FUZZ",
+            "wordlist": "/tmp/never-resolved.txt",
+            "chunk_plan_id": "wp-test", "chunk_index": 0,
+            "chunk_offset": 0, "chunk_slice": int(decl_requests),
+            "chunk_total_chunks": 2}
+    engine.store.enqueue_item(
+        tool="payloads.ffuf.run_ffuf", arguments=args,
+        decl={"requests": decl_requests, "packets": None,
+              "auth_events": None, "bytes": decl_requests * 8192.0},
+        dims=dims, reason="starve test", agent_id="tester",
+        engagement=None)
+    key = _node_key(None, dims.get("entry_partition"), None, None,
+                    "10.0.0.5", None)
+    row = engine.store.conn.execute(
+        "SELECT 1 FROM nodes WHERE node_key=?", (key,)).fetchone()
+    if row is None:
+        engine.store.conn.execute(
+            "INSERT INTO nodes (node_key, engagement, host_axis,"
+            " ceiling_json, floor_json, refill_json, remaining_requests,"
+            " remaining_packets, remaining_auth, remaining_bytes,"
+            " last_refill, epoch_anchor) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            (key, None, "10.0.0.5",
+            json.dumps({"requests": 600.0, "packets": 2000000.0,
+                          "auth_events": 60.0, "bytes": 268435456.0}),
+            json.dumps({"requests": 2.0, "packets": 500.0,
+                          "auth_events": 0.2, "bytes": 262144.0}),
+            json.dumps({"requests": 150.0, "packets": 250000.0,
+                          "auth_events": 5.0, "bytes": 33554432.0}),
+            0.0, 0.0, 0.0, 0.0, 0.0))
+    else:
+        # zero it (and clear any anchor/phase) like the live box's leftover
+        engine.store.conn.execute(
+            "UPDATE nodes SET remaining_requests=0, last_refill=0,"
+            " epoch_anchor=NULL, mode='normal' WHERE node_key=?", (key,))
+    engine.store.conn.commit()
+    return key, time.time()
+
+
+def test_drain_drip_persists_refill_starved_chunk_launches(lane,
+                                                           monkeypatch):
+    """A 600-request chunk on a zeroed node must LAUNCH through operator
+    ticks: the drip persists accrual each tick (150/epoch), and once the
+    stored balance crosses the declaration the same lane admits and
+    debits. Pre-2026-11-07 the grant was recomputed-and-discarded forever
+    (admit is read-only; debit never ran) — the queue starved silently."""
+    import asyncio
+
+    rt.reset_engine()
+    rt.reset_ration_store()
+    monkeypatch.delenv("BUDGET_DRAIN_INTERVAL_S", raising=False)
+    eng = _drainlaw_engine()
+    node_key, t0 = _starved_chunk_item(eng)
+
+    launches: list[str] = []
+
+    async def drainlike(item):
+        # the drain lane's dispatch semantics, minimally: gate → debit → job
+        decision = eng.preflight(
+            item["tool"], json.loads(item["arguments_json"]),
+            agent_id="drain", operator_release=True)
+        from utils.ration import BudgetStillShort
+        if decision.get("decision") != "admit":
+            raise BudgetStillShort(queue_id=decision.get("queue_id"))
+        receipt = eng.dispatch_debit(
+            item["tool"], json.loads(item["arguments_json"]),
+            agent_id="drain")
+        if receipt.get("committed"):
+            launches.append(f"job-{len(launches)}")
+            return {"job_id": launches[-1]}
+        raise BudgetStillShort(queue_id=receipt.get("queue_id"))
+
+    t0 = t0 + 1.0     # helper's enqueue instant; ticks walk the real clock
+    for tick in range(6):
+        out = asyncio.run(eng.operator_tick(
+            dispatch=drainlike, sleep_fn=lambda *_a: None,
+            now=t0 + tick * 300.0))
+        rem = eng.store.conn.execute(
+            "SELECT remaining_requests, last_refill FROM nodes "
+            "WHERE node_key=?", (node_key,)).fetchone()
+        if tick < 3:            # 150/epoch accrual: 150, 300, 450 — short
+            assert launches == [], "launched before the balance could fund it"
+            # THE FIX UNDER TEST: the grant PERSISTED across ticks (the
+            # pre-fix read-only store recomputed from the stale balance and
+            # never rose).
+            assert rem["remaining_requests"] >= 150.0 * (tick + 1), (
+                f"tick {tick}: grant not persisted "
+                f"(stored {rem['remaining_requests']})")
+        assert launches or rem["last_refill"] >= t0, "drip never ran"
+
+    assert launches, "a 600-request chunk never launched through the drip"
+    rem = eng.store.conn.execute(
+        "SELECT remaining_requests FROM nodes WHERE node_key=?",
+        (node_key,)).fetchone()
+    assert rem["remaining_requests"] < 600.0    # the debit took the spend
+
+
+def test_drip_commit_no_double_grant_within_touch(lane, monkeypatch):
+    """last_refill stamps each drip write so a second touch at the same
+    ``now`` (e.g. two due items on one node) grants nothing extra."""
+    rt.reset_engine()
+    rt.reset_ration_store()
+    eng = _drainlaw_engine()
+    node_key, t = _starved_chunk_item(eng)
+    items = eng.store.due_items(now=t)
+    first = eng.store.drip_due_nodes(items, 300.0, now=t)
+    assert first["nodes"] == 1, first
+    rem1 = eng.store.conn.execute(
+        "SELECT remaining_requests FROM nodes WHERE node_key=?",
+        (node_key,)).fetchone()["remaining_requests"]
+    assert rem1 > 0.0
+    eng.store.drip_due_nodes(items, 300.0, now=t)
+    rem2 = eng.store.conn.execute(
+        "SELECT remaining_requests FROM nodes WHERE node_key=?",
+        (node_key,)).fetchone()["remaining_requests"]
+    assert rem2 == rem1, "same-touch drip double-granted"

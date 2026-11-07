@@ -1282,6 +1282,18 @@ class RationEngine:
             logger.debug("swallowed plan advance in operator_tick",
                          exc_info=True)
         items = self.store.due_items(now=now)
+        # §6.2 drum drip (2026-11-06): a short-but-healable item starves
+        # whenever only the read-only gate sees its shortfall — admit_vector
+        # never writes and debit_vector never runs, so the accrued grant was
+        # recomputed and discarded every tick. The ONE operator writer
+        # materializes the drip for due items' nodes before the batch runs;
+        # the persisted balance is what the dispatch's own gate then reads.
+        drip: dict = {}
+        try:
+            drip = self.store.drip_due_nodes(items, epoch_s, now=now)
+        except Exception:
+            logger.debug("swallowed drip pass in operator_tick",
+                         exc_info=True)
         # §7.3 pacing: the tick scales itself to the controller posture —
         # throttle = smaller batch + jittered inter-release gaps; the floor
         # (cooldown≈0.1) still admits a trickle. Operator pins win via the
@@ -1568,6 +1580,7 @@ class RationEngine:
                     await out_s
         return {"decision": "drained", "results": results,
                 "backlog_remaining": max(0, len(items) - len(results)),
+                "drip": drip,
                 "advance": {"settled": list(_adv.get("settled") or []),
                             "failed_plans": list(_adv.get("failed_plans")
                                                  or [])}}

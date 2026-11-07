@@ -784,6 +784,70 @@ class RationStore:
         self.conn.commit()
         return int(cur.rowcount)
 
+    def drip_due_nodes(self, items: list[dict] | list, epoch_s: float,
+                       *, now: float | None = None) -> dict:
+        """Persist the accrued-but-unspent refill for nodes whose DUE queue
+        items cannot cover their declaration yet (2026-11-06 drum drain).
+
+        Why this lives here and not in ``debit_vector``: the debit-path
+        short branch already persists the grant, but a starved item never
+        REACHES the debit — ``admit_vector`` is contractually read-only and
+        returns ``enqueue`` before any debit, so every drain tick recomputed
+        the grant from the same stale stored balance and threw it away. The
+        grant the node legitimately earned (capped at one epoch per touch —
+        §6.3) is materialized ONCE per tick by the single operator writer;
+        ``last_refill`` prevents double-granting within a tick.
+
+        Returns ``{"nodes": committed, "granted": {node: {dim: amount}}}``
+        for the tick result lens."""
+        now = now if now is not None else time.time()
+        granted: dict[str, dict] = {}
+        seen: set[str] = set()
+        rem_col = {"requests": "remaining_requests",
+                   "packets": "remaining_packets",
+                   "auth_events": "remaining_auth",
+                   "bytes": "remaining_bytes"}
+        for item in items:
+            dims_raw = item.get("dims_json") if isinstance(item, dict) else None
+            try:
+                dims = json.loads(dims_raw) if isinstance(dims_raw, str) else {}
+            except (TypeError, ValueError):
+                logging.getLogger(__name__).debug(
+                    "swallowed bad dims_json in drip pass", exc_info=True)
+                continue
+            eng = item.get("engagement") if isinstance(item, dict) else None
+            for _label, ldims in self._levels(dims if isinstance(
+                    dims, dict) else {}):
+                key = _node_key(eng, ldims.get("entry_partition"),
+                                ldims.get("exit_id"),
+                                ldims.get("range_axis"),
+                                ldims.get("host_axis"),
+                                ldims.get("principal"))
+                if key in seen:
+                    break
+                node = self._node_row(key)
+                if node is None:
+                    seen.add(key)
+                    continue
+                bal = self._accrue(node, now, epoch_s)
+                delta = {}
+                for d in DIMS:
+                    gain = bal[d]["remaining"] - float(node[rem_col[d]] or 0.0)
+                    if gain > 1e-9:
+                        delta[d] = round(gain, 6)
+                if delta:
+                    self.conn.execute(
+                        "UPDATE nodes SET remaining_requests=?, "
+                        "remaining_packets=?, remaining_auth=?, "
+                        "remaining_bytes=?, last_refill=? WHERE node_key=?",
+                        (bal[DIMS[0]]["remaining"], bal[DIMS[1]]["remaining"],
+                         bal[DIMS[2]]["remaining"], bal[DIMS[3]]["remaining"],
+                         now, key))
+                    granted[key] = delta
+                    self.conn.commit()
+                seen.add(key)
+        return {"nodes": len(granted), "granted": granted}
+
     def due_items(self, *, now: float | None = None,
                   axis: str | None = None, limit: int = 64) -> list[dict]:
         """The backlog, drain-order: due (not expired), FIFO by

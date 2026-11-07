@@ -1,3 +1,28 @@
+daharness (0.2.0+pkg6) kali; urgency=high
+
+  * Drum starvation fix (the .107 watch: zero launches for 1h12m of
+    ticks, STALL stamp). admit_vector is contractually read-only, so a
+    starved queue item's budget_deferred/enqueue verdict never reaches
+    debit_vector's short-branch grant persistence — the accrued-but-
+    unspent refill (hold fill = max(floor, refill) = 150 req/epoch) was
+    recomputed from the same stale stored balance and discarded every
+    30s tick, and the pre-2026-11-06 drip-commit fix lived only on the
+    unreachable debit path. New RationStore.drip_due_nodes() persists
+    the one-epoch-capped accrual for due items' nodes (single write per
+    node per tick, last_refill prevents double-grant), hooked into
+    operator_tick before the dispatch loop and surfaced as "drip" in the
+    drained result. The operator writer stays the only mutating lane.
+    A 600-line chunk now funds in ~20 min (~40 30s-ticks x 15 req).
+    Regression: tests/test_budget_drain_loop.py starvation + no-double-
+    grant tests; tests/test_ration_b.py restart-resume updated to the
+    drip law (restart never resurrects; the tick's writer grants <= 1
+    lazy epoch). Install note: run `sudo daharness-index` after this
+    upgrade and restart the service (the vector registry's run_ffuf
+    manifest still declares the pre-2026-11-06 `chunk_size` key, and
+    postinst does not index).
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 07 Nov 2026 06:05:00 -0700
+
 daharness (0.2.0+pkg5) kali; urgency=high
 
   * Live crash fix (drain loop died before its first tick): the numeric

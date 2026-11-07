@@ -316,17 +316,30 @@ class TestRestartResume:
         due = store2.due_items(now=1005.0)
         assert len(due) == 1
         assert due[0]["qid"] == out["queue_id"]
+        # restart persistence first: the REOPENED store carries the exact
+        # spent rows — the restart itself never resurrects a balance.
+        pre_tick_nodes = {r["node_key"]: dict(r)
+                          for r in store2.conn.execute("SELECT * FROM nodes")}
+        assert set(pre_tick_nodes) == set(pre_nodes)
+        for key, row in pre_tick_nodes.items():
+            assert row["remaining_requests"] \
+                == pre_nodes[key]["remaining_requests"]
         res = asyncio.run(engine2.operator_tick(
             dispatch=lambda item: {"job_id": 1234}, now=1006.0))
         assert res["results"][0]["decision"] == "dispatched"
 
-        # spent balances persist (lazy accrual does not resurrect spent value)
+        # §6.2 drip law (2026-11-06): the tick's operator writer materializes
+        # lazy accrual for starved nodes — bounded by the 1-epoch-per-touch
+        # cap, so a drained node may grow, but never past the default
+        # ceiling and never resurrect from beyond one epoch's refill.
         post_nodes = {r["node_key"]: dict(r)
                       for r in store2.conn.execute("SELECT * FROM nodes")}
         assert set(post_nodes) == set(pre_nodes)
         for key, row in post_nodes.items():
-            assert row["remaining_requests"] \
-                == pre_nodes[key]["remaining_requests"]
+            pre = pre_tick_nodes[key]["remaining_requests"]
+            assert pre <= row["remaining_requests"] <= pre + 150.0, (
+                f"{key}: drip must stay within one lazy epoch "
+                f"({pre} -> {row['remaining_requests']})")
 
         # emissions survive identically
         n_e = list(store2.conn.execute("SELECT COUNT(*) c FROM emissions"))[0]["c"]

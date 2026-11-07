@@ -267,6 +267,48 @@ until green.
 1-6 are DONE (code + tests, see §2, §2A, §3, §5.1/2/3, §4 partial). What
 remains, in order:
 
+A. **pkg6 — the drip fix (2026-11-06 drum-starvation, root-caused
+   2026-11-07)**: the .107 drum watch (plan wp-0a2807697f96, 8×600-line
+   chunks) launched ZERO ffuf jobs in ~1h12m of ticks with a STALL stamp —
+   not a law bug, a *plumbing* bug. `admit_vector` is contractually
+   read-only, so a starved item's `budget_deferred`/enqueue verdict never
+   reaches `debit_vector`'s short-branch grant persistence: the
+   accrued-but-unspent refill (hold refill = max(floor, refill) = 150
+   req/epoch) was recomputed from the same stale stored balance and
+   THROWN AWAY every 30 s tick, while the pre-2026-11-06 `drip commit`
+   fix lived only on the unreachable debit path. Fix: a new
+   `RationStore.drip_due_nodes(items, epoch_s, now)` walks the due
+   batch's nodes, computes the one-epoch-capped accrual, and PERSISTS it
+   (remaining + `last_refill`, single write per node per tick) — hooked
+   into `operator_tick` after `due_items`, before the dispatch loop, and
+   surfaced as `"drip"` in the drained result. The one operator writer
+   stays the only mutating lane; model-lane preflights stay read-only.
+   Law unchanged: 40 ticks × 15 req funds a 600-line chunk in ~20 min.
+   Tests: `test_drain_drip_persists_refill_starved_chunk_launches`
+   (zeroed node → 150/300/450 persisted, launch at tick 3) +
+   `test_drip_commit_no_double_grant_within_touch` (same-`now` second
+   touch grants nothing) in `tests/test_budget_drain_loop.py`;
+   `tests/test_ration_b.py`'s restart-resume test updated to the new
+   contract (restart never resurrects — the *tick's* writer may grant
+   ≤1 lazy epoch). Full suite 619 green.
+B. **Stale vector registry on the live box (chore, not code)**: the
+   gateway-lane manifests still declare `chunk_size` for run_ffuf —
+   preflight rejects every keyed chunk dispatch (the 2026-11-06
+   rename-to-`chunk_slice` incident, source fixed at c2edf8a 16:27).
+   The deb's postinst does NOT index and bootstrap doesn't either; run
+   `sudo daharness-index` after installing pkg6, then restart the
+   service. The drain lane (replkit `discover_tools`) is always fresh
+   from source, so this only bites registry-manifest lanes (REST /
+   MCP / find_best_tool).
+C. **Live drum watch, re-run on .107**: enqueue → expect first chunk
+   launch within ~20 min of install (40 ticks × 15 req), one chunk per
+   ~20 min thereafter, inter-release jitter per the authored band. Note
+   honestly: the §6.1 release jitter needs ≥2 affordable launches in one
+   tick to fire — with one starved chunk it stays quiet; that is the
+   math, not a bug. The 3 "open credit-line draws" in budget_status are
+   plan-mint emissions (packets=None, no job) parked in hold; the hold
+   TTL sweep exists — cosmetic. Doctor `backlog 6` vs queue `queued=8`
+   is a drain-eligibility counting difference — cosmetic.
 0. **pkg5 live-crash fix (2026-11-06 22:04 incident)**: the deb service
    lane reads `/etc/daharness/daharness.env` via a systemd EnvironmentFile,
    which keeps inline `# …` comments inside the value; an operator
