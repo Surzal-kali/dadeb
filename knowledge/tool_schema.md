@@ -2,8 +2,7 @@
 
 Complete reference for every tool in the framework registry. 208 tools
 across the indexed roots — `auxiliaries`, `payloads`, `listeners`, `utils`
-bear them (`evasion/` is indexed too but currently mints
-none: resolvers, not decorated entry points). All `BRAIN_DISPATCH`
+bear them. All `BRAIN_DISPATCH`
 transport unless marked otherwise. Parameters listed as
 `name (type, default)` — `(req)` = required.
 
@@ -337,7 +336,7 @@ function name, not the kernel bare name.
 
 | tool_id | alias | params | notes |
 |---|---|---|---|
-| `run_nmap` | `nmap` | `target` (req), `options` ("-Pn -sV"), `shaping` (None) | `net.raw`; shaping preset from `evasion/shaping.py` (quiet/polite/noisy; decoy/fragment lab-gated) |
+| `run_nmap` | `nmap` | `target` (req), `options` ("-Pn -sV") | `net.raw` |
 | `nmap_status` ¶ | auto | `job_id` (req) | `net.raw`; digest adapter |
 | `nmap_scripts` | auto | `query` (""), `category` (""), `detail` (False), `limit` (40) | `net.raw` |
 
@@ -421,18 +420,9 @@ curated alias for the deleted `run_web_probe` wrapper).
 
 ## auxiliaries/web_session.py — stateful HTTP lane (cookie jar + CSRF)
 
-Every `session_*` call carries ONE browser-coherent identity resolved at
-`evasion/webshape.py` — per-host sticky UA ↔ TLS stack ↔ header set ↔
-header order. With `curl_cffi` installed (default
-`SESSION_IMPERSONATION=auto`) the request travels on the impersonating
-client whose template matches the pool pick (full client-hint + sec-fetch
-set, canonical per-family order); otherwise the plain python-requests path
-ships the same UA claim with the family's canonical header order and a
-decodable-only Accept-Encoding fill — the envelope's `fingerprint` field
-names the backend (`curl-impersonate` | `python-requests`) plus the reason
-whenever degraded. Operator-owned identities (`SESSION_UA`, the legacy
-marker, or a caller `User-Agent` header) never impersonate. Optional
-per-host pacing floor via `SESSION_HOST_FLOOR` unchanged.
+`session_*` calls ride a plain python-requests session: the library
+default User-Agent unless the caller supplies one
+supplies one, jar cookies applied per call, CSRF auto-injected on posts.
 
 | tool_id | alias | params | tags |
 |---|---|---|---|

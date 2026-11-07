@@ -111,7 +111,7 @@ env conffile, Postgres init bundle, and the man-page sources
 ## How dispatch works
 
 - **Discovery** — two passes over the indexed roots (`auxiliaries/`,
-  `payloads/`, `listeners/`, `utils/`, `evasion/`): static AST
+  `payloads/`, `listeners/`, `utils/`): static AST
   analysis mints argparse modules as subprocess tools (never importing them),
   dynamic import mints `@framework_tool` functions/methods as Brain-dispatched
   tools. Every tool carries category tags (`daharness/tool_tags.py`) that ride
@@ -153,8 +153,8 @@ binary and keep it on `PATH` (the deb `Recommends` covers most):
 | **Impacket** | `auxiliaries/impacket_suite.py` | Windows post-exploitation (secretsdump & co) |
 | **john / hashcat** | `payloads/hash_crack.py` | Cracking (background-job pattern) |
 
-Python-library lanes (Paramiko SSH, Scapy packetcraft, curl-impersonate
-web-session identity) need no extra CLI installs. The Scapy lane's
+Python-library lanes (Paramiko SSH, Scapy packetcraft) need no extra CLI
+installs. The Scapy lane's
 online-facing tools (sniff_packets, send_packet, wait_for_packet,
 sniff_to_pcap) execute in-process — no setcap can grant them; the lane
 itself needs CAP_NET_RAW (or root). Opt in via the systemd drop-in the
@@ -231,7 +231,6 @@ auxiliaries/            Recon & access lanes (nmap, ZAP, r2, jadx, scope, web se
 payloads/               Offensive lanes (MSF, msfvenom, ffuf, hydra, sqlmap, cracking)
 listeners/              Brain sidecar, OOB collaborator, C plugins
 utils/                  Harness plumbing (scope gate, projection, scratch, findings)
-evasion/                Nmap wire-shaping presets + browser-coherent session identity
 knowledge/              Short operator/model reference docs (scope, lanes, findings)
 tests/                  pytest suite for registry + dispatch flows
 scripts/                Stub generator + dev systemd units
@@ -242,7 +241,7 @@ apk/ binaries/ dropbox/ pcaps/   Drop folders (READMEs document the lanes)
 ```
 
 The code directories (`auxiliaries/`, `payloads/`, `listeners/`, `utils/`,
-`evasion/`, `tests/` and the drop folders) each carry their own
+`tests/` and the drop folders) each carry their own
 `README.md` with the per-module inventory; `daharness/`, `replkit/` and the
 packaging tree document through docstrings, module summaries and man pages
 instead. Man-page sources live in `packaging/man/` as `.md` renditions of

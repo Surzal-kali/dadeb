@@ -15,7 +15,7 @@ a capture that cracks is the whole v1 story. The blue-team answer to this
 whole technique is a GPO disabling LLMNR/NBT-NS; that belongs in the
 finding, not in a feature request.
 
-LAB GATE (mirrors evasion/shaping.py): poisoning is deceptive traffic to
+LAB GATE: poisoning is deceptive traffic to
 real neighbours — refused unless SHAPING_LAB_MODE="1" (1/true/yes/on) in
 the root .env. The scope gate is untouched and irrelevant here by design:
 poisoning answers the SEGMENT, not a blessed target — the lab gate is the
@@ -84,7 +84,7 @@ _LLMNR_TTL = 30
 
 
 def _lab_mode() -> bool:
-    """Same gate convention as evasion/shaping.py ($SHAPING_LAB_MODE)."""
+    """Lab gate ($SHAPING_LAB_MODE)."""
     return os.getenv("SHAPING_LAB_MODE", "").strip().lower() in (
         "1", "true", "yes", "on")
 
@@ -682,7 +682,7 @@ def run_job_process(argv: list[str]) -> int:
     if not _lab_mode():
         print(
             "responder: LLMNR/NBT-NS poisoning refused without "
-            'SHAPING_LAB_MODE="1" in the root .env (evasion lab gate).',
+            'SHAPING_LAB_MODE="1" in the root .env (lab gate).',
             file=sys.stderr,
         )
         return 2
@@ -804,7 +804,7 @@ def responders_start(
         raise ScopeGateError(
             "responder: LLMNR/NBT-NS poisoning is deceptive segment traffic — "
             'refused without SHAPING_LAB_MODE="1" in the root .env '
-            "(evasion lane lab gate).")
+            "(lab gate).")
     ok, why = _four45_capable()
     if not ok:
         from utils.scope_gate import ScopeGateError

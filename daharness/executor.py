@@ -145,38 +145,6 @@ class ExecutorMixin:
         except Exception:
             logger.debug("[SCOPE_DISABLE] check skipped (non-fatal)", exc_info=True)
 
-        # --- Ration gate (budget constitution, §3 chokepoint / Phase D): the
-        # declared-traffic preflight + atomic debit for REGISTERED traffic
-        # tools only. replkit.core.run_tool funnels EVERY lane (gateway REST,
-        # MCP, REPL, kernel, operator drain) into this method, so one
-        # chokepoint covers all front doors. Returns None when the budget
-        # system doesn't engage; a budget_deferred/budget_refused envelope
-        # means NO dispatch (audited on the journal lane like every reject).
-        # On admit the gate commits the debit immediately and the returned
-        # state MUST reach _ration_discharge after dispatch.
-        _ration_gate_state = None
-        try:
-            from utils.ration import ration_gate
-            _ration_gate_state = ration_gate(
-                manifest.module_id, arguments,
-                agent_id=resolved_agent_id, session_id=str(session_id),
-                operator_release=(session_id == "ration-drain"))
-        except Exception:
-            logger.debug(
-                "[RATION] gate step skipped (non-fatal; store-state "
-                "refusals are decided inside the gate)", exc_info=True)
-        if isinstance(_ration_gate_state, dict) and _ration_gate_state.get(
-                "status") in ("budget_deferred", "budget_refused"):
-            _rej = _ration_gate_state
-            logger.info(f"[PREFLIGHT_REJECT] {manifest.module_id}: "
-                        f"{_rej.get('status')} "
-                        f"({str(_rej.get('reason') or 'budget_short')[:120]})")
-            self._journal_reject(manifest.module_id, _rej, session_id)
-            return _rej
-        _ration_debited = (
-            isinstance(_ration_gate_state, dict)
-            and _ration_gate_state.get("gate") == "debited")
-
         # LOGGING: Record actual execution start
         logger.info(
             f"[TOOL_EXECUTE] Executing Tool ID: {manifest.module_id} | Path: {manifest.implementation_path} | Args: {arguments} | Session: {session_id}"
@@ -191,26 +159,6 @@ class ExecutorMixin:
             result = {"error": f"dispatch failed: {exc}", "status": "Failed"}
             status = "error"
         duration_s = time.time() - started
-
-        # --- Ration discharge (§3 step 6): duplicate/refused fleet verdicts
-        # reverse their debit, launched job ids bind job_ref (the §7.1 draw
-        # closes at poll release), deterministic inline tools reconcile
-        # actuals. Guarded — a discharge bug never alters the dispatch's fate.
-        if _ration_debited and isinstance(result, dict):
-            try:
-                from utils.ration import ration_discharge as _ration_discharge
-                _discharge_out = _ration_discharge(_ration_gate_state, result)
-                result.setdefault("budget", {
-                    "status": "debited",
-                    "declared": (_ration_gate_state or {}).get("declared"),
-                    "basis": (_ration_gate_state or {}).get("declared_basis"),
-                    **({"discharge": _discharge_out.get("discharge"),
-                        "emission_id": _discharge_out.get("emission_id")}
-                       if isinstance(_discharge_out, dict) else {}),
-                })
-            except Exception:
-                logger.debug("[RATION] discharge step failed (non-fatal)",
-                             exc_info=True)
 
         # Journal the identity the OUTER wrapper resolved (never re-resolve:
         # a minted id re-resolves to a DIFFERENT anon id, which would split

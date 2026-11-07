@@ -74,38 +74,6 @@ def _inject_noninteractive(extra: list[str]) -> list[str]:
     return extra
 
 
-def _inject_wire_pacing(tokens: list, slice_lines: int) -> dict[str, Any] | None:
-    """pkg7 — the drum's WIRE leg. A chunk pays exactly what one epoch
-    funds; pace its requests across that epoch (``-t 1 -rate N``) so the
-    target sees a slow continuous stream instead of ffuf's default burst
-    pool (which emptied a 600-request slice in seconds). Caller-provided
-    ``-t`` / ``-rate`` win per-flag; None = law unreadable (launch stays
-    unshaped, exactly as before pkg7)."""
-    try:
-        from utils.wordlist_chunking import epoch_pacing
-        pace = epoch_pacing(slice_lines)
-    except Exception:
-        logger.debug("swallowed epoch_pacing read for wire pacing",
-                     exc_info=True)
-        return None
-    if pace is None:
-        return None
-    lower = {t.lower() for t in tokens}
-    applied: list[str] = []
-    caller_wins: list[str] = []
-    if "-rate" not in lower:
-        tokens.extend(["-rate", str(pace["rate_per_second"])])
-        applied.append("rate")
-    else:
-        caller_wins.append("rate")
-    if "-t" not in lower:
-        tokens.extend(["-t", "1"])
-        applied.append("threads")
-    else:
-        caller_wins.append("threads")
-    return {**pace, "applied": applied, "caller_wins": caller_wins}
-
-
 def _inject_scan_config(extra: list[str], url: str,
                         scope_handle: str | None,
                         scope_platform: str | None) -> tuple[list[str], dict[str, Any] | None]:
@@ -376,10 +344,7 @@ register_verdict_parser("ffuf", _parse_ffuf_verdict)
 )
 def run_ffuf(url: str, wordlist: str = "", options: str = "",
              scope_handle: str | None = None,
-             scope_platform: str | None = None,
-             chunk_plan_id: str = "", chunk_index: int = 0,
-             chunk_offset: int = 0, chunk_slice: int = 0,
-             chunk_total_chunks: int = 0) -> dict[str, Any]:
+             scope_platform: str | None = None) -> dict[str, Any]:
     """Launch ffuf against ``url`` and return immediately.
 
     The URL must contain the ``FUZZ`` keyword where wordlist entries are
@@ -394,12 +359,6 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     instead of failing with "could not read wordlist".  Call
     ``list_wordlists`` first for a targeted run.
 
-    Wordlists larger than the budget constitution's single-call ceiling do
-    NOT run whole: the tool mints a chunk PLAN (zero traffic this call) and
-    the operator drain pays it out one slice at a time (U2 lane). Poll
-    ``budget_queue_status(plan_id=...)`` for progress; per-chunk verdicts
-    come back through ``ffuf_status`` on the chunk's job ids.
-
     Args:
         url: Target URL containing the ``FUZZ`` keyword, e.g.
             ``http://10.10.10.50/FUZZ``.
@@ -411,9 +370,6 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
             unless already present. ``-r``/``--follow-redirects`` are on the
             scope DENYLIST and are stripped (30x hops inside ffuf are
             beyond the gate's reach); ``-recursion`` is untouched.
-            A ``-w`` flag here is REFUSED when auto-chunking engages (the
-            chunk lane owns the wordlist flag; it would silently discard
-            the plan's slice).
         scope_handle: Program handle for auto-injection of mandatory testing
             requirements (Intigriti RoE: custom UA, request header, req/sec
             cap). Pair with ``scope_platform``. When set, the program
@@ -422,15 +378,6 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
         scope_platform: Platform key (``"intigriti"``, ``"h1"``, etc.)
             paired with ``scope_handle``. Only ``"intigriti"`` has
             structured testing requirements; other platforms are a no-op.
-        chunk_plan_id: Internal — the wordlist plan this dispatch belongs
-            to. Set by the budget queue's drain, never by hand.
-        chunk_index: Internal — 0-based slice index for this dispatch.
-        chunk_offset: Internal — 0-based first line index of the slice.
-        chunk_slice: Internal — slice line count for this dispatch (the
-            chunk lane's canonical argument key; a dispatch's slice count
-            is NOT spelled ``chunk_size`` — that name is plan-level
-            geometry and preflight rejects it at the manifest).
-        chunk_total_chunks: Internal — total slices in the parent plan.
     """
     import shlex
 
@@ -476,140 +423,6 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
             }
         wordlist = resolved
 
-    # ── U2 wordlist lane (evasion_upgrade.md §2) ────────────────────────────
-    # lane_decision is the ONE predicate the budget estimator and this body
-    # both read, so preflight and launch can never disagree. Three cases:
-    # single (fits — run as today), plan (never fits whole — mint a plan and
-    # return a zero-traffic envelope), chunk (this dispatch IS one slice —
-    # slice at dispatch, then launch the slice file).
-    from utils import wordlist_chunking as wlc
-
-    # The lane predicate reads THIS dispatch's own arguments — chunk keys
-    # included (2026-11-06 drain incident: the tool's named parameters
-    # (chunk_plan_id/chunk_index/…) were stripped out of _lane_args, so
-    # every DRAIN chunk dispatch re-decided PLAN mode, minted a fresh plan
-    # with zero traffic, and returned the chunk_plan envelope; the drain
-    # consumed it as an inline finish while the debit stood. The chunk
-    # keys are internal plumbing minted by THIS lane, not caller data —
-    # nothing untrusted rides in them (preflight already validated each
-    # one against the manifest schema).
-    _lane_args = {"url": url, "wordlist": wordlist, "options": options,
-                  "scope_handle": scope_handle,
-                  "scope_platform": scope_platform}
-    # Chunk keys are internal plumbing minted by THIS lane — this dispatch's
-    # own named parameters, not caller data (preflight validates them against
-    # the manifest). Explicit reads, not a locals() comprehension: the dict
-    # comp sees them today, but the lane's honesty must not ride a scope
-    # quirk a future CPython frame change could silently break.
-    for _ck in ("chunk_plan_id", "chunk_index", "chunk_offset",
-                "chunk_slice", "chunk_total_chunks"):
-        _cv = locals().get(_ck)
-        if _cv is not None:
-            _lane_args[_ck] = _cv
-    _decision = wlc.lane_decision("payloads.ffuf.run_ffuf", _lane_args,
-                                  wordlist)
-    if _decision and _decision["mode"] in ("plan", "chunk"):
-        # The chunk lane owns the wordlist flag: a caller -w would silently
-        # discard the plan's slice (the last -w wins inside ffuf).
-        try:
-            _opt_toks = shlex.split(options) if options else []
-        except ValueError:
-            _opt_toks = options.split()
-        if any(t == "-w" or t.startswith("--wordlist=") for t in _opt_toks):
-            return {
-                "job_id": None, "tool": "ffuf", "status": "error",
-                "wordlist": wordlist,
-                "error": (
-                    "options carries an explicit '-w' wordlist and the "
-                    "budget chunk lane owns that flag for this run — the "
-                    "slice would be silently overridden. Pass the wordlist "
-                    "via the `wordlist` argument (or shrink the list below "
-                    "the single-call budget ceiling) and retry."),
-            }
-
-    if _decision and _decision["mode"] == "plan":
-        # Never-fit whole: mint the plan (+ its first lazy window) and
-        # return WITHOUT any traffic (§2.1). The zero-declared estimator
-        # means the gate debited nothing here; the discharge settles the
-        # plan-issue emission at once. Spend lands per chunk, through the
-        # drain, one gate-dispatched slice at a time.
-        from utils.agent_identity import current_agent_id
-        from utils.engagement import current_slug
-        from utils.ration import dims_for_target, find_target
-        plan = wlc.mint_wordlist_plan(
-            "payloads.ffuf.run_ffuf", _lane_args, _decision,
-            decl=dict(_decision["slices"]),
-            dims=dims_for_target(find_target(_lane_args)),
-            agent_id=current_agent_id() or "0",
-            engagement=current_slug())
-        plan_id = plan["plan_id"]
-        # mint_wordlist_plan pre-mints the first lazy window; report the
-        # live queued count so the envelope never says 0 while chunks sit
-        # in the queue.
-        from utils.ration import get_ration_store
-        window_now = int(get_ration_store().plan_counts(plan_id)["queued"])
-        total = int(plan["total_chunks"])
-        window = int(plan["window"])
-        return {
-            "status": "chunk_plan",
-            "plan_id": plan_id,
-            "tool": "payloads.ffuf.run_ffuf",
-            "url": url,
-            "wordlist": wordlist,
-            "lines": int(plan["lines"]),
-            "chunk_size": int(plan["chunk_size"]),
-            "paced": bool(_decision.get("pace_epoch_s")),
-            "total_chunks": total,
-            "binding_dim": plan["binding_dim"],
-            "window": window,
-            "minted_first_window": window_now,
-            "expected_ticks": int(-(-total // window)),
-            "poll": f"budget_queue_status(plan_id=\"{plan_id}\")",
-            "note": (
-                "no traffic was sent this call — the wordlist exceeds the "
-                "budget constitution's single-call ceiling, so this is a "
-                "PLAN: the operator drain pays out one chunk per tick "
-                "through the full gate (per-chunk debits), minting the next "
-                "window as sibling chunks finish. Chunks re-slice this "
-                "wordlist at dispatch; recursion/multi-wordlist actuals are "
-                "metered L1 against the declared slice. Each chunk is paced "
-                "on the wire across its funding epoch (ffuf -t 1 -rate) — "
-                "the target sees a slow stream per beat, not a burst. "
-                "Do NOT re-issue the "
-                "call — poll budget_queue_status(plan_id=...)"),
-        }
-
-    if _decision and _decision["mode"] == "chunk":
-        plan = wlc.plan_view(_decision["plan_id"])
-        if plan is None:
-            return {
-                "job_id": None, "tool": "ffuf", "status": "error",
-                "error": (
-                    f"chunk plan {_decision['plan_id']!r} no longer exists "
-                    "(purged or TTL-swept) — the chunk is unrunnable; "
-                    "re-issue the original run_ffuf call to mint a fresh "
-                    "plan."),
-            }
-        # Slice AT DISPATCH (§2.2): the plan holds the base call; this call
-        # materializes exactly its lines. An unreadable wordlist requeues
-        # (could be a transitory unmount) — the plan TTL bounds the churn.
-        try:
-            wordlist = str(wlc.write_slice(plan["plan_id"],
-                                           _decision["chunk_index"],
-                                           plan["wordlist"],
-                                           _decision["chunk_offset"],
-                                           _decision["chunk_size"]))
-        except OSError as exc:
-            return wlc.requeued_envelope(
-                _decision["plan_id"],
-                chunk_index=_decision["chunk_index"],
-                total=_decision["total_chunks"],
-                reason=f"slice write failed — wordlist unreadable: {exc}")
-
-
-    # An explicit (non-empty) wordlist must resolve to an existing file —
-    # fail fast before the launch+poll cycle burns time on a path ffuf will
-    # reject with "could not read wordlist".
 
     # The -o json path lives under the harness jobs dir (§4: results never
     # default to /tmp) — ffuf only writes it on a clean exit, so the verdict
@@ -625,13 +438,6 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     out_path = os.path.join(out_dir, f"ffuf_out_{uuid.uuid4().hex[:8]}.json")
 
     opt_list = shlex.split(options) if options else []
-    # pkg7 wire pacing — chunk dispatches only; a caller -rate/-t wins
-    # per-flag (checked inside the helper), and the scan-config lane
-    # below sees the injected rate and leaves it alone.
-    _wire_pacing = None
-    if _decision and _decision["mode"] == "chunk":
-        _wire_pacing = _inject_wire_pacing(opt_list,
-                                           int(_decision["chunk_size"]))
     opt_list, _rr_stripped = _strip_follow_redirects(opt_list)
     opt_list = _inject_noninteractive(opt_list)
     opt_list = _inject_ignore_comments(opt_list)
@@ -673,22 +479,7 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     # duplicate/refused decision envelope carries NO launched job — return
     # it verbatim instead of decorating launch-side metadata over it.
     if job.get("status") in ("duplicate", "refused"):
-        if _decision and _decision["mode"] == "chunk":
-            # §2.5: the sibling unit owns this work (duplicate) or the
-            # refusal is transient (slots/auth serialization) — requeue the
-            # SAME chunk and let the drain pay it out again in due order.
-            return wlc.requeued_envelope(
-                _decision["plan_id"],
-                chunk_index=_decision["chunk_index"],
-                total=_decision["total_chunks"],
-                reason=(f"fleet {job.get('status')}: "
-                        f"{job.get('reason') or job.get('message') or 'busy'}"),
-                sibling_job_id=job.get("job_id"))
         return job
-    if _decision and _decision["mode"] == "chunk":
-        job["chunk_plan_id"] = _decision["plan_id"]
-        job["chunk_index"] = _decision["chunk_index"] + 1
-        job["chunk_total_chunks"] = _decision["total_chunks"]
     if _rr_stripped:
         job["note"] = (
             "'-r/--follow-redirects' stripped from options (scope denylist): "
@@ -700,8 +491,6 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     # default) so the secretary model knows to swap in a targeted list.
     job["wordlist"] = wordlist
     job["default_wordlist_used"] = default_used
-    if _wire_pacing:
-        job["wire_pacing"] = _wire_pacing
     if scan_cfg:
         job["scan_config_applied"] = scan_cfg
     return job

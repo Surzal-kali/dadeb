@@ -41,7 +41,7 @@ DEFAULT_IDLE_RESET_MIN = 5.0
 # scratch_search is NOT here — it counts against the budget like a regular
 # tool call (it pulls context into the model, so it must be metered).
 DEFAULT_TERMINAL_ALLOWLIST = (
-    "utils.memory_tools.,utils.findings.,utils.ration.")
+    "utils.memory_tools.,utils.findings.")
 
 _LAST_CALL_DIRECTIVE = (
     "TOOL BUDGET: this was the FINAL tool call of this turn "

@@ -295,7 +295,7 @@ def _build_sqlmap_command(
     threads policy, per-unit output dir (session isolation == resume per
     unit), per-unit traffic.log (the finding-citable artifact). Caller
     options come LAST so explicit caller flags always win over policy
-    defaults (the nmap/shaping ordering convention)."""
+    defaults (last-flag-wins ordering convention)."""
     extra = shlex.split(options) if options else []
     extra = _inject_batch(extra)
     forbidden = _reject_forbidden_flags(extra)

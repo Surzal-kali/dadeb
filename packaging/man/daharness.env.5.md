@@ -107,17 +107,6 @@ WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
 : OOB collaborator bind ports (default 80/443/53, which requires root);
   the rootless profile retunes (e.g. 8080/4443/5353).
 
-**BUDGET_CONSTITUTION_FILE**
-: Points the budget-ration engine at a constitution file (see
-  `.env.example` for the full `BUDGET_*` inventory). `.json` is the
-  stdlib-only leg; `.yaml`/`.yml` additionally needs `python3-yaml`
-  (available via Suggests). Inline override via `BUDGET_CONSTITUTION`
-  (JSON only). Read at call time — no restart needed. Commented in this
-  template; on deb installs the postinst seeds the DEFAULT law at
-  /etc/daharness/budget.yaml (only when the file is absent) and activates
-  this knob only while it still reads exactly as shipped — an operator
-  edit or re-comment always wins.
-
 **Postgres lane (HARNESS_DB_HOST / HARNESS_DB_PORT / HARNESS_DB_NAME /
 HARNESS_DB_PASSWORD_*)**
 : Not entries of this file — not even as commented rows. A commented set

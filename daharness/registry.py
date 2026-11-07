@@ -67,7 +67,6 @@ _BASE_TOOL_ROOTS = [
     (FRAMEWORK_ROOT / "payloads").resolve(),
     (FRAMEWORK_ROOT / "listeners").resolve(),
     (FRAMEWORK_ROOT / "utils").resolve(),
-    (FRAMEWORK_ROOT / "evasion").resolve(),
 ]
 
 

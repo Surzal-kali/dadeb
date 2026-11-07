@@ -126,9 +126,8 @@ NTLMv2 challenge-response in a self-contained SMB2 sink.
   netntlmv2 ready). Each capture also persists to
   `run/responder/captures.jsonl` (0600) and lands in vector memory
   (namespace `responder`, marked important) so the secretary recalls it.
-- **Gates**: `SHAPING_LAB_MODE=1` required in .env — the SAME lab gate as
-  `evasion/shaping.py`'s decoy/fragment (one switch for deceptive wire
-  traffic). Port 445 is privileged: start probes the bind first and
+- **Gates**: `SHAPING_LAB_MODE=1` required in .env — the module's own lab
+  gate for deceptive wire traffic. Port 445 is privileged: start probes the bind first and
   fails closed with the `setcap cap_net_bind_service+ep` remediation
   (UDP 137/5355 are unprivileged). The scope gate is deliberately NOT
   consulted — poisoning answers the segment, not a blessed target.

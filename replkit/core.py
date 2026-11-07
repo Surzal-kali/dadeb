@@ -310,7 +310,7 @@ def _coerce_value(raw: str, schema_type: str) -> Any:
 #
 #     repl> selftest                  → python -m pytest <root>/tests -q
 #     repl> selftest test_scope_gate  → tests/test_scope_gate.py
-#     repl> selftest -k budget        → passthrough of pytest args
+#     repl> selftest -k fleet         → passthrough of pytest args
 
 
 def _anchor_pytest_arg(arg: str) -> str:

@@ -35,7 +35,7 @@ REPORT = os.environ.setdefault("DAHARNESS_FLOOR_REPORT", "/tmp/da-l2-floor.json"
 TIMEOUT_S = int(os.environ.get("DAHARNESS_FLOOR_TIMEOUT", "15"))
 
 ROOTS = {"auxiliaries", "payloads", "listeners", "utils",
-         "evasion", "engagement", "daharness"}
+         "engagement", "daharness"}
 SKIP_DIRS = {"venv", ".venv", "__pycache__", ".git", "tests", "docs",
              "packaging", "node_modules", "dist", "build",
              "daharness.egg-info", "run", ".memory",

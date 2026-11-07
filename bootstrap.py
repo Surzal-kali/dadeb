@@ -1091,23 +1091,6 @@ class FrameworkLoader:
         if BURP_MCP_ENABLED:
             await self.wait_for_burp_mcp()
 
-        # Ration pacemaker (debt §5.1, 2026-11-07): the always-on drain
-        # loop — one operator tick per BUDGET_DRAIN_INTERVAL_S so a queue
-        # the model fills (or the chokepoint defers) is paid out without a
-        # human holding budget drain. Never fatal to boot: a failed start
-        # logs and continues (the REPL drain command remains the fallback).
-        if os.getenv("BUDGET_DRAIN_AUTOSTART", "1").lower() not in \
-                ("0", "false", "no", "off"):
-            try:
-                from utils.budget_drain import drain_loop
-                drain_task = asyncio.create_task(drain_loop())
-                self.active_tasks.append(drain_task)
-                logger.info("[+] Ration pacemaker loop started "
-                            "(BUDGET_DRAIN_INTERVAL_S ticks the queue drain)")
-            except Exception as exc:
-                logger.warning("[!] Pacemaker start failed (drain stays "
-                               "REPL-manual): %s", exc, exc_info=True)
-
         # Post-launch: if an operator-armed scope exists, mirror it into ZAP
         # (context includes/excludes) and flip mode=protect — ZAP itself then
         # refuses every out-of-scope request (redirect hops, spider crawls,

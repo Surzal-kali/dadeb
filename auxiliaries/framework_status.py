@@ -931,7 +931,7 @@ def _check_postgres() -> dict[str, Any]:
 
 PROVIDER_KEYS = ("r2", "jadx", "masscan", "msf", "scanners",
                  "snapshot_cache", "brain_sessions", "postgres",
-                 "registry", "customs", "packetcraft", "budget_drain")
+                 "registry", "customs", "packetcraft")
 
 # Tier model: a lane is "required" (the framework expects it on every
 # install — missing = degrade) or "optional" (the framework genuinely
@@ -1282,25 +1282,6 @@ def framework_doctor(provider: str = "") -> dict[str, Any]:
         providers["postgres"] = _check_postgres()
     if p in ("", "customs"):
         providers["customs"] = _check_customs()
-    if p in ("", "budget_drain"):
-        # Ration pacemaker probe (2026-11-07): alive = tick inside 3x the
-        # configured interval, read off run/budget/drain_state.json. The
-        # probe never raises the provider gate — a state-file miss is the
-        # honest "never ticked" degrade, a disabled budget lane reports
-        # available (idle by design is not a degrade).
-        try:
-            from utils.budget_drain import budget_drain_doctor
-            providers["budget_drain"] = budget_drain_doctor()
-        except Exception as exc:
-            providers["budget_drain"] = {
-                "available": False, "provider": "budget_drain",
-                "deployed": True,
-                "reason": f"drain probe failed on this lane: "
-                          f"{type(exc).__name__}: {exc}",
-                "remediation": "inspect the harness log for a pacemaker "
-                               "traceback, or rerun the package upgrade so "
-                               "the drain loop ships",
-            }
 
     # Contract: every record carries its own provider name (the shape tests
     # assert it, and downstream consumers format it from the record alone).

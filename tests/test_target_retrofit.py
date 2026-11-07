@@ -178,10 +178,7 @@ def test_ffuf_passes_target_kwarg(fleet_env, monkeypatch):
 def test_ffuf_verbatim_on_duplicate(fleet_env, monkeypatch):
     from payloads import ffuf as ffuf_mod
 
-    # U2 wordlist chunk lane OFF: with the lane on, the default SecLists
-    # wordlist short-circuits into a chunk_plan envelope BEFORE launch —
-    # this test pins the (still live) whole-list duplicate passthrough.
-    monkeypatch.setenv("BUDGET_WORDLIST_CHUNK", "0")
+    # pins the whole-list duplicate passthrough.
     dup_env = {
         "status": "duplicate",
         "job_id": "f-live",

@@ -41,16 +41,10 @@ identically to the rest of the framework's HTTP lane.  The jar itself only
 stores strings; these tools are the only place it becomes traffic, and the
 gate sits in front of every packet.
 
-IDENTITY (evasion/webshape): every hop ships one coherent fingerprint —
-UA claim, TLS stack, header set and header ORDER resolved together by
-``sticky_profile``. When curl_cffi (curl-impersonate) is installed and
-policy allows, the request travels on the impersonating client whose TLS
-ClientHello + template headers match the sticky UA claim; otherwise the
-call degrades honestly to the plain python-requests path (same UA claim,
-canonicalised family header order + decodable-only Accept-Encoding fill)
-and the envelope's ``fingerprint`` field says which backend shipped it.
-``SESSION_IMPERSONATION=off`` disables the impersonated lane; a caller-
-supplied or SESSION_UA identity is operator-owned and never impersonated.
+IDENTITY: the library's own User-Agent travels with the request unless a
+caller supplies one — the lane is a plain authenticated browser session,
+not a fingerprint exercise. The envelope's ``ua_applied`` field reports
+what went out.
 
 Blocking by design (sync ``requests`` through the gated hop loop); the
 Brain dispatchers run sync tools in worker threads, per the framework's
@@ -69,87 +63,23 @@ from constants import framework_tool
 from utils.cookie_jar import extract_csrf_tokens, get_jar
 from utils.gated_http import gated_request
 from utils.scope_gate import ScopeGateError
-from evasion.webshape import (
-    HostFloor,
-    canonical_fill_for_family,
-    impersonation_mode,
-    impersonation_target,
-    order_headers_for_family,
-    sticky_profile,
-)
 
-# UA/pacing moved to evasion/webshape (sticky_ua is per-host deterministic;
-# the old self-identifying marker remains reachable via SESSION_UA=legacy).
 _TOKEN_SCAN_LIMIT = 262144  # extract tokens from at most this much body
 
 
 def _merge_headers(
     base: dict[str, str] | None,
     extra: dict[str, str] | None,
-    host: str = "",
 ) -> dict[str, str]:
-    """Sticky UA + caller headers, emitted in the identity family's
-    canonical browser order (evasion/webshape profiles own the order)."""
-    profile = sticky_profile(host)
-    merged: dict[str, str] = {"User-Agent": profile["ua"]}
+    """Request headers: the caller's supply, last-wins. No UA is forced
+    here — requests' own default UA goes on the wire when the caller
+    supplies none."""
+    merged: dict[str, str] = {}
     if base:
         merged.update({str(k): str(v) for k, v in base.items()})
     if extra:
         merged.update({str(k): str(v) for k, v in extra.items()})
-    return order_headers_for_family(merged, profile["family"])
-
-
-def _build_session(
-    profile: dict[str, Any],
-    method: str,
-    caller_ua_override: bool = False,
-    files_present: bool = False,
-) -> tuple[Any, dict[str, Any]]:
-    """Transport chooser for one identity, resolved ONCE per call.
-
-    Returns ``(session, fingerprint)``.  The impersonated path is the
-    curl-impersonate client on the profile's pinned target — TLS stack and
-    template header set/order match the sticky UA claim by construction
-    (pool strings carry the template's platform-variant overrides when the
-    template ships another platform's UA).  The degraded path is the plain
-    python-requests session: same UA claim, canonicalised header order +
-    decodable-only Accept*/Accept-Language fill, and the envelope says so.
-
-    Never impersonates when identity is operator-owned (``SESSION_UA``
-    override or a caller-supplied ``User-Agent`` — the TLS stack cannot be
-    reshaped to match an arbitrary claimed agent) or in the multipart
-    upload lane (curl_cffi's ``files``-shaped API is not wired; honest
-    fallback, envelope note).
-    """
-    fingerprint: dict[str, Any] = {
-        "mode": impersonation_mode(),
-        "impersonated": False,
-        "backend": "python-requests",
-        "target": None,
-        "reason": None,
-    }
-
-    def _off(reason: str) -> tuple[Any, dict[str, Any]]:
-        fingerprint["reason"] = reason
-        return requests.Session(), fingerprint
-
-    if fingerprint["mode"] == "off":
-        return _off("SESSION_IMPERSONATION=off")
-    if not profile.get("target") or caller_ua_override:
-        return _off("operator-owned UA identity (SESSION_UA/caller override)")
-    target = impersonation_target(profile)
-    if target is None:
-        return _off("curl_cffi missing or pinned target no longer installed")
-    if files_present:
-        return _off("multipart upload lane (curl_cffi files API not wired)")
-
-    from curl_cffi import requests as _curl_requests
-
-    session = _curl_requests.Session(impersonate=target)
-    fingerprint.update(
-        impersonated=True, backend="curl-impersonate", target=target
-    )
-    return session, fingerprint
+    return merged
 
 
 def _host_of(url: str) -> str:
@@ -240,62 +170,10 @@ def _do_session_request(
     if not host:
         raise ScopeGateError(f"scope gate: cannot parse host from URL {url!r}")
 
-    floor_waited = HostFloor.wait(host)
-
-    # Posture dwell (§11 seam): the ration controller's pacing adds a
-    # jittered extra wait for hosts whose lane degraded (soft_signal and
-    # below). Zero when the budget system is disarmed or pacing normal.
-    # Sync sleep is safe here — web tools run in worker threads.
-    try:
-        from utils.ration import ration_dwell
-
-        dwell_waited = ration_dwell(host)
-    except Exception:
-        import logging
-        logging.getLogger(__name__).debug(
-            "swallowed ration dwell (non-fatal)", exc_info=True)
-        dwell_waited = 0.0
-
-    profile = sticky_profile(host)
-    merged = _merge_headers(headers, None, host=host)
-    caller_ua_override = bool(headers and any(
-        str(k).lower() == "user-agent" for k in headers
-    ))
-    session, fingerprint = _build_session(
-        profile, method,
-        caller_ua_override=caller_ua_override,
-        files_present=files is not None,
-    )
-
-    if fingerprint["impersonated"]:
-        # curl-impersonate path: the TEMPLATE owns the browser header set
-        # (UA, client hints, sec-fetch set, Accept*, ordering) — only
-        # app-level headers travel, plus the profile's coherent platform
-        # overrides baked into the template's positions.  Jar cookies ride
-        # as a ready-made Cookie header (the jar's RFC 6265 matcher), not
-        # through requests' cookie-store API.
-        applied: list[str] = []
-        cookie_hdr = jar.cookie_header(url)
-        if cookie_hdr:
-            merged["Cookie"] = cookie_hdr
-            merged = order_headers_for_family(merged, profile["family"])
-            applied = [c.name for c in jar.cookies_for(url)]
-        wire_headers = {
-            k: v for k, v in merged.items() if str(k).lower() != "user-agent"
-        }
-        for name, value in profile.get("apply", []):
-            wire_headers[name] = value  # coherent template overrides
-        wire_headers = order_headers_for_family(wire_headers, profile["family"])
-    else:
-        # plain requests path: our ordered header dict is the WHOLE story —
-        # kill requests' default headers so nothing unclaimed sneaks onto
-        # the wire out of canonical order, then fill the browser trio the
-        # caller didn't supply (identity-consistent, decodable-only).
-        session.headers.clear()
-        applied = jar.apply_to_session(session, url)
-        fill = canonical_fill_for_family(profile, method, merged)
-        merged = order_headers_for_family({**fill, **merged}, profile["family"])
-        wire_headers = merged
+    merged = _merge_headers(headers, None)
+    session = requests.Session()
+    applied = jar.apply_to_session(session, url)
+    wire_headers = merged
 
     injected = None
     if csrf and (method or "").upper() == "POST":
@@ -318,12 +196,7 @@ def _do_session_request(
     )
 
     final_url = hops[-1]["url"] if hops else url
-    if fingerprint["impersonated"]:
-        # curl_cffi's Cookies object wraps a stdlib CookieJar — persist from
-        # that inner jar; same http.cookiejar.Cookie attrs as requests.
-        received = jar.store_response_cookies(session.cookies.jar, origin=final_url)
-    else:
-        received = jar.store_response_cookies(session.cookies, origin=final_url)
+    received = jar.store_response_cookies(session.cookies, origin=final_url)
     session.close()
 
     text = ""
@@ -367,9 +240,7 @@ def _do_session_request(
         "title": _title_of(text),
         "body_length": len(resp.content or b""),
         "body_head": text[: max(0, int(body_limit))],
-        "ua_applied": merged.get("User-Agent", "") or profile["ua"],
-        "fingerprint": fingerprint,
-        "floor_waited": floor_waited,
+        "ua_applied": merged.get("User-Agent", ""),
     }
     if files:
         # Multipart part names (dict or tuple-shaped files mapping).
@@ -410,13 +281,6 @@ def _session_digest(result: dict[str, Any]) -> dict[str, str]:
         parts.append(f"title: {result['title']}")
     if result.get("ua_applied"):
         parts.append(f"ua: {result['ua_applied'][:48]}")
-    fp = result.get("fingerprint") or {}
-    if fp.get("impersonated"):
-        parts.append(f"fp: {fp.get('target')}")
-    elif fp.get("reason"):
-        parts.append(f"fp: degraded ({fp['reason']})")
-    if result.get("floor_waited"):
-        parts.append(f"floor waited {result['floor_waited']:.1f}s")
     if result.get("upload"):
         up = result["upload"]
         parts.append(
@@ -467,10 +331,8 @@ def session_get(
             body stays bounded by this; token extraction scans deeper
             internally).
         follow_redirects: Follow 3xx hops (default) or return the 3xx.
-        headers: Extra request headers (dict). A realistic, sticky per-host
-            User-Agent is applied automatically (evasion/webshape.sticky_ua); pass
-            headers={'User-Agent': ...} to override; SESSION_UA env forces a fixed
-            identity (RoE-mandated self-identification).
+        headers: Extra request headers (dict). The library's own User-Agent
+            travels on the wire unless you pass headers={'User-Agent': ...}.
     """
     return _do_session_request(
         "GET", url,
@@ -527,10 +389,8 @@ def session_post(
         body_limit: Characters of body returned as ``body_head``.
         follow_redirects: Follow the post-login 302 (default) — set False
             to inspect the raw 3xx.
-        headers: Extra request headers (dict). A realistic, sticky per-host
-            User-Agent is applied automatically (evasion/webshape.sticky_ua); pass
-            headers={'User-Agent': ...} to override; SESSION_UA env forces a fixed
-            identity (RoE-mandated self-identification).
+        headers: Extra request headers (dict). The library's own User-Agent
+            travels on the wire unless you pass headers={'User-Agent': ...}.
     """
     return _do_session_request(
         "POST", url,
@@ -652,10 +512,8 @@ def session_upload(
         body_limit: Characters of body to return as ``body_head``.
         follow_redirects: Follow the post-upload 3xx (default) or inspect
             the raw redirect.
-        headers: Extra request headers (dict). A realistic, sticky per-host
-            User-Agent is applied automatically (evasion/webshape.sticky_ua); pass
-            headers={'User-Agent': ...} to override; SESSION_UA env forces a fixed
-            identity (RoE-mandated self-identification).
+        headers: Extra request headers (dict). The library's own User-Agent
+            travels on the wire unless you pass headers={'User-Agent': ...}.
     """
     import hashlib
     import mimetypes

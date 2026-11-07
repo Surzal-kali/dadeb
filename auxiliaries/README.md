@@ -153,17 +153,9 @@ bypasses it. `session_post` auto-injects CSRF: form field into the body +
 three plain calls: `session_get /login/` → `session_post` creds →
 `session_get /dashboard/`.
 
-`run_nmap` accepts an optional `shaping=` preset from
-[`../evasion/shaping.py`](../evasion/shaping.py) — wire-traffic profiles
-(quiet/polite/noisy; decoy/fragment are lab-gated) merged so explicit
-operator flags always win. The stateful HTTP lane laced itself the same
-session: every `session_*` request now carries a realistic **sticky
-per-host** User-Agent (`evasion/webshape.sticky_ua` — same host, same
-agent, every call; rotating identity mid-session is how authenticated
-servers get suspicious) and honors an optional per-host pacing floor
-(`SESSION_HOST_FLOOR`). Caller `User-Agent` headers win; `SESSION_UA=legacy`
-restores the old `framework-web-session/1.0` self-identifying marker for
-RoE documents that require it.
+The stateful HTTP lane sends caller-supplied `headers` as-is over a plain
+python-requests session with jar cookies and CSRF auto-injection (library
+default UA unless the caller sets one).
 
 `session_upload` is the multipart delivery step of the msfvenom file-upload
 lane — full behavior (local-input `ValueError` discipline, `file_name`

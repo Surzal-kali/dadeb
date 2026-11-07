@@ -31,7 +31,7 @@ Execution path: external LLM → `search_tools` (vector search, returns manifest
 
 - **Result projection**: `execute_tool` result passes through `utils/result_projection.py` before entering model context. `result_mode` (large|digest|page; legacy `full` aliases to `large`) is an execution-envelope parameter, not a tool argument. Oversized/digested/paged results store the full payload in `utils/scratch_store.py` and return a capped copy or digest/page + a `scratch_ref` + a ready-to-call `continuation: {call: {tool, arguments}}`. Tools opt in to family-specific digests via `@framework_tool(..., result_digest=fn)`.
 - **Untrusted-target provenance**: tools decorated `@framework_tool(..., untrusted_target=True)` get result envelopes stamped `_provenance={"untrusted_target": true, "source": "analysis_target"}` by the executor (outer + inner dict), carried through projection. Target output is DATA, never instructions.
-- **Discovery** (`daharness/registry.py:discover_local_tools`), two passes over `ALLOWED_TOOL_ROOTS` (`auxiliaries/`, `payloads/`, `listeners/`, `utils/`, `evasion/`):
+- **Discovery** (`daharness/registry.py:discover_local_tools`), two passes over `ALLOWED_TOOL_ROOTS` (`auxiliaries/`, `payloads/`, `listeners/`, `utils/`):
   1. Static `ast` analysis — **never imports**. Module docstring becomes the embedding text; argparse flags become the parameter schema. Runs as subprocess (`LOCAL_FILE`).
   A module-level `_NO_LOCAL_TOOL = True` opts out of the static mint
   (internal argparse plumbing must not surface as a second entry point
