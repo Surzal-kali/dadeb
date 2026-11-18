@@ -453,6 +453,24 @@ def test_doctor_sweep_survives_store_failure(monkeypatch):
     assert set(report["providers"]) >= {"r2", "snapshot_cache"}  # sweep completed
 
 
+def test_msfvenom_dropbox_uses_workspace_root(monkeypatch, tmp_path):
+    """MSF output follows the lane's state root, not the read-only code tree."""
+    import importlib
+
+    import constants
+    import payloads.msfvenom_tools as msf_mod
+
+    monkeypatch.delenv("MSFVENOM_DROPBOX", raising=False)
+    monkeypatch.setattr(constants, "resolve_workspace_root", lambda: tmp_path)
+    msf_mod = importlib.reload(msf_mod)
+
+    assert msf_mod.DROPBOX_DIR == tmp_path / "dropbox"
+
+    monkeypatch.setenv("MSFVENOM_DROPBOX", str(tmp_path / "custom-dropbox"))
+    msf_mod = importlib.reload(msf_mod)
+    assert msf_mod.DROPBOX_DIR == tmp_path / "custom-dropbox"
+
+
 def test_doctor_jadx_probe_uses_workspace_root(monkeypatch, tmp_path):
     """The apk drop-dir probe resolves like the tool (workspace root /
     postinst lane), NOT the read-only package tree (`__file__` math was the

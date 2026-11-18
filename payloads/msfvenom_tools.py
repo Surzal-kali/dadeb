@@ -41,10 +41,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from constants import framework_tool
+from constants import framework_tool, resolve_workspace_root
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-DROPBOX_DIR = Path(os.getenv("MSFVENOM_DROPBOX", str(_REPO_ROOT / "dropbox")))
+_DEFAULT_DROPBOX_DIR = resolve_workspace_root() / "dropbox"
+DROPBOX_DIR = Path(os.getenv("MSFVENOM_DROPBOX", str(_DEFAULT_DROPBOX_DIR)))
 
 MSFVENOM_CANDIDATES = ("/usr/bin/msfvenom", "/usr/local/bin/msfvenom", "/opt/metasploit-framework/msfvenom")
 MSFVENOM_TIMEOUT = float(os.getenv("MSFVENOM_TIMEOUT", "300"))

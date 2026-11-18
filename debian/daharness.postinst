@@ -55,13 +55,13 @@ find "$STATE_ROOT" -xdev \( ! -user daharness -o ! -group daharness \) \
 # The tool modules resolve them via WORKSPACE_ROOT; mkdir-if-missing so
 # upgrades repair legacy trees too. 2770 setgid keeps the service lane and
 # group-member operators co-writing (same shape the scope/ seeding uses).
-for _LANE in binaries apk; do
+for _LANE in dropbox binaries apk; do
     if [ ! -d "$STATE_ROOT/$_LANE" ]; then
         install -d -m 2770 "$STATE_ROOT/$_LANE" 2>/dev/null || true
     fi
     chown daharness:daharness "$STATE_ROOT/$_LANE" 2>/dev/null || true
     chmod 2770 "$STATE_ROOT/$_LANE" 2>/dev/null || true
-    echo "daharness: drop lane ready at $STATE_ROOT/$_LANE (binaries/APK analysis targets go there)"
+    echo "daharness: drop lane ready at $STATE_ROOT/$_LANE"
 done
 unset _LANE
 
