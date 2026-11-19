@@ -62,13 +62,35 @@ WorkingDirectory=/var/lib/daharness
 # case where the previous daemon died before its launcher could. PIDs are
 # matched per home-dir pin (var/lib/daharness/.zap_home) so a foreign
 # manual ZAP is never touched.
-ExecStartPre=/bin/sh -c 'pids=$(pgrep -u "$(id -u daharness 2>/dev/null || echo 0)" -f "[z]ap.*-dir /var/lib/daharness/.zap_home" || true); [ -z "$pids" ] || { kill $pids 2>/dev/null; sleep 2; kill -9 $pids 2>/dev/null || true; }'
+# 2026-11-19 addendum — the brain sidecar joins the sweep: stop-phase
+# timeouts (see TimeoutStopSec below) plus KillMode=process minted
+# PPID-1 thebrain.py orphans that kept holding /run/daharness/brain.lock;
+# thebrain's own singleton guard then refuses the new generation
+# ("another Brain holds brain.lock; refusing to start"), so the daemon
+# ran brain-less while brain.sock — owned by a STALE-GENERATION orphan —
+# kept answering clients (container lane verified connecting the whole
+# time). A live-listener probe is thebrain.py's own start-time guard;
+# the sweep here is deliberately cruder (kill per-uid before the new
+# singleton contends the lock): after a CLEAN stop the list is empty and
+# this no-ops, so only crashed/timeout generations can ever be reaped.
+# A same-uid thebrain is a singleton resource of THIS unit — a foreign
+# manual instance is not a supported topology.
+ExecStartPre=/bin/sh -c 'uid=$(id -u daharness 2>/dev/null || echo 0); pids=$(pgrep -u "$uid" -f "[z]ap.*-dir /var/lib/daharness/.zap_home" || true); [ -z "$pids" ] || { kill $pids 2>/dev/null; sleep 2; kill -9 $pids 2>/dev/null || true; }; pids=$(pgrep -u "$uid" -f "[l]isteners/thebrain.py" || true); [ -z "$pids" ] || { kill $pids 2>/dev/null; sleep 1; kill -9 $pids 2>/dev/null || true; }'
 ExecStart=/usr/bin/daharness --daemon
 # bootstrap handles SIGTERM and reaps its sidecars; don't kill the children first
 KillMode=process
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+# 90s, not the stock 30: bootstrap's SIGTERM path (uvicorn graceful wait,
+# then child reaping with grace periods) legitimately exceeds 30s when the
+# gateway + sidecars are slow — observed 2026-11-19 (journal): stop at
+# 21:15:09, TimeoutStopSec fired at 21:15:40, main SIGKILLed mid-shutdown
+# (result 'timeout' then 'signal') and ZAP/MSF/brain survived as orphans;
+# the brain orphans then held brain.lock and starved the next start
+# (see the ExecStartPre sweep above). 90s lets one clean shutdown finish;
+# a genuinely wedged stop is still killable at 90s and the ExecStartPre
+# sweep covers the survivors.
+TimeoutStopSec=90
 # Privileged lanes stay OFF the baseline (root/capability profiles are operator
 # opt-ins). Drop-in override shape, documented not shipped:
 #   /etc/systemd/system/daharness.service.d/privileged.conf

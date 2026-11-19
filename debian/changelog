@@ -1,3 +1,23 @@
+daharness (0.2.0+pkg9) kali; urgency=medium
+
+  * daharness-kernel.service: Restart=always (was on-failure). Both of the
+    kernel lane's normal exits are CLEAN — the unit-restart dance SIGTERMs
+    it, and a frontend shutdown_request exits 0 — and on-failure records
+    those as success, leaving the unit dead with nothing to revive it
+    (observed live 2026-11-18: Result=success, ExecMainStatus=15, unit
+    inactive until manually started). Downstream the lanes silently fall
+    back in-process (user_authoring.md), so packetcraft-style dispatches
+    then run in the caller's own lane — an uncapped operator shell EPERMs
+    even though the units are configured right. always still honors
+    explicit `systemctl stop` (systemd never restarts a manual stop), so
+    it's self-healing without fighting operators (`systemctl stop` stays
+    respected; `systemctl restart`'s manager-orchestrated stop+start is
+    not an auto-restart, the unit simply comes back via the start leg).
+    Packaging source + the rules-installed twin updated; the prebuilt
+    pkg8 deb is unaffected until the next build. The daemon unit keeps
+    on-failure — its clean exits (launch_all shutdown) are deliberate
+    full-stack stops.
+
 daharness (0.2.0+pkg8) kali; urgency=high
 
   * Debian dual-distro lane (installs on pure Debian stable now): the two

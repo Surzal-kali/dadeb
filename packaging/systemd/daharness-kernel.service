@@ -41,9 +41,27 @@ StandardError=journal
 # (start_new_session=True) so orphaned scans survive harness death; killing
 # only the main process on stop preserves that semantic.
 KillMode=process
-Restart=on-failure
+# Restart=always, NOT on-failure: this lane's clean exits count as success
+# under on-failure and leave the unit dead — the restart dance
+# (daemon-reload + `systemctl restart daharness daharness-kernel`) SIGTERMed
+# the kernel and nothing revived it (observed 2026-11-18: Result=success,
+# ExecMainStatus=15, unit inactive until manually started), and a frontend
+# shutdown_request exits the same way. Downstream the lanes silently fall
+# back in-process (user_authoring.md), so a packetcraft dispatch then runs
+# in the operator's uncapped shell and EPERMs even though the unit config
+# is right. always still honors `systemctl stop` (systemd never restarts a
+# manual stop); `systemctl restart` orchestrates its own stop+start, so
+# the policy never races it. Self-healing without fighting operators.
+Restart=always
 RestartSec=5
-TimeoutStopSec=30
+# 90s, mirroring the daemon unit (see its TimeoutStopSec note): 30s fired
+# BEFORE the graceful shutdown finished during the 2026-11-19 incident —
+# the main was SIGKILLed mid-cleanup and tool children (this unit's own
+# tool_repl --kernel among them) survived as PPID-1 orphans, one of which
+# then sat stale for hours. Kernel cells usually exit fast on SIGTERM,
+# so this headroom is for wedged busy-cell shutdowns, not the common
+# path. Genuine wedges are still bounded at 90s.
+TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target
