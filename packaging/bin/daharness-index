@@ -78,8 +78,12 @@ for arg in "$@"; do
 	--stubs) stubs_route=1 ;;
 	esac
 done
+# Interpreter pinned to /usr/bin/python3 (0.2.0+pkg8): see the
+# daharness wrapper — a bare `python3` on PATH can resolve to a
+# user-shell interpreter (linuxbrew/pyenv) whose dist-packages are
+# not the apt closure these lanes depend on.
 if [ "$stubs_route" -eq 1 ]; then
-	exec python3 /usr/share/daharness/scripts/gen_repl_stubs.py "$@"
+	exec /usr/bin/python3 /usr/share/daharness/scripts/gen_repl_stubs.py "$@"
 fi
 
 err() { echo "daharness-index: $*" >&2; }
@@ -87,7 +91,7 @@ err() { echo "daharness-index: $*" >&2; }
 if ! command -v curl >/dev/null 2>&1 || ! command -v ss >/dev/null 2>&1; then
 	# Probe tooling absent: skip the probes and let python report honestly.
 	# umask 0007 set above still applies (group-share the DB files).
-	exec python3 -m daharness.core "$@"
+	exec /usr/bin/python3 -m daharness.core "$@"
 fi
 
 # No chroma server to probe — the registry is a local SQLite file.
@@ -187,4 +191,4 @@ case "$EMBED_URL" in
 		fi
 		;;
 esac
-exec python3 -m daharness.core "$@"
+exec /usr/bin/python3 -m daharness.core "$@"

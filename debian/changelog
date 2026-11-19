@@ -1,3 +1,37 @@
+daharness (0.2.0+pkg8) kali; urgency=high
+
+  * Debian dual-distro lane (installs on pure Debian stable now): the two
+    wheels absent from Debian's archive (python3-mcp, python3-pymetasploit3)
+    moved Depends -> Recommends; the postinst vendor lane pip-installs them
+    pinned (mcp==1.29.0, pymetasploit3==1.0.6 per requirements.txt) into
+    /usr/share/daharness/vendor, armed by the sitecustomize vendored-wheel
+    machinery the chromadb era built (the self-contained pip closure
+    carries its own .so tags matching the installing interpreter, which
+    on the Debian lane is the same 3.13 every deb lane runs).
+    Kali satisfies both from apt and never touches pip (bare-import probe
+    short-circuits the lane). python3-pip joined Depends (was Suggests).
+  * Gateway fail-soft for the mcp wheel: the module-level
+    `from mcp.server...` block killed the ENTIRE gateway (REST included)
+    on any host lacking the wheel — bootstrap logged it and :5000 never
+    bound. Now a failed import still boots the app: REST lanes fully up,
+    /mcp answers an honest 503 with the remediation, /health grades the
+    mcp lane ("ready (streamable-HTTP at /mcp)" / "unavailable"). With
+    the wheel present, behavior is byte-identical.
+  * Interpreters pinned to /usr/bin/python3 across the deb lanes
+    (wrappers, daharness-index, rust worker, rules compileall): a bare
+    `python3` resolved per-shell, and a linuxbrew/pyenv user shell hands
+    operator-facing lanes a foreign interpreter whose dist-packages are
+    not the apt closure the units run on (split-brain REPL vs daemon;
+    this laptop's live config hit it: brew python 3.14 vs deb python
+    3.13). The compileall pin also stops a build-shell interpreter from
+    stamping cp3XX tags the target interpreter then recompiles.
+  * Debian wordlist layout note in the env conffile: hash_crack defaults
+    to rockyou under /usr/share/wordlists (Kali layout); on pure Debian,
+    declare WORDLIST_SOURCES="key=path,..." (utils/wordlists.py walks
+    them) or clone SecLists and point at it.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Tue, 18 Nov 2026 19:50:00 -0700
+
 daharness (0.2.0+pkg7) kali; urgency=high
 
   * Evasion + ration engines yanked (proven faulty: the drain loop lost

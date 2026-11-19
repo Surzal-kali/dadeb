@@ -17,4 +17,4 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # group, so the service lanes see REPL-authored state (ids.db, cookie jar,
 # scratch) instead of kali:kali strays.
 umask 0007
-exec python3 /usr/share/daharness/tool_repl.py "$@"
+exec /usr/bin/python3 /usr/share/daharness/tool_repl.py "$@"

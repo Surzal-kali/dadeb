@@ -200,6 +200,69 @@ if [ -r /etc/daharness/daharness.env ] && \
     fi
 fi
 
+# ────────────────────────────────────────────────────────────────────── #
+# Vendored-wheel lane for non-debian-packaged wheels (0.2.0+pkg8)        #
+# ────────────────────────────────────────────────────────────────────── #
+# python3-mcp and python3-pymetasploit3 are Recommends: Kali's archive
+# ships both, Debian's archive ships NEITHER (python3-mcp first enters in
+# sid; pymetasploit3 has never been packaged for Debian) — a hard Depends
+# made every pkg<=7 deb uninstallable on pure Debian. On Debian (any host
+# where the apt names do not resolve) this lane pip-installs both into
+# the package tree's own vendor/ directory, pinned to the requirements.txt
+# versions the code was written against. sitecustomize.py ALREADY carries
+# the vendor lane (prepends vendor/ to sys.path behind an .so tag-gate —
+# the chromadb-era mechanism): the pip closure is self-contained and its
+# tags match the interpreter that runs this script (the deb lanes'
+# /usr/bin/python3 — /usr/bin/python3, not PATH's, is what postinst is
+# executed with), so the gate passes on the Debian lane. Kali satisfies
+# the bare-import probe and never reaches the pip lane. Failure is honest
+# and non-fatal: the gateway boots degraded on that lane (REST up, /mcp
+# 503, /health reports it) and an operator can rerun the install or the
+# manual command below.
+VENDOR_DIR=/usr/share/daharness/vendor
+# Three probe outcomes, in precedence order:
+#   1. bare import OK         -> the apt lane satisfied it (Kali) — nothing to do
+#   2. vendor-armed import OK -> already vendored by an earlier run — nothing to do
+#   3. both fail              -> pip the pinned wheels into vendor/ (network)
+# NB: pip --target is NOT subject to the PEP 668 EXTERNALLY-MANAGED veto
+# (verified against trixie's python3-pip 25.1.1), so no
+# --break-system-packages is needed and system dist-packages stay
+# untouched; the closure's own copies (potentially newer than apt's, e.g.
+# requests) live only under vendor/ and win only inside the deb lanes.
+# Closure-boundary audit (live incident 2026-11-18): mcp's dependency
+# closure pulls pyjwt[crypto] -> cryptography, and pip --target resolved
+# it to a NEWER cryptography than apt ships (50.x vs trixie's 43) — but
+# pyopenssl itself is NOT in that closure, so impacket's
+# `from OpenSSL import SSL` ran apt's pyOpenSSL 25.0.0 against vendor's
+# cryptography-50 bindings and died on `module 'lib' has no attribute
+# 'GEN_EMAIL'` during the (still-running, per-module fail-soft) index.
+# The pair must travel TOGETHER into the same closure: pyopenssl joins
+# the pinned install list, its resolver then matches cryptography to
+# the pyopenssl it already selected, and both halves come from vendor/
+# (requirements.txt pins: cryptography==50.0.0, pyOpenSSL==26.4.0).
+if ! python3 -c "import mcp, pymetasploit3" 2>/dev/null; then
+    if PYTHONPATH="$VENDOR_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -c "import mcp, pymetasploit3" 2>/dev/null; then
+        echo "daharness: mcp + pymetasploit3 already vendored in $VENDOR_DIR"
+    elif python3 -m pip --version >/dev/null 2>&1; then
+        echo "daharness: mcp/pymetasploit3 not importable — arming the vendor wheel lane (${VENDOR_DIR})"
+        mkdir -p "$VENDOR_DIR" 2>/dev/null || true
+        if python3 -m pip install --no-cache-dir --target "$VENDOR_DIR" \
+            'mcp==1.29.0' 'pymetasploit3==1.0.6' \
+            'cryptography==50.0.0' 'pyOpenSSL==26.4.0' >/dev/null 2>&1; then
+            echo "daharness: vendored mcp + pymetasploit3 into $VENDOR_DIR (sitecustomize-armed)"
+        else
+            echo "daharness: WARNING vendored-wheel install failed (offline or no PyPI route?)"
+            echo "  the gateway still boots (REST up) but /mcp answers 503 + /health reports it."
+            echo "  manual fix: python3 -m pip install --target $VENDOR_DIR mcp pymetasploit3 cryptography pyopenssl"
+        fi
+    else
+        echo "daharness: python3-pip absent and mcp/pymetasploit3 not importable"
+        echo "  /mcp degrades to a 503 until both exist; apt install python3-pip, then see above."
+    fi
+fi
+unset VENDOR_DIR
+
 # ChromaDB retirement (2026-10-23): chromadb was removed entirely — the
 # tool registry is now backed by a local SQLite + numpy vector store (no
 # server process). Upgrades from earlier packages may still have a

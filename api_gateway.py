@@ -198,16 +198,45 @@ def _mcp_text(payload) -> list:
         _disp_result_len_var.set(len(text.encode("utf-8", "replace")))
     except Exception:
         logging.getLogger(__name__).debug("swallowed exception in _mcp_text", exc_info=True)
+    if mcp_types is None:
+        # Fail-soft lane: only reachable if a handler ran without the mcp
+        # wheel — degrade to a plain-text content list instead of NameError.
+        return [text]
     return [mcp_types.TextContent(type="text", text=text)]
 
-# MCP transport (low-level server + streamable-HTTP session manager).  The
-# low-level ``Server`` is used on purpose: it advertises an explicit
-# ``inputSchema`` per tool and hands the raw ``arguments`` dict straight to
-# our dispatcher, so we can mirror the existing REST entrypoints without the
-# function-signature inference that ``mcp.server.fastmcp.FastMCP`` would do.
-from mcp.server.lowlevel import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-import mcp.types as mcp_types
+# Fail-soft (0.2.0+pkg8): the mcp wheel rides the Kali apt lane and the
+# deb postinst vendor lane (pip --target vendor/, armed by sitecustomize)
+# but is NOT a guaranteed import on every host. When neither ran, the
+# module-level names go None, the gateway still boots fully for REST, and
+# /mcp answers an honest 503 (health reports the lane) instead of the
+# whole gateway process dying at import. The lane re-arms once the wheel
+# is installed and the process restarts.
+try:
+    from mcp.server.lowlevel import Server
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    import mcp.types as mcp_types
+    _MCP_IMPORT_ERROR = None
+except ImportError as _mcp_exc:
+    _MCP_IMPORT_ERROR = _mcp_exc
+    Server = None
+    StreamableHTTPSessionManager = None
+    mcp_types = None
+
+# Raw-ASGI answer for the lane on hosts without the wheel. A Response
+# instance is itself an ASGI app, which keeps Route methods-open (the
+# parity the real /mcp route holds — a coroutine-function endpoint would
+# default Route to GET-only and 405 every POST).
+_MCP_UNAVAILABLE = JSONResponse(
+    {
+        "error": "mcp lane unavailable — the mcp wheel failed to import "
+                 "at gateway boot. Kali: apt install python3-mcp. "
+                 "Debian: (re)install the deb with network access so "
+                 "the postinst vendor lane can pip-install it, or "
+                 "manually: python3 -m pip install --target "
+                 "/usr/share/daharness/vendor mcp. Restart afterwards."
+    },
+    status_code=503,
+)
 
 
 class _MCPEndpoint:
@@ -221,7 +250,7 @@ class _MCPEndpoint:
     like ``app.mount("/mcp", ...)`` would produce.
     """
 
-    def __init__(self, session_manager: StreamableHTTPSessionManager):
+    def __init__(self, session_manager: "StreamableHTTPSessionManager | None"):
         self._sm = session_manager
 
     async def __call__(self, scope, receive, send) -> None:
@@ -587,31 +616,47 @@ class APIGateway:
         Named method so the degraded-guard insert and the app build have an
         explicit boundary; run() calls it after constructing APIGateway."""
         # --- MCP server + transport ------------------------------------------
-        # One low-level MCP server exposes the framework's operations as MCP
-        # tools; the streamable-HTTP session manager turns it into an ASGI
-        # app that we mount on the *same* FastAPI app as the REST routes, so
-        # REST callers and MCP clients hit the identical dispatch logic.
-        self.mcp_server = Server("daharness")
-        self._register_mcp_handlers()
-        # json_response=True: plain application/json POST responses instead of
-        # SSE framing, for simple clients that do not parse event streams.
-        # stateless=True: accept requests that do not echo Mccp-Session-Id;
-        # otherwise clients that don't track sessions get a green initialize
-        # but tools/list fails 400 "Missing session ID" and lists no tools.
-        self.session_manager = StreamableHTTPSessionManager(
-            app=self.mcp_server, json_response=True, stateless=True
-        )
+        # Fail-soft (0.2.0+pkg8): when the mcp wheel failed to import the
+        # session manager is never built (self.session_manager stays None)
+        # and the app boots WITHOUT a lifespan — REST routes stay up, /mcp
+        # serves _mcp_unavailable's 503, /health reports the lane. With the
+        # wheel present, behavior is byte-identical to the pre-split build.
+        self.mcp_server = None
+        self.session_manager = None
+        if StreamableHTTPSessionManager is None:
+            logging.getLogger(__name__).error(
+                "[gateway] mcp wheel failed to import at module load — the "
+                "REST routes stay up, /mcp serves a 503 until it is "
+                "installed and this process restarts. Import error: %s",
+                _MCP_IMPORT_ERROR,
+            )
+        else:
+            # One low-level MCP server exposes the framework's operations as
+            # MCP tools; the streamable-HTTP session manager turns it into an
+            # ASGI app that we mount on the *same* FastAPI app as the REST
+            # routes, so REST callers and MCP clients hit the identical
+            # dispatch logic.
+            self.mcp_server = Server("daharness")
+            self._register_mcp_handlers()
+            # json_response=True: plain application/json POST responses instead of
+            # SSE framing, for simple clients that do not parse event streams.
+            # stateless=True: accept requests that do not echo Mccp-Session-Id;
+            # otherwise clients that don't track sessions get a green initialize
+            # but tools/list fails 400 "Missing session ID" and lists no tools.
+            self.session_manager = StreamableHTTPSessionManager(
+                app=self.mcp_server, json_response=True, stateless=True
+            )
 
-        async def lifespan(app: FastAPI):
-            # The session manager owns the per-connection MCP sessions; it must
-            # be started for the lifetime of the app.  Running it here (rather
-            # than as the mounted app's own lifespan, which Starlette does not
-            # propagate to mounts) keeps every connection's state alive for as
-            # long as uvicorn is serving.
-            async with self.session_manager.run():
-                yield
+            async def lifespan(app: FastAPI):
+                # The session manager owns the per-connection MCP sessions; it must
+                # be started for the lifetime of the app.  Running it here (rather
+                # than as the mounted app's own lifespan, which Starlette does not
+                # propagate to mounts) keeps every connection's state alive for as
+                # long as uvicorn is serving.
+                async with self.session_manager.run():
+                    yield
 
-        self.app = FastAPI(lifespan=lifespan)
+        self.app = FastAPI(lifespan=lifespan if self.session_manager else None)
 
         # --- API key middleware -------------------------------------------------
         # If GATEWAY_API_KEY is set (either via constructor or env), every
@@ -649,11 +694,19 @@ class APIGateway:
             # chroma was unreachable at boot — the process answers, the
             # semantic half doesn't. Consumers poll this instead of
             # interpreting a 503 on /tools/*.
-            return {
+            health: dict = {
                 "status": "degraded" if self.tool_registry is None else "ok",
                 "registry": ("down — " + self.registry_down_reason
                              if self.tool_registry is None else "ready (SQLite vector store)"),
             }
+            # MCP lane graded the same way (fail-soft import): a 503 on /mcp
+            # is legible from here without a probe against the endpoint.
+            health["mcp"] = (
+                "ready (streamable-HTTP at /mcp)" if self.session_manager
+                else "unavailable — mcp wheel failed to import at boot; "
+                     "install it and restart the gateway"
+            )
+            return health
 
         @self.app.post("/tools/execute")
         async def execute_tool(req: ToolRequest):
@@ -945,7 +998,13 @@ class APIGateway:
         # the REST routes.  MCP clients connect here and use tools/list +
         # tools/call; the handlers route to the exact same registry/memory
         # code the REST endpoints use.
-        self.app.router.routes.append(Route("/mcp", _MCPEndpoint(self.session_manager)))
+        self.app.router.routes.append(
+            Route(
+                "/mcp",
+                _MCPEndpoint(self.session_manager) if self.session_manager
+                else _MCP_UNAVAILABLE,
+            )
+        )
 
     # --- MCP handlers ---------------------------------------------------------
     def _register_mcp_handlers(self) -> None:
@@ -1375,8 +1434,14 @@ class APIGateway:
         return unknown
 
     @staticmethod
-    def _error(message: str) -> mcp_types.CallToolResult:
-        """Build an MCP CallToolResult flagged as an error."""
+    def _error(message: str) -> "mcp_types.CallToolResult | None":
+        """Build an MCP CallToolResult flagged as an error.
+
+        Returns None on the fail-soft lane (mcp wheel absent): the caller
+        falls through to its plain-dict answer shape."""
+        if mcp_types is None:
+            logger.error("MCP _error called without the mcp wheel: %s", message)
+            return None
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=message)],
             isError=True,

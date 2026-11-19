@@ -17,4 +17,8 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # the setgid state root (postinst/units shape it 2770) — the daharness
 # group. That bit cascade is what makes the shared state actually mutual.
 umask 0007
-exec python3 /usr/share/daharness/bootstrap.py "$@"
+# Interpreter pinned to /usr/bin/python3 (0.2.0+pkg8): a bare `python3` on
+# PATH resolves per-shell (a linuxbrew/pyenv user shell hands the deb lane a
+# foreign interpreter whose dist-packages don't match the apt closure the
+# units run on — split-brain between operator REPL and systemd daemon).
+exec /usr/bin/python3 /usr/share/daharness/bootstrap.py "$@"

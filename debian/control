@@ -9,6 +9,7 @@ Standards-Version: 4.7.0
 Package: daharness
 Architecture: any
 Depends: python3,
+         python3-pip,
          nmap,
          python3-bs4,
          python3-cryptography,
@@ -20,12 +21,10 @@ Depends: python3,
          python3-impacket,
          python3-ipykernel,
          python3-ipython,
-         python3-mcp,
          python3-paramiko,
          python3-prompt-toolkit,
          python3-pyasn1,
          python3-pydantic,
-         python3-pymetasploit3,
          python3-pymysql,
          python3-requests,
          python3-scapy,
@@ -34,20 +33,33 @@ Depends: python3,
          python3-uvicorn,
          python3-psutil,
          python3-numpy
-# Recommends tier = daemon + drop-folder lanes apt pulls by default. zaproxy
-# is the live Kali/Debian package name — owasp-zap vanished from the archive
-# (verified against kali-rolling 2026-10-27), so the old name silently never
-# installed anything via Recommends.
-Recommends: metasploit-framework, zaproxy, wordlists,
+# NOTE on python3-mcp / python3-pymetasploit3 (0.2.0+pkg8): both were hard
+# Depends through pkg7, but NEITHER exists in the Debian archive
+# (python3-mcp first enters in sid; pymetasploit3 is Kali-only), so every
+# hard Depends made the deb uninstallable on pure Debian. They moved to
+# Recommends with a covered fallback: on Kali both apt packages install;
+# on Debian the postinst vendor lane pip-installs both (pinned to the
+# requirements.txt versions) into /usr/share/daharness/vendor, which
+# sitecustomize.py prepends via the existing vendored-wheel lane
+# (the pip closure is self-contained; its .so tags match the installing
+# interpreter, which on the Debian lane IS the interpreter every deb
+# lane runs — 3.13 — so the tag-gate passes; Kali satisfies the bare
+# import probe and never reaches the pip lane). If neither lane
+# ran (offline Debian install), the gateway still boots: REST lanes stay
+# up while /mcp answers an honest 503 and /health reports the lane
+# (api_gateway.py fail-soft import).
+Recommends: metasploit-framework, zaproxy, python3-mcp,
+ python3-pymetasploit3, wordlists,
  jadx, radare2
 # Suggests mirrors the framework_doctor probe list (auxiliaries/framework_status.py):
 # amass -> auxiliaries/amass.py, ldap-utils (ldapsearch) -> auxiliaries/ldap_search.py,
 # exploitdb (searchsploit) -> payloads/searchsploiting.py, ffuf/hydra/sqlmap ->
 # payloads/. Every one resolves via shutil.which + $BIN env overrides and degrades
 # honestly when absent — optional, so Suggests and never Depends (masscan + the
-# engagement-Postgres lane already sit here).
+# engagement-Postgres lane already sit here, plus the deb's own vendored-wheel
+# pip lane (python3-pip rides Depends) as the manual Debian recovery path).
 Suggests: amass, ldap-utils, exploitdb, ffuf, hydra, sqlmap,
- python3-pg8000, python3-psycopg, python3-pip, python3-yaml,
+ python3-pg8000, python3-psycopg, python3-yaml,
  masscan, postgresql
 Description: headless orchestration harness for authorized security research
  An external LLM (Open WebUI model, gateway or MCP client) semantically
@@ -63,10 +75,14 @@ Description: headless orchestration harness for authorized security research
  NOTE: the tool registry uses a local SQLite + numpy vector store
  (no server process, no network dependency at build time).
  python3-mcp
- and python3-pymetasploit3 ride the apt lane pending snapshot-compat
- probes. The Jupyter closure (python3-ipykernel + python3-ipython +
- python3-jupyter-client) is a hard Depends, not the [jupyter] extra:
- without it daharness-kernel.service dies at its lazy import in a
+ and python3-pymetasploit3 are Recommends with a covered fallback now —
+ Kali satisfies both via apt; Debian's postinst pip-installs them into
+ the package's own vendor/ tree (sitecustomize-armed). Without either
+ lane the gateway's REST API stays up while /mcp degrades honestly
+ (see the fail-soft import in api_gateway.py). The Jupyter closure
+ (python3-ipykernel + python3-ipython + python3-jupyter-client) stays a
+ hard Depends, not the [jupyter] extra: without it
+ daharness-kernel.service dies at its lazy import in a
  Restart=on-failure loop (observed 2026-10-20), and Kali rolling builds
  these against the system python (3.14) — the dev pin (6.29.5) predates
  the interpreter the deb lane runs on.

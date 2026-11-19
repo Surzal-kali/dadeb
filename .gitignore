@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 *.so
 *.exe
+# postinst vendored-wheel lane (pip --target, Debian hosts): install
+# artifacts, never tracked
+vendor/
 # deb packaging intermediates
 debian/.debhelper/
 debian/daharness/

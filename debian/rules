@@ -12,7 +12,6 @@ TREE_DIRS := daharness utils auxiliaries payloads listeners replkit tests
 # ship in git, the artifact is gitignored — the deb builds it right here.
 override_dh_auto_build:
 	gcc -shared -o listeners/plugins/frameit.so -fPIC listeners/plugins/frameit.c
-
 # No override_dh_auto_test: the vendor-arming test that ran here was
 # deleted with chromadb (tests/test_vendor_arming.py is gone). The deb's
 # own test suite runs via `daharness-repl selftest` (the operator macro),
@@ -45,7 +44,13 @@ override_dh_auto_install:
 	# now removes them with the package. Runs AFTER the tree copy so .pyc
 	# source-mtime headers match the staged .py files (dpkg preserves
 	# mtimes end-to-end — no import-time rewrite, no residue regeneration).
-	python3 -m compileall -q -f debian/daharness/usr/share/daharness
+	# Interpreter pinned to /usr/bin/python3 (0.2.0+pkg8): a build host
+	# whose PATH python3 diverges from the target system python
+	# (linuxbrew/pyenv checkout shells) would stamp cp3XX tags the deb
+	# lanes never run — every staged import then recompiles (or fails the
+	# .so gate). The wrappers exec /usr/bin/python3, so bytecode must
+	# match that interpreter, whatever shell builds the package.
+	/usr/bin/python3 -m compileall -q -f debian/daharness/usr/share/daharness
 	install -D -m 0644 .env.example debian/daharness/usr/share/daharness/.env.example 2>/dev/null || true
 	# pytest rootdir config: testpaths=["tests"] keeps ANY pytest spawn in
 	# the tree off the vendored closure's own test files (they break

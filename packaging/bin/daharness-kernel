@@ -17,4 +17,4 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/usr/share/daharness"
 # under the setgid state root, the daharness group (service-lane parity —
 # connection files are later chowned to the attaching operator).
 umask 0007
-exec python3 /usr/share/daharness/tool_repl.py --kernel "$@"
+exec /usr/bin/python3 /usr/share/daharness/tool_repl.py --kernel "$@"

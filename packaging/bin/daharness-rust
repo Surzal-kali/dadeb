@@ -322,9 +322,11 @@ cmd_brain() {
     BRAIN_WORKER_SOCKET=${DAHARNESS_RUST_WORKER_SOCKET:-$RUN_DIR/brain-worker.sock}
     export BRAIN_WORKER_SOCKET
 
+    # Interpreter pinned to /usr/bin/python3 (0.2.0+pkg8): see the
+    # daharness wrapper — the lanes must all agree on one interpreter.
     ensure_dirs
     say "starting python tool-worker -> $BRAIN_WORKER_SOCKET"
-    python3 "$BRAIN_SRC/worker.py" &
+    /usr/bin/python3 "$BRAIN_SRC/worker.py" &
     _worker=$!
     trap 'kill -TERM "$_worker" 2>/dev/null || true' EXIT INT TERM
     # Worker bind is near-instant (bind + serve loop); the brain retries on
