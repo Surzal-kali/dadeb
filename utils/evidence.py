@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from constants import resolve_workspace_root
+from utils.state_perms import reconcile_sqlite_modes
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,11 @@ class EvidenceStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=10000")
         _set_wal(self.conn)
+        # Group-rw backstop after the WAL pragma (sidecars now exist and
+        # inherit the main db's mode): a 0640 mint under a tighter umask
+        # leaves every non-owner lane (deb kernel lane) readonly — see
+        # utils/state_perms.py (2026-11-19 kernel-lane incident).
+        reconcile_sqlite_modes(self.db_path)
         self._init_tables()
 
     def _init_tables(self) -> None:

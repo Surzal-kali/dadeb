@@ -27,3 +27,24 @@ if [ -r "$_dh_conf" ]; then
     fi
 fi
 unset _dh_conf
+# Lane DB credentials: engagement.py's defaults are the init bundle's
+# PLACEHOLDER passwords; the live cluster rolls random hex per lane (minted
+# by `daharness-pg init` into /etc/daharness/pg.env — the same file the
+# systemd units source via EnvironmentFile, and the file pg.env(1)'s
+# operators sourced by hand). Without it the operator REPL authenticates
+# with the placeholder and the engagement lane reports "DB unavailable"
+# from a healthy cluster (live 2026-11-19: arm succeeded locally but the
+# lane could never register). pg.env is root:daharness 0640 — a member of
+# the daharness group can read it, everyone else degrades to the current
+# behavior (lane off, SQLite mirror). Guarded: any HARNESS_DB_* value the
+# shell already carries wins — this only fills a silence.
+if [ -r /etc/daharness/pg.env ] && [ -z "${HARNESS_DB_PASSWORD_REPL:-}" ]; then
+    . /etc/daharness/pg.env
+    # pg.env declares bare KEY=VALUE (EnvironmentFile style, no `export`):
+    # sourcing only assigns shell vars — re-export them so child processes
+    # (the REPL python) actually inherit the credentials (live 2026-11-19:
+    # sh saw the values, python saw None).
+    export HARNESS_DB_HOST HARNESS_DB_PORT HARNESS_DB_NAME \
+        HARNESS_DB_PASSWORD_REPL HARNESS_DB_PASSWORD_BRAIN \
+        HARNESS_DB_PASSWORD_GATEWAY HARNESS_DB_PASSWORD_OPERATOR 2>/dev/null
+fi

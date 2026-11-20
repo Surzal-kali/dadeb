@@ -56,6 +56,7 @@ from typing import Any
 from collections.abc import Iterable
 
 from constants import framework_tool, resolve_workspace_root
+from utils.state_perms import reconcile_sqlite_modes
 
 _DEFAULT_ROOT = resolve_workspace_root()
 _TTL_HOURS = float(os.getenv("COOKIE_JAR_TTL_HOURS", "72"))
@@ -306,6 +307,11 @@ class CookieJarStore:
         self._repair_ownership_if_needed()
         self._conn = sqlite3.connect(str(self.db_path), timeout=10.0, check_same_thread=False)
         _set_wal(self._conn)  # conversion not covered by connect()'s busy handler
+        # Group-rw backstop after the WAL pragma (sidecars now exist and
+        # inherit the main db's mode): a 0640 mint under a tighter umask
+        # leaves every non-owner lane (deb kernel lane) readonly — see
+        # utils/state_perms.py (2026-11-19 kernel-lane incident).
+        reconcile_sqlite_modes(str(self.db_path))
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 

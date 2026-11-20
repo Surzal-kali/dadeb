@@ -1,3 +1,26 @@
+daharness (0.2.0+pkg10) kali; urgency=medium
+
+  * Cross-lane SQLite stores carry the group-rw open backstop: ids.db
+    (findings), cookie_jar.db, and evidence/evidence.db now call
+    utils.state_perms.reconcile_sqlite_modes at every store open (after the
+    WAL pragma, sidecars included — same convention as
+    brain_sessions/snapshot_cache/fleet_scheduler, whose heals shipped
+    2026-10-31). Live gap 2026-11-19: the deb kernel lane (container
+    jovyan, gid daharness) hit "attempt to write a readonly database" on
+    report_finding — the host daemon minted ids.db/evidence.db 0640
+    (SQLite bases new files at 0644, so even UMask=0007 yields group
+    read-only), and unlike the earlier stores these three never wired the
+    in-process heal. Companion packaging fix: /etc/profile.d/daharness.sh
+    now sources /etc/daharness/pg.env and RE-EXPORTS the lane knobs —
+    pg.env declares bare KEY=VALUE (EnvironmentFile style), so plain
+    sourcing left the credentials shell-local and the operator REPL never
+    inherited them ("DB unavailable" at engagement arm, live 2026-11-19). The kernel lane cannot chmod uid-118 files itself;
+    the owner lane's first open after this upgrade is the heal, and the
+    kernel regains write access from that point (WAL dance stays coherent
+    because reconcile also fixes the sidecars).
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Wed, 19 Nov 2026 14:50:00 -0700
+
 daharness (0.2.0+pkg9) kali; urgency=medium
 
   * daharness-kernel.service: Restart=always (was on-failure). Both of the
@@ -17,6 +40,8 @@ daharness (0.2.0+pkg9) kali; urgency=medium
     pkg8 deb is unaffected until the next build. The daemon unit keeps
     on-failure — its clean exits (launch_all shutdown) are deliberate
     full-stack stops.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Tue, 18 Nov 2026 20:50:00 -0700
 
 daharness (0.2.0+pkg8) kali; urgency=high
 

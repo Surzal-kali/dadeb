@@ -30,6 +30,7 @@ from . import _findings_ledger as _ledger
 from . import _findings_render as _render
 from . import _findings_store as _store
 from .models import Finding, Unknown
+from utils.state_perms import reconcile_sqlite_modes
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,11 @@ class FindingStore:
                     raise
                 self.conn.rollback()
                 time.sleep(0.05 * (_attempt + 1))
+        # Group-rw backstop after the WAL pragma (sidecars now exist and
+        # inherit the main db's mode): a 0640 mint under a tighter umask
+        # leaves every non-owner lane (deb kernel lane) readonly — see
+        # utils/state_perms.py (2026-11-19 kernel-lane incident).
+        reconcile_sqlite_modes(str(self.db_path))
 
     def _repair_ownership_if_needed(self) -> None:
         """Chown ids.db + WAL + SHM back to the workspace owner.
