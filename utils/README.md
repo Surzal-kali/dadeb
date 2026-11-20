@@ -196,7 +196,8 @@ The `finding` lifecycle tools over the SQLite store described in
   credential-reuse sweep after any credential-bearing finding.
 - **`render_findings`** — renders all findings as a markdown report (filters
   by severity/asset/status). Writes a timestamped `.md` file to
-  `findings_md/` and gains an **Open questions (unresolved)** appendix that
+  `$WORKSPACE_ROOT/findings_md/` (or `$FINDINGS_MD_DIR` when set) and gains an
+  **Open questions (unresolved)** appendix that
   renders even when zero findings exist.
 - **`close_finding`** — close a finding as resolved, false positive, or
   duplicate.

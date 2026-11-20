@@ -19,6 +19,7 @@ the only public import surface.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -436,7 +437,15 @@ class FindingStore:
         )
 
         if output_dir is None:
-            output_dir = Path(__file__).resolve().parent.parent / "findings_md"
+            env_dir = (
+                os.getenv("FINDINGS_MD_DIR", "").strip()
+                or os.getenv("FINDINGS_OUTPUT_DIR", "").strip()
+                or os.getenv("DAHARNESS_FINDINGS_DIR", "").strip()
+            )
+            if env_dir:
+                output_dir = Path(env_dir).expanduser()
+            else:
+                output_dir = Path(resolve_workspace_root()) / "findings_md"
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
