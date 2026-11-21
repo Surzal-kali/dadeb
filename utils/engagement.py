@@ -11,10 +11,15 @@ a REPL change takes effect immediately in a running Brain (same mechanism as
 ``scope/.armed_packet_scope.json``).
 
 Postgres access (psycopg, optional install) follows house rules for additive
-stores: a down/absent Postgres degrades every consumer silently (journaling
-skipped, evidence falls back to SQLite), never breaking a tool. One cached
-connection per process, one reconnect-backoff window so a down server never
-pins the dispatch path.
+stores: a down/absent Postgres degrades every consumer gracefully, never
+breaking a tool. One cached connection per process. There is NO background
+retry loop — a reconnect attempt happens only on the next real dispatch
+that needs the lane. While down, journal rows SPOOL into ``ids.db``
+(``journal_spool`` table, same SQLite store the findings/unknowns live in)
+and flush to ``journal.entries`` on the next successful connect, so the
+dispatch spine never silently drops rows during an outage. The
+"Postgres unavailable" warning fires at most a few times per outage before
+dropping to debug — it must not nag every 30 seconds.
 
 Roles (packaging/postgres/init/001_roles.sh): lanes authenticate per-lane
 (brain_lane/gateway_lane/repl_lane via ``HARNESS_DB_LANE``); the operator
@@ -28,12 +33,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from constants import resolve_workspace_root
+from utils.state_perms import reconcile_sqlite_modes
 
 logger = logging.getLogger(__name__)
 
@@ -120,18 +127,47 @@ def disarm() -> None:
     _ARMED_CACHE["state"] = None
 
 
-# ─── Postgres lane connection (lazy, cached, degrade-silently) ───────────────
+# ─── Postgres lane connection (lazy, cached, degrade-gracefully) ─────────────
 
-_RECONNECT_BACKOFF_S = 30.0
+_RECONNECT_BACKOFF_S = 300.0
+# Down-warning budget per outage: the first few connect failures warn, then
+# it goes quiet at debug until the lane recovers (next outage refills it).
+_WARN_PER_OUTAGE = 3
 _DB: dict[str, Any] = {
     "conn": None,
     "down_until": 0.0,     # monotonic — skip attempts while inside the window
     "connected_as": None,  # lane role name of the cached connection
-    "warned": False,       # one-time absence warning
+    "driver_ok": None,     # True/False once a connect attempt ran; None = never
+    "warn_count": 0,       # warnings issued for the CURRENT outage
     "last_error": None,    # human-readable why-not-connected, for db_status()
 }
 
 _INFERRED_LANE: str | None = None
+
+# ─── Journal spool (ids.db, flushed on next successful connect) ──────────────
+
+_SPOOL_CONN: sqlite3.Connection | None = None
+_SPOOL_DDL = (
+    "CREATE TABLE IF NOT EXISTS journal_spool ("
+    "    spool_id   INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "    ts         REAL NOT NULL,"
+    "    fail_count INTEGER NOT NULL DEFAULT 0,"
+    "    payload    TEXT NOT NULL)"
+)
+_DISPATCH_INSERT_SQL = (
+    "INSERT INTO journal.entries "
+    "(engagement, lane, tool_id, args, scope_verdict, approval_path, "
+    " agent_id, agent_provenance, status, duration_s, result_mode, "
+    " scratch_ref, result_digest, envelope_meta) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+)
+_SPOOL_KEYS = (
+    "engagement", "lane", "tool_id", "args", "scope_verdict",
+    "approval_path", "agent_id", "agent_provenance", "status",
+    "duration_s", "result_mode", "scratch_ref", "result_digest",
+    "envelope_meta",
+)
+_SPOOL_FLUSH_BATCH = 500
 
 
 def _infer_lane_from_entrypoint() -> str:
@@ -200,18 +236,32 @@ def lane_name() -> str:
 
 
 def db_down() -> bool:
-    """True while inside the reconnect-backoff window (cheap fast-pathcheck)."""
+    """True while inside the reconnect-backoff window (cheap fast-path check).
+    No thread polls this — the only thing that clears the window is the next
+    lane consumer (journal write, sweep, diary call) reaching its backoff
+    end and attempting a real connect."""
     return time.monotonic() < _DB["down_until"]
+
+
+def _db_spool_eligible() -> bool:
+    """Journaling may spool while down ONLY when the lane was actually opted
+    into: the psycopg driver imported at least once (``driver_ok`` True —
+    checked during a real connect attempt, the backoff window included). A
+    lane that never had the driver skips silently as before; spooling rows
+    it can never flush would just be unbounded dead weight in ids.db.
+    Unknown (never attempted) returns False — spooling starts only after a
+    genuine reachability failure, never on a cold first impression."""
+    return _DB.get("driver_ok") is True
 
 
 def connect(*, role: str | None = None, force: bool = False):
     """A live psycopg connection for the lane (or a named role), or None.
 
-    Postgres absent / down / psycopg not installed → None, logged once at
-    debug level (the engagement lane is additive; nothing may depend on it
-    to the point of breaking a tool). Reconnects are rate-limited by the
-    backoff window so a down container never pins dispatch.
-    """
+    Postgres absent / down / psycopg not installed → None, warned at most a
+    few times per outage (then debug — see ``_warn_down``). Reconnects are
+    rate-limited by the backoff window so a down cluster never pins the
+    dispatch path, and a SUCCESS reconnect flushes the journal spool (see
+    ``_flush_spool``)."""
     global _DB
     now = time.monotonic()
     if not force and db_down():
@@ -229,18 +279,19 @@ def connect(*, role: str | None = None, force: bool = False):
     try:
         import psycopg  # optional dependency — absence degrades the lane
     except ImportError:
-        if not _DB["warned"]:
-            _DB["warned"] = True
-            logger.debug(
-                "[engagement] psycopg not installed — engagement/journal DB "
-                "lane disabled (pip install 'psycopg[binary]' to enable)"
-            )
+        _DB["driver_ok"] = False
+        _warn_down(
+            "psycopg not installed — engagement/journal DB lane disabled "
+            "(pip install 'psycopg[binary]' to enable); journal rows skip "
+            "rather than spool — install the driver to opt the lane in"
+        )
         _DB["down_until"] = now + _RECONNECT_BACKOFF_S
         _DB["last_error"] = (
             "psycopg driver not importable on this lane "
             "(pip install 'psycopg[binary]' or apt install python3-psycopg)"
         )
         return None
+    _DB["driver_ok"] = True
 
     user = role
     password = _password_for(role)
@@ -262,13 +313,11 @@ def connect(*, role: str | None = None, force: bool = False):
             last_exc = exc
             conn = None
     if conn is None:
-        if not _DB["warned"]:
-            _DB["warned"] = True
-            logger.info(
-                "[engagement] Postgres unavailable (%s) — journal/evidence DB "
-                "lane stays optional; will retry every %.0fs", last_exc,
-                _RECONNECT_BACKOFF_S,
-            )
+        _warn_down(
+            f"Postgres unavailable ({last_exc}) — journal/evidence DB lane "
+            f"stays optional; journal rows spool to ids.db and flush on "
+            f"next connect (retry window {_RECONNECT_BACKOFF_S:.0f}s)"
+        )
         _DB["down_until"] = now + _RECONNECT_BACKOFF_S
         _DB["conn"] = None
         _DB["last_error"] = (
@@ -281,7 +330,206 @@ def connect(*, role: str | None = None, force: bool = False):
     _DB["connected_as"] = role
     _DB["down_until"] = 0.0
     _DB["last_error"] = None
+    _DB["warn_count"] = 0
+    _flush_spool(conn)
     return conn
+
+
+def _warn_down(message: str) -> None:
+    """Cap the down-lane nag: the first ``_WARN_PER_OUTAGE`` failures of an
+    outage log at INFO (so the operator learns the lane is off), then the
+    story is unchanged — downgrades to DEBUG until recovery. The 30s-era
+    behavior logged every failure forever, which on a boot-broken cluster
+    meant a line every 30s for the life of the daemon."""
+    _DB["warn_count"] = _DB.get("warn_count", 0) + 1
+    if _DB["warn_count"] <= _WARN_PER_OUTAGE:
+        logger.info("[engagement] %s", message)
+    else:
+        logger.debug("[engagement] still down (%s)", message)
+
+
+def _spool_conn() -> sqlite3.Connection:
+    """The shared ids.db connection for the spool table (same file the
+    findings/unknowns stores own). ids.db is already WAL via
+    FindingStore's connect path; this read-only-pragmas connect just joins
+    it. reconcile_sqlite_modes is the group-rw heal for a tighter-umask
+    mint (the kernel-lane incident class)."""
+    global _SPOOL_CONN
+    if _SPOOL_CONN is not None:
+        return _SPOOL_CONN
+    p = Path(resolve_workspace_root()) / "ids.db"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p), timeout=10.0, check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout=10000")
+    reconcile_sqlite_modes(str(p))
+    _SPOOL_CONN = conn
+    return conn
+
+
+def _spool_dispatch_row(row: dict[str, Any]) -> None:
+    """Best-effort insert of one journal row into ids.db while Postgres is
+    down. Never raises — a spool failure still must not break a tool."""
+    try:
+        conn = _spool_conn()
+        conn.execute(_SPOOL_DDL)
+        conn.execute(
+            "INSERT INTO journal_spool (ts, payload) VALUES (?, ?)",
+            (time.time(), json.dumps(row, default=str)),
+        )
+        conn.commit()
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in _spool_dispatch_row", exc_info=True)
+
+
+def _flush_spool(conn) -> int:
+    """Replay spooled journal rows into Postgres (called on every fresh
+    connect and by ``flush_spool_now``). Bounded per call so one giant
+    outage backlog can't dominate the latency of the dispatch that finally
+    finds the lane up; the rest flushes on the next write's connect.
+
+    Poison-row handling: a row that fails twice (e.g. its engagement slug
+    was never registered — the arm-time registry upsert also degrades while
+    down, so the FK refuses) is parked as a journal error row instead of
+    wedging the queue head forever. A corrupt payload parks immediately.
+    Deletes the spool row only AFTER the PG commit (delete-then-crash would
+    lose the row; commit-then-no-delete just double-writes once).
+
+    Failure ordering note: a spooled row replayed with a stale ``ts`` keeps
+    its original wall-clock timestamp inside ``payload``-carried args, but
+    ``journal.entries.ts`` lands at replay time. That skew is accepted — the
+    alternative (client-side ts columns) the schema deliberately doesn't
+    carry (server-clock discipline, same as live writes).
+    """
+    try:
+        cur = conn.cursor()
+        rows = _spool_conn().execute(
+            "SELECT spool_id, payload, fail_count FROM journal_spool "
+            "ORDER BY spool_id LIMIT ?",
+            (_SPOOL_FLUSH_BATCH,),
+        ).fetchall()
+        if not rows:
+            return 0
+        replayed = 0
+        for spool_id, payload, fail_count in rows:
+            try:
+                row = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                cur.execute(_DISPATCH_INSERT_SQL, _SPOOL_PARK_ROW())
+                conn.commit()
+                _drop_spooled(spool_id)
+                replayed += 1
+                continue
+            try:
+                cur.execute(_DISPATCH_INSERT_SQL, _spool_args(row))
+                conn.commit()
+                _drop_spooled(spool_id)
+                replayed += 1
+            except Exception as replay_exc:
+                logging.getLogger(__name__).debug(
+                    "swallowed exception in _flush_spool replay", exc_info=True)
+                try:
+                    conn.rollback()
+                except Exception:
+                    logging.getLogger(__name__).debug(
+                        "swallowed rollback in _flush_spool replay", exc_info=True)
+                if fail_count >= 1:
+                    # second strike → poison-park into the journal itself
+                    try:
+                        cur.execute(
+                            _DISPATCH_INSERT_SQL,
+                            _park_row(row, f"spool replay failed twice: "
+                                           f"{replay_exc}"))
+                        conn.commit()
+                        _drop_spooled(spool_id)
+                        replayed += 1
+                    except Exception:
+                        logging.getLogger(__name__).debug(
+                            "swallowed park-into-journal in _flush_spool",
+                            exc_info=True)
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            logging.getLogger(__name__).debug(
+                                "swallowed park rollback in _flush_spool",
+                                exc_info=True)
+                    continue
+                _bump_fail_count(spool_id)
+                break
+        return replayed
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in _flush_spool", exc_info=True)
+        try:
+            conn.rollback()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "swallowed rollback in _flush_spool", exc_info=True)
+        return 0
+
+
+def _bump_fail_count(spool_id: int) -> None:
+    """Record a failed replay attempt (poison-row budget: one free retry)."""
+    try:
+        _spool_conn().execute(
+            "UPDATE journal_spool SET fail_count = fail_count + 1 "
+            "WHERE spool_id = ?", (spool_id,))
+        _spool_conn().commit()
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in _bump_fail_count", exc_info=True)
+
+
+def _drop_spooled(spool_id: int) -> None:
+    """Delete a successfully replayed spool row (after the PG commit)."""
+    try:
+        _spool_conn().execute(
+            "DELETE FROM journal_spool WHERE spool_id = ?", (spool_id,))
+        _spool_conn().commit()
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in _drop_spooled", exc_info=True)
+
+
+def _park_row(row: dict[str, Any], why: str) -> list[Any]:
+    """A poisoned spool row parked into the journal as an honest error row:
+    the dispatch happened and was lost — that fact is itself a finding. The
+    FK-risky engagement slug is dropped (NULL) so the park always lands."""
+    base = {k: row.get(k) for k in _SPOOL_KEYS}
+    base["engagement"] = None
+    base["status"] = "error"
+    base["result_digest"] = (base.get("result_digest") or "")[:150]
+    base["result_digest"] = (base["result_digest"] + " | " if
+                             base["result_digest"] else "") + why
+    for _jsonb_key in ("args", "envelope_meta"):
+        if isinstance(base[_jsonb_key], (dict, list)):
+            base[_jsonb_key] = json.dumps(base[_jsonb_key], default=str)
+    return [base[k] for k in _SPOOL_KEYS]
+
+
+def _SPOOL_PARK_ROW() -> list[Any]:
+    """A parked envelope for a payload so corrupt it can't even be read —
+    the record that a dispatch existed is never silently dropped."""
+    return [
+        None, None, "journal_spool_corrupt", json.dumps(
+            {"error": "spool payload unparseable", "args": {}}),
+        None, None, "0", None, "error", None, None, None,
+        "spool row lost: payload unparseable", None,
+    ]
+
+
+def _spool_args(row: dict[str, Any]) -> list[Any]:
+    """Rebuild the INSERT parameter list from a spooled row dict, filling
+    None for any key a schema migration later added — spooled rows from an
+    older process must still replay (INSERT uses all columns explicitly).
+    The JSONB columns (args, envelope_meta) adapt as JSON STRINGS — a bare
+    dict would hit psycopg without the Json wrapper and fail the insert.
+    """
+    vals = {k: row.get(k) for k in _SPOOL_KEYS}
+    for _jsonb_key in ("args", "envelope_meta"):
+        if isinstance(vals[_jsonb_key], (dict, list)):
+            vals[_jsonb_key] = json.dumps(vals[_jsonb_key], default=str)
+    return [vals[k] for k in _SPOOL_KEYS]
 
 
 def _password_for(role: str) -> str:
@@ -396,6 +644,40 @@ def db_status() -> dict[str, Any]:
         "role": _DB["connected_as"] if connected else _lane_role(),
         "server": version,
         "backoff_window_s": _RECONNECT_BACKOFF_S,
+        "spooled_rows": spooled_count(),
         "armed_engagement": (current() or {}).get("slug"),
         "reason": None if connected else _DB.get("last_error"),
     }
+
+
+def spooled_count() -> int:
+    """Journal rows parked in ids.db waiting for the lane to come back.
+    Zero when the spool table is empty or ids.db is unreadable from here."""
+    try:
+        conn = _spool_conn()
+        row = conn.execute("SELECT COUNT(*) FROM journal_spool").fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "swallowed exception in spooled_count", exc_info=True)
+        return 0
+
+
+def flush_spool_now() -> dict[str, Any]:
+    """Operator/manual flush: reconnect (force through the backoff) and
+    replay everything currently spooled. The cached live connection also
+    works — force only bypasses the backoff window. connect() itself flushes
+    on a fresh connection, so the report is diffed from the backlog count,
+    not from the loop counter (which would miss the connect-time flush)."""
+    before = spooled_count()
+    conn = connect(force=True)
+    if conn is None:
+        return {"flushed": 0, "remaining": spooled_count(),
+                "reason": _DB.get("last_error") or "Postgres unavailable"}
+    while True:
+        n = _flush_spool(conn)
+        if n <= 0:
+            break
+    after = spooled_count()
+    return {"flushed": max(0, before - after), "remaining": after,
+            "reason": None}

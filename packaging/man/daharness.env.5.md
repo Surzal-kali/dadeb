@@ -30,10 +30,13 @@ a second loader:
    `override=True` for their authoritative-config semantics).
 
 Note the packaged tree carries no *env* file next to the tree — the units
-read the conffile; operator shells get the system-profile WORKSPACE_ROOT
-and BRAIN_SOCKET from **/etc/profile.d/daharness.sh**, which fills exactly
-those two knobs when the shell does not already carry them (the wrapper
-scripts source it for non-login invocations). A user-profile lane simply
+read the conffile; operator shells get the system-profile WORKSPACE_ROOT,
+BRAIN_SOCKET and DACUSTOMS_DIR from **/etc/profile.d/daharness.sh**, which fills
+exactly those three knobs when the shell does not already carry them (the wrapper
+scripts source it for non-login invocations). DACUSTOMS_DIR rides along so
+shell-launched lanes (REPL, JupyterLab kernels) agree with the
+EnvironmentFile-wired units on the customs root — without it, shell discovery
+minted no `dacustoms.*` tools while the Brain and gateway lanes saw them all. A user-profile lane simply
 exports its own values — they win. Seeing the service lane's state further
 requires the *daharness* group: the deb does **not** auto-enroll
 anyone (Docker pattern — the group is created but membership is the
@@ -51,15 +54,19 @@ System profile (package default; loaded in the systemd units via
 
     WORKSPACE_ROOT=/var/lib/daharness
     BRAIN_SOCKET=/run/daharness/brain.sock
+    DACUSTOMS_DIR=/var/lib/daharness/dacustoms
 
 User profile (optional; see /usr/share/doc/daharness/systemd-user):
 
     WORKSPACE_ROOT=$HOME/.local/state/daharness
     BRAIN_SOCKET=$XDG_RUNTIME_DIR/daharness/brain.sock
+    DACUSTOMS_DIR=$HOME/.dacustoms
 
-The two profile knobs MUST match across all participants (Brain, gateway,
+The three profile knobs MUST match across all participants (Brain, gateway,
 kernel, REPL) — choose at deployment, not per launch. Per-launch divergence
-splits session state across processes.
+splits session state across processes, and a DACUSTOMS_DIR divergence makes
+customs tools invisible from the diverged lane (differences show up as 0
+`dacustoms.*` manifests in discovery, not as an error).
 
 WORKSPACE_ROOT is STATE only. Tool discovery follows the code checkout
 (FRAMEWORK_ROOT — */usr/share/daharness* on the package), so

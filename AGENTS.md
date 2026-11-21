@@ -282,6 +282,22 @@ until the operator closes it (2026-10-19 design):
   owner function called lazily on journal writes. One database,
   schema-per-store keeps the cobweb pull a single transaction and backup a
   single `pg_dump`. Install with `pip install -e ".[db]"` (psycopg).
+  **Boot arming** (2026-11-21 boot-bug fix): `daharness-pg init` re-arms
+  `postgresql.service` when the distro preset left it disabled (Kali's
+  preset policy disables every unclaimed unit — a fresh install booted with
+  the autostarted cluster dead because the umbrella unit never ran).
+- **Journal spool** (2026-11-21): while Postgres is down, `write_dispatch`
+  rows park in the `journal_spool` table in `ids.db` (payload JSON +
+  fail_count) and `_flush_spool` replays them on the next successful
+  connect — no rows silently dropped by an outage. Poison-row discipline:
+  a row failing replay twice parks itself as an honest `journal_spool_*`
+  error row in the journal itself (engagement slug dropped — the arm-time
+  registry upsert also degrades while down, so its FK can legitimately
+  refuse), never wedging the queue head. The down-warning logs at most 3
+  times per outage then drops to debug; backoff window 300s (was 30s —
+  there is NO retry loop, the window is only bridged by real lane
+  consumers, so a 30s/attempt cadence on a dead cluster just burned a
+  4s connect budget on every dispatch).
 - **Journal** (`journal.entries`): one row per dispatch, stitched across
   lanes, written at the executor choke point (`execute_tool`, plus
   preflight rejects). Append-only by grants. **Residency decision

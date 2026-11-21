@@ -477,11 +477,22 @@ No `hash_crack` bare name — that was a stale curated alias for the
 deleted `run_hash_crack` wrapper. Kernel bare names: `john` (strips
 `run_` from `run_john`), `hashcat` (strips `run_` from `run_hashcat`),
 `john_status`, `john_show`, `hashcat_status`, `hashcat_show`,
-`suggest_crack_mode`.
+`suggest_crack_mode`, `cracker_backends`.
+
+Box note (2026-11-21, Pi-5-class aarch64 box): john here is the
+**jumbo** build (289 formats, raw-md5/nt/sha* available, CPU/OMP) — the
+primary cracker. hashcat is installed (v7.1.2) but has **no usable
+backend** (no GPU; the only OpenCL ICD is mesa/rusticl, which hashcat
+does not enumerate) — `run_hashcat` fails closed with a remediation
+pointing at `pocl-opencl-icd` + `cracker_backends()`. Older notes
+calling hashcat the primary cracker (RTX 3050 box) are retired; box
+claims in tool descriptions are periodically re-verified by
+`cracker_backends`.
 
 | tool_id | params | tags |
 |---|---|---|
 | `suggest_crack_mode` | `hash_string` (req) | `brute.crack` |
+| `cracker_backends` | — | `brute.crack` |
 | `run_john` | `hash_input` (req), `options` (""), `wordlist` ("") | `brute.crack` |
 | `john_status` | `job_id` (req) | `brute.crack` |
 | `john_show` | `hash_input` (req), `options` ("") | `brute.crack` |

@@ -21,6 +21,13 @@ target-mention queries indexed lookups.
 - Rows survive material expiry: each carries a tiny self-contained
   `result_digest` (status + key scalars); full payloads stay in scratch
   behind its own TTL.
+- **Outage spool** (2026-11-21): while Postgres is down, every dispatch row
+  parks in the `journal_spool` table in `ids.db` and flushes into
+  `journal.entries` on the next successful connect. The spine records the
+  outage rather than silently dropping everything it covered; `db_status()`
+  reports the backlog as `spooled_rows`. No background retry loop exists —
+  reconnects happen only on the next real lane consumer, and the
+  "Postgres unavailable" warning logs at most a few times per outage.
 - The single redaction: session `handle` args become `{"$sessref":
   session_id}` pointers.
 - **Residency rule**: args (including credential material: session_post

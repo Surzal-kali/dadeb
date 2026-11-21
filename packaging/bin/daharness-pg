@@ -19,8 +19,10 @@
 # only rolled when pg.env does not exist — rotate by moving the file aside
 # and re-running init), re-runs the bundle (roles are IF NOT EXISTS;
 # schemas/tables/functions are IF NOT EXISTS / stable REPLACE), then
-# rewrites pg.env from live state. Clusters created here are autostart:
-# after a reboot postgresql.service brings them up.
+# rewrites pg.env from live state. Clusters created here are autostart, and
+# init re-arms postgresql.service itself when the distro preset left it
+# disabled (Kali disables everything unclaimed — the live boot bug of
+# 2026-11-21), so after a reboot postgresql.service brings them up.
 #
 # HARNESS_DB_HOST in pg.env is the lane's client endpoint AND — on every
 # re-init — the bind the cluster opens: 0.0.0.0/::/'*' → listen '*' in a
@@ -49,9 +51,8 @@ daharness-pg — engagement-cobweb Postgres lane (optional; deb profile)
                         the cluster bind (+ pg_hba lane block for container
                         lanes); write /etc/daharness/pg.env
   daharness-pg start    start the 'daharness' cluster
-  daharness-pg stop     stop the 'daharness' cluster (journal lane degrades
-                        to SQLite stores — nothing is lost except PG-only
-                        rows written while down)
+  daharness-pg stop     stop the 'daharness' cluster (journal rows spool
+                        to ids.db while down, flush when it starts again)
   daharness-pg status   cluster + port + env-file state
 
 Run init/start/stop via sudo. Requires the postgresql server packages
@@ -207,6 +208,24 @@ cmd_init() {
 		echo "cluster ${MAJOR}/${CLUSTER} exists; ensuring it is running ..."
 		pg_ctlcluster "$MAJOR" "$CLUSTER" start 2>/dev/null || true
 	fi
+
+	# Fix the boot story (live bug 2026-11-21): pg_createcluster marks the
+	# cluster autostart, but autostart only means something while
+	# postgresql.service itself is ENABLED — Kali's preset policy
+	# (95-kali.preset) disables every service not explicitly re-enabled,
+	# so a fresh box boots with the umbrella unit off and the daharness
+	# cluster never comes up. The operator already opted in by running
+	# init; re-arming the unit here is the same authority init itself
+	# has. Idempotent; best-effort (no systemd on the lane → pg_ctlcluster
+	# start above still covers manual runs).
+	if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+		if ! systemctl is-enabled postgresql.service >/dev/null 2>&1; then
+			systemctl preset postgresql.service >/dev/null 2>&1 \
+				|| systemctl enable postgresql.service >/dev/null 2>&1 \
+				|| err "could not enable postgresql.service — the cluster will not auto-start at boot (sudo systemctl enable postgresql.service)"
+			echo "postgresql.service re-armed for boot (was disabled — Kali preset policy)"
+		fi
+	fi
 	export PGPORT="$PORT"
 
 	# pg_createcluster --start usually races its own readiness; wait briefly.
@@ -308,7 +327,8 @@ ${hint}
   lane knobs written to ${PG_ENV} (root:daharness 0640)
   restart the daharness units to pick them up:
     sudo systemctl restart daharness daharness-kernel
-  reboot-safe: the cluster is autostart (postgresql.service).
+  reboot-safe: the cluster is autostart (postgresql.service re-armed by
+    this init when it was disabled).
   probe (host lane):
     PGPASSWORD=\$(grep ^HARNESS_DB_PASSWORD_REPL ${PG_ENV} | cut -d= -f2) \\
       psql -h ${probe_host} -p ${PORT} -U repl_lane -d ${DBNAME} -c 'select 1'
@@ -328,7 +348,7 @@ cmd_stop() {
 	MAJOR=$(cluster_major)
 	[ -n "$MAJOR" ] || die "no '${CLUSTER}' cluster to stop"
 	pg_ctlcluster "$MAJOR" "$CLUSTER" stop
-	echo "cluster ${MAJOR}/${CLUSTER} stopped (journal lane falls back to SQLite stores)"
+	echo "cluster ${MAJOR}/${CLUSTER} stopped (journal rows spool to ids.db while the lane is down, and flush on next start)"
 }
 
 cmd_status() {

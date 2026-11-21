@@ -25,7 +25,10 @@ cluster cannot collide with msf's port.
   `pg_ctlcluster`, `psql`, `createdb`); absent tooling prints the exact
   **apt install postgresql** remediation and changes nothing;
 - creates and starts the dedicated cluster (autostart, so it returns
-  after reboots via *postgresql.service*);
+  after reboots via *postgresql.service* — which `init` re-arms when the
+  distro preset left it disabled; Kali's preset policy disables every
+  service not explicitly claimed, which was the live boot bug of
+  2026-11-21: the cluster was autostart but its umbrella unit never ran);
 - creates the `harness` database;
 - runs the shipped init bundle (roles + password ALTERs, schemas,
   SECURITY DEFINER `engagement.purge()`, operator registry ACL) from
@@ -60,17 +63,26 @@ passwords are 128-bit random hex minted at first init; **rotate** by
 moving pg.env aside, re-running `init`, and restarting the daharness
 units.
 
-Without the lane, `utils/engagement.py` degrades honestly (it logs once
-that Postgres is unavailable and journals stay on SQLite); lane role and
-host selection honor the HARNESS_DB_* environment knobs documented in
-*daharness.env*(5).
+While the lane is down (or `stop` is run), journal rows SPOOL to the
+`journal_spool` table in `ids.db` and flush into `journal.entries` on the
+next successful connect — the dispatch spine survives an outage instead of
+silently dropping everything it covered. `utils/engagement.py`
+`db_status()` reports the backlog as `spooled_rows`; a forced replay is
+`utils.engagement.flush_spool_now()`. The down-state warning logs at most
+three times per outage before dropping to debug level.
+
+Without the lane, `utils/engagement.py` degrades gracefully (the spool
+carries journal rows; evidence and findings already live on SQLite); lane
+role and host selection honor the HARNESS_DB_* environment knobs
+documented in *daharness.env*(5).
 
 # SUBCOMMANDS
 
 **init** — provision or repair the lane; requires root.
 
 **start** / **stop** — start/stop the dedicated cluster
-(*pg_ctlcluster*; requires root).
+(*pg_ctlcluster*; requires root). While stopped, journal rows spool to
+`ids.db` and flush when the cluster starts again.
 
 **status** — cluster presence, the wired bind (or the Debian loopback
 default), socket readiness on :5433, and whether pg.env is in place.

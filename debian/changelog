@@ -1,3 +1,45 @@
+daharness (0.2.0+pkg12) kali; urgency=medium
+
+  * Hash-cracker box-truth refresh + backend gate (newbox 2026-11-21).
+    The framework box is now a GPU-less aarch64 (Pi 5-class, 4 cores):
+    john is the JUMBO build (289 formats — the old "core-only, route
+    raw-md5 to hashcat" claims are retired; bare 32-hex still prefers
+    LM, pass --format explicitly), and hashcat v7.1.2 enumerates NO
+    compute backend (no GPU; the only OpenCL ICD is mesa/rusticl, which
+    hashcat does not publish devices through). payloads/hash_crack.py
+    box notes, suggest_crack_mode steering, and the run_hashcat/run_john
+    descriptions are rewritten to date; run_hashcat now FAILS CLOSED at
+    launch (before spawning anything) when `hashcat -I` reports no
+    devices, returning the honest envelope + pocl-opencl-icd remediation
+    instead of a job that dies at backend init. New tool
+    cracker_backends (brute.crack) probes hashcat backends + john flavor
+    live so the staleness class can't recur silently on the next box
+    move. hashcat_show is unchanged (--show needs no devices).
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 21 Nov 2026 07:40:00 -0700
+
+daharness (0.2.0+pkg11) kali; urgency=medium
+
+  * Engagement-Postgres boot arming + outage spool (2026-11-21 live bugs).
+    daharness-pg init now re-arms postgresql.service when the distro
+    preset left it disabled (Kali's preset policy disables every unclaimed
+    unit — a fresh deb booted with the autostarted daharness cluster dead,
+    because autostart only fires while the umbrella unit runs). Journal
+    spool: while Postgres is down, write_dispatch rows park in the
+    journal_spool table in ids.db (payload JSON + fail_count) and replay
+    on the next successful connect — no rows silently dropped by an
+    outage; rows failing replay twice park as honest journal_spool error
+    rows (engagement slug dropped, its registry upsert also degrades while
+    down so the FK can refuse) instead of wedging the queue head. The
+    down-warning logs at most 3 times per outage then drops to debug (was:
+    one INFO line per attempt, forever), and the reconnect window widened
+    30s -> 300s — there is no retry loop, the window is only bridged by
+    real lane consumers, so a 30s cadence on a dead cluster burned a
+    4s connect budget on every dispatch. db_status() reports spooled_rows;
+    utils.engagement.flush_spool_now() is the manual replay.
+
+ -- daharness packaging <vgreenwald@student.cnm.edu>  Fri, 21 Nov 2026 03:30:00 -0700
+
 daharness (0.2.0+pkg10) kali; urgency=medium
 
   * Cross-lane SQLite stores carry the group-rw open backstop: ids.db

@@ -27,7 +27,11 @@ verifies the Postgres server tooling exists
 postgresql\f[R] remediation and changes nothing;
 .IP \(bu 2
 creates and starts the dedicated cluster (autostart, so it returns after
-reboots via \f[I]postgresql.service\f[R]);
+reboots via \f[I]postgresql.service\f[R]\(emwhich
+\f[CR]init\f[R] re\-arms when the distro preset left it disabled;
+Kali\(cqs preset policy disables every service not explicitly claimed,
+which was the live boot bug of 2026\-11\-21: the cluster was autostart
+but its umbrella unit never ran);
 .IP \(bu 2
 creates the \f[CR]harness\f[R] database;
 .IP \(bu 2
@@ -71,15 +75,25 @@ Lane passwords are 128\-bit random hex minted at first init;
 \f[B]rotate\f[R] by moving pg.env aside, re\-running \f[CR]init\f[R],
 and restarting the daharness units.
 .PP
-Without the lane, \f[CR]utils/engagement.py\f[R] degrades honestly (it
-logs once that Postgres is unavailable and journals stay on SQLite);
-lane role and host selection honor the HARNESS_DB_* environment knobs
-documented in \f[I]daharness.env\f[R](5).
+While the lane is down (or \f[CR]stop\f[R] is run), journal rows SPOOL to
+the \f[CR]journal_spool\f[R] table in \f[CR]ids.db\f[R] and flush into
+\f[CR]journal.entries\f[R] on the next successful connect \(em the
+dispatch spine survives an outage instead of silently dropping
+everything it covered. \f[CR]db_status()\f[R] reports the backlog as
+\f[CR]spooled_rows\f[R]; a forced replay is
+\f[CR]utils.engagement.flush_spool_now()\f[R]. The down\-state warning
+logs at most three times per outage before dropping to debug level.
+.PP
+Without the lane, \f[CR]utils/engagement.py\f[R] degrades gracefully (the
+spool carries journal rows; evidence and findings already live on
+SQLite); lane role and host selection honor the HARNESS_DB_* environment
+knobs documented in \f[I]daharness.env\f[R](5).
 .SH SUBCOMMANDS
 \f[B]init\f[R] \(em provision or repair the lane; requires root.
 .PP
 \f[B]start\f[R] / \f[B]stop\f[R] \(em start/stop the dedicated cluster
-(\f[I]pg_ctlcluster\f[R]; requires root).
+(\f[I]pg_ctlcluster\f[R]; requires root). While stopped, journal rows
+spool to \f[CR]ids.db\f[R] and flush when the cluster starts again.
 .PP
 \f[B]status\f[R] \(em cluster presence, the wired bind (or the Debian
 loopback default), socket readiness on :5433, and whether pg.env is in

@@ -113,3 +113,37 @@ def test_client_probe_footer_uses_lane_port():
     # inline — the whole point is "never the libpq default :5432".
     assert "psql -h ${probe_host} -p ${PORT} -U repl_lane" in text
     assert "probe_host=127.0.0.1" in text   # loopback + '*' binds probe loopback
+
+
+def test_init_re_arms_postgresql_service():
+    """Boot-arming contract (2026-11-21 live bug): pg_createcluster marks
+    the cluster autostart, but autostart only fires while the umbrella
+    postgresql.service is ENABLED — Kali's preset policy disables every
+    unclaimed unit, so a fresh install booted with the cluster dead. init
+    must re-arm the unit (preset, enable as fallback) after ensuring the
+    cluster is up, guarded to systemd lanes only, and never fatal."""
+    text = _text()
+    lines = text.splitlines()
+    assert "if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then" in text, (
+        "the re-arm must be guarded to systemd lanes (best-effort, never fatal)")
+    assert "systemctl is-enabled postgresql.service" in text
+    assert "systemctl preset postgresql.service" in text, (
+        "preset first (honors the distro preset policy) — plain enable "
+        "would fight 95-kali.preset on every re-init")
+    assert "systemctl enable postgresql.service" in text, (
+        "enable as the fallback lane when preset is unavailable/refused")
+    # block must sit INSIDE cmd_init after the cluster-up step
+    line_of = lambda needle: next((n for n, l in enumerate(lines, 1)
+                                   if needle in l), None)
+    guard_line = line_of("-d /run/systemd/system")
+    cluster_line = line_of("ensuring it is running")
+    assert guard_line and cluster_line and cluster_line < guard_line
+
+
+def test_stop_banner_names_the_spool():
+    """stop's degrade message must describe the spool contract (rows park
+    in ids.db and flush on next start), not the retired 'nothing is lost'
+    story — while the lane is down rows DO survive, via the spool."""
+    text = _text()
+    assert "journal rows spool to ids.db" in text
+    assert "nothing is lost" not in text

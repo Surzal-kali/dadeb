@@ -8,22 +8,36 @@ launch/poll shape (nmap/ffuf/hydra/sqlmap) so a long crack never holds a
 secretary turn open:
 
 - :func:`run_john` / :func:`john_status` — john the Ripper,
-- :func:`run_hashcat` / :func:`hashcat_status` — hashcat (OpenCL/CUDA),
+- :func:`run_hashcat` / :func:`hashcat_status` — hashcat (OpenCL backends),
 - :func:`john_show` / :func:`hashcat_show` — blocking quick reads of the
   respective potfile (``john --show`` / ``hashcat --show``) after any run,
 - :func:`suggest_crack_mode` — maps a hash shape (same heuristics as
   ``crypto_kit.identify_hash``) to hashcat ``-m`` codes and john formats.
+- :func:`cracker_backends` — what's actually crackable on THIS box right
+  now (OpenCL devices vs CPU john), probed live.
 
-BOX REALITY (live-verified 2026-09-19, see ledger §2026-09-19): the
-binaries ARE installed (Debian apt). **hashcat is the primary cracker on
-this box**: v6.2.6 with an NVIDIA RTX 3050 Laptop GPU over CUDA 13.3 /
-OpenCL 3.0 (~32 MH/s raw-md5 on rockyou; salted md5crypt mode-500 also
-GPU-driven). The installed john is the **Debian classic build** — NO
-jumbo formats: raw-md5/nt/sha* refuse with "Unknown ciphertext format
-name requested" and ``--list=formats`` is "Unknown option". Use john for
-crypt(3)-class formats (md5crypt/bcrypt/LM) with auto-detect (omit
-``--format``); use run_hashcat for everything else. If a jumbo john lands
-later, these notes age out with a dated correction.
+BOX REALITY (re-verified live on-boot 2026-11-21; dated corrections
+supersede older notes — don't trust a docstring older than the box):
+binaries ARE installed via Debian apt. **john the Ripper is the primary
+cracker on this box**: JUMBO build (``1.9.0-jumbo-1``), full jumbo format
+list, CPU (4× aarch64, OMP + ASIMD). **hashcat (v7.1.2) has NO usable
+backend**: ``hashcat -I`` reports ``No devices found/left`` — there is no
+dedicated GPU (the previous box's RTX 3050 is gone; pre-2026-11 notes
+calling hashcat the primary cracker are stale), and the only installed
+OpenCL ICD is ``mesa-opencl-icd`` (rusticl, a software LVP hashcat does
+not enumerate). Forcing hashcat to slug through CPU would require a
+CPU-capable ICD (e.g. ``pocl-opencl-icd`` — apt candidate present, NOT
+installed) and even then a Pi-class CPU loses to jumbo john for most
+formats. Run ``cracker_backends()`` first when unsure; it resolves and
+dates all of this live.
+
+Format routing (live-verified 2026-11-21): the installed john is the
+**jumbo build** — the old CORE-only claims are retired. Raw MD5 / NT /
+SHA* formats ARE available to john here, so plain wordlist checks can go
+to ``run_john`` directly (``--format=raw-md5`` etc.). ``run_hashcat`` is
+kept for format parity (hash-mode routing, masks/rules via ``-a``) and
+becomes viable again the moment a backend appears —
+``cracker_backends()`` says which.
 
 BINARY PREFLIGHT (explicit, never worked around): both binaries are on
 this box (apt; see BOX REALITY above). ``_preflight`` still checks
@@ -76,17 +90,20 @@ _ROCKYOU_REL = "SecLists/Passwords/Leaked-Databases/rockyou.txt"
 _JOHN_TIMEOUT = float(os.getenv("JOHN_TIMEOUT", "3600"))
 _HASHCAT_TIMEOUT = float(os.getenv("HASHCAT_TIMEOUT", "3600"))
 
-# Live-verified 2026-09-19 through the Bridge: hashcat v6.2.6 + RTX 3050
-# (CUDA 13.3/OpenCL 3.0) cracked raw-md5 + salted md5crypt; the installed
-# john is Debian classic — no jumbo formats (raw-*/sha* refused, --list
-# unknown). Steering note surfaced by suggest_crack_mode.
+# Re-verified live on-boot 2026-11-21 (aarch64 Pi-5-class box): john is
+# JUMBO here (full format list, CPU/OMP) — the "core-only" claim from the
+# previous box retired. hashcat v7.1.2 enumerates NO backend: no dedicated
+# GPU, and the only ICD is mesa/rusticl (software LVP hashcat won't use).
+# Steering note surfaced by suggest_crack_mode and refreshed by
+# cracker_backends().
 _BOX_NOTE = (
-    "box note (live-verified 2026-09-19): john here is the Debian CLASSIC "
-    "build — no jumbo formats: raw-md5/nt/sha* refuse with 'Unknown "
-    "ciphertext format name requested' and --list=formats is 'Unknown "
-    "option'. Classic john auto-detects crypt(3)-class formats only "
-    "(md5crypt $1$, bcrypt $2*$, LM). Use run_hashcat for everything else "
-    "— GPU present (RTX 3050, CUDA 13.3/OpenCL 3.0; ~32 MH/s raw-md5)."
+    "box note (re-verified live 2026-11-21): john here is the JUMBO build "
+    "(raw-md5/nt/sha* available, CPU+OMP on 4x aarch64) — the primary "
+    "cracker on this box. hashcat v7.1.2 has NO usable backend: no GPU "
+    "and no CPU OpenCL ICD it can enumerate — run_hashcat will fail at "
+    "backend init ('No devices found/left') unless a CPU-capable ICD "
+    "(pocl-opencl-icd et al) is installed. Use run_john for all cracking; "
+    "cracker_backends() re-checks this live."
 )
 
 
@@ -280,9 +297,9 @@ def _suggest_for(hash_string: str) -> tuple[list[str], list[str], str]:
             ["0 (raw MD5)", "1000 (NTLM) — ambiguous on shape alone"],
             ["raw-md5", "nt"],
             "32-hex is ambiguous: raw MD5 vs NTLM — pick by hash source "
-            "(Windows dumps = NT). Box reality: john here is CORE — bare "
-            "32-hex auto-detects as LM; route raw MD5/NTLM to run_hashcat "
-            "(-m 0 / -m 1000, GPU).",
+            "(Windows dumps = NT). Box reality (2026-11-21): john here is "
+            "JUMBO — both raw-md5 and nt work via run_john --format; "
+            "run_hashcat cannot help (no OpenCL backend on this box).",
         )
     if len(s) == 40 and re.fullmatch(r"[0-9a-fA-F]+", s):
         return (["100 (raw SHA1)"], ["raw-sha1"], "")
@@ -314,6 +331,144 @@ def suggest_crack_mode(hash_string: str) -> dict[str, Any]:
         or "pass the mode verbatim to run_hashcat (-m) or the format to "
         "run_john (--format=...)",
         "box_note": _BOX_NOTE,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Live backend/capability probe (re-checks the box claims at call time)
+# --------------------------------------------------------------------------- #
+
+def _probe_hashcat_backends() -> dict[str, Any]:
+    """hashcat's own view of its compute backends (``-I --machine-readable``).
+
+    Parsed generically across versions (v6 prints ``OpenCL.Info`` /
+    ``CUDA.Info`` section headers; v7 prints ``Backend.*`` sections) so the
+    probe stays correct if the box's hashcat is upgraded in place.
+    """
+    binp = _preflight("HASHCAT_BIN", "hashcat", _HASHCAT_CANDIDATES)
+    if not binp:
+        return {
+            "available": False,
+            "error": "binary 'hashcat' not found "
+                     "(checked $HASHCAT_BIN, PATH, standard install paths)",
+        }
+    try:
+        proc = subprocess.run(
+            [binp, "-I", "--machine-readable"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return {"available": False,
+                "error": "hashcat -I timed out after 30s"}
+    except FileNotFoundError:
+        return {"available": False, "error": f"hashcat vanished at {binp}"}
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    devices: list[str] = []
+    kinds: set[str] = set()
+    for line in text.splitlines():
+        s = line.strip()
+        # Device-name lines across hashcat versions: v6 prints
+        # "OpenCL.Info #1 / Device.Name #1: <name>"; v7 prints
+        # "Backend.Device.Name #1: <name>". Match any *.Device.Name line
+        # (not CUDA/OpenCL section headers themselves).
+        if re.match(r"^([a-z0-9.]+\.)?device\.name\b", s, re.IGNORECASE):
+            devices.append(s.split(":", 1)[1].strip() if ":" in s else "")
+        if re.match(r"^CUDA\.(Info|Platform)", s, re.IGNORECASE):
+            kinds.add("CUDA")
+        elif re.search(r"opencl", s, re.IGNORECASE) and re.search(r"(info|platform)", s, re.IGNORECASE):
+            kinds.add("OpenCL")
+    version = (re.search(r"\bv?(\d+\.\d+(?:\.\d+)?)", text) or [None, None])[1]
+    if not version:
+        # v7 -I --machine-readable suppresses the banner; -V always answers.
+        try:
+            vp = subprocess.run(
+                [binp, "-V"], capture_output=True, text=True, timeout=15,
+            )
+            version = (vp.stdout or vp.stderr or "").strip() or None
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            version = None
+    return {
+        "available": bool(devices),
+        "error": None if devices
+        else ("no backend devices — hashcat cannot crack (OpenCL/CUDA "
+              "init finds nothing); typical fix: install a CPU-capable "
+              "ICD (apt install pocl-opencl-icd — needs a real GPU or "
+              "an ICD that publishes CPU devices) or rely on john"),
+        "version": version,
+        "backend_kinds": sorted(kinds),
+        "devices": devices[:24],
+    }
+
+
+def _probe_john_formats() -> dict[str, Any]:
+    """john build flavor + a trimmed format list (first 60 formats)."""
+    binp = _preflight("JOHN_BIN", "john", _JOHN_CANDIDATES)
+    if not binp:
+        return {
+            "available": False,
+            "error": "binary 'john' not found "
+                     "(checked $JOHN_BIN, PATH, standard install paths)",
+        }
+    try:
+        probe = subprocess.run(
+            [binp, "--list=formats"], capture_output=True, text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return {"available": False, "error": "john --list=formats timed out"}
+    except FileNotFoundError:
+        return {"available": False, "error": f"john vanished at {binp}"}
+    if probe.returncode != 0:
+        # core john: --list=formats unsupported; the classic build name and
+        # the crypt(3)-class formats still hold.
+        return {"available": True, "flavor": "classic",
+                "jumbo": False,
+                "error": ("--list=formats is not supported — Debian CORE "
+                          "john (crypt(3)-class auto-detect only)")}
+    fmts: list[str] = []
+    for line in (probe.stdout or "").splitlines():
+        for tok in line.split():
+            if tok != "and":
+                fmts.append(tok.rstrip(","))
+    try:
+        ver = subprocess.run(
+            [binp], capture_output=True, text=True, timeout=20
+        )
+        m = re.search(r"John the Ripper (\S+)", (ver.stdout or "") + (ver.stderr or ""))
+        version = m.group(1) if m else None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        version = None
+    jumbo = bool(version and "jumbo" in version.lower()) or any(
+        f in fmts for f in ("raw-md5", "Raw-MD5", "raw-sha1", "Raw-SHA1")
+    )
+    return {
+        "available": True,
+        "error": None,
+        "version": version,
+        "flavor": "jumbo" if jumbo else "classic",
+        "jumbo": jumbo,
+        "formats": fmts[:60],
+        "format_count": len(fmts),
+    }
+
+
+@framework_tool(
+    "Live probe of THIS box's cracking capability: runs 'hashcat -I' and "
+    "'john --list=formats' and reports whether hashcat has usable compute "
+    "backends (GPU/CPU OpenCL) and whether john is classic-core or jumbo "
+    "(raw-md5/nt/sha* available). Call this if box claims in other tools' "
+    "notes look stale or before choosing run_hashcat vs run_john.",
+    tags=["brute.crack"],
+)
+def cracker_backends() -> dict[str, Any]:
+    """Probe hashcat backends + john build (offline, <40s)."""
+    return {
+        "status": "Success",
+        "cracker_backends": {
+            "hashcat": _probe_hashcat_backends(),
+            "john": _probe_john_formats(),
+        },
+        "note": _BOX_NOTE,
     }
 
 
@@ -386,9 +541,8 @@ def run_john(
         if wl:
             extra.append(f"--wordlist={wl}")
     command = [binp, *extra, hashfile]
-    # 32-hex shape note: this john build auto-detects LM (two halves) for
-    # bare 32-hex input — usually NOT what a dump wants (raw MD5/NTLM, not
-    # in this john; hashcat handles them on GPU).
+    # 32-hex shape note: with no explicit --format john prefers LM (two
+    # halves → slow descrypt paths) for bare 32-hex input on this build.
     note = None
     stripped = (hash_input or "").strip()
     if (
@@ -398,10 +552,11 @@ def run_john(
         )
     ):
         note = (
-            "32-hex input with no --format: john auto-detects LM (2 "
-            "halves), NOT raw-MD5. For raw MD5/NTLM use run_hashcat "
-            "(-m 0 / -m 1000, GPU on this box), or pass explicit "
-            "options with --format."
+            "32-hex input with no --format: john prefers LM (2 halves), "
+            "NOT raw-MD5. Pass --format=raw-md5 (or nt/SHA1) explicitly "
+            "here — this john is JUMBO so those formats are available "
+            "(run_hashcat is not a fallback on this box: no OpenCL "
+            "backend)."
         )
     result = _launch_hash_crack(
         command,
@@ -509,11 +664,13 @@ register_verdict_parser("hashcat", _parse_hashcat)
     "(dictionary) on a hash file + wordlist (defaults to rockyou; skipped "
     "when -a 3 mask mode is set), extra options passthrough (e.g. "
     "'-a 3 ?u?l?l?l?l?d?d', '-r rules/best64.rule'). Returns a job_id; "
-    "poll hashcat_status(job_id), then hashcat_show. Live-verified on this "
-    "box: v6.2.6 driving an RTX 3050 Laptop GPU over CUDA/OpenCL — this "
-    "is the primary cracker here (raw + salted-fast formats). If OpenCL "
-    "init ever fails, fall back to run_john (classic, crypt formats).",
-    next_hints=["hashcat_status", "hashcat_show", "suggest_crack_mode"],
+    "poll hashcat_status(job_id), then hashcat_show. Box check first: "
+    "hashcat needs usable compute backends (GPU or a CPU-capable OpenCL "
+    "ICD) — cracker_backends() probes this live. On boxes with no GPU and "
+    "no CPU ICD it fails at backend init ('No devices found/left'); run_john "
+    "is the reliable CPU cracker there.",
+    next_hints=["hashcat_status", "hashcat_show", "suggest_crack_mode",
+                "cracker_backends"],
 )
 def run_hashcat(
     hash_input: str,
@@ -543,7 +700,26 @@ def run_hashcat(
                 "/usr/bin, /usr/local/bin, /opt/hashcat). Install hashcat "
                 "plus an OpenCL runtime (e.g. apt install hashcat "
                 "pocl-opencl-icd) or set HASHCAT_BIN in .env; no reindex "
-                "needed after install. CPU-only reliability: run_john."
+                "needed after install. CPU-only box: run_john."
+            ),
+        }
+    backends = _probe_hashcat_backends()
+    if not backends.get("available"):
+        return {
+            "status": "Failed",
+            "error": (
+                "hashcat has no usable compute backend on this box — "
+                f"{backends.get('error') or 'no OpenCL/CUDA devices'}"
+            ),
+            "cracker_backends": {
+                "hashcat": backends,
+                "john": _probe_john_formats(),
+            },
+            "note": (
+                "run_john is the reliable cracker here (CPU, "
+                "auto-detects crypt formats; JUMBO builds also cover "
+                "raw-md5/nt/sha*). cracker_backends() re-checks hashcat "
+                "device availability."
             ),
         }
     try:
@@ -632,6 +808,7 @@ def hashcat_show(hash_input: str, mode: int) -> dict[str, Any]:
 
 __all__ = [
     "suggest_crack_mode",
+    "cracker_backends",
     "run_john",
     "john_status",
     "john_show",

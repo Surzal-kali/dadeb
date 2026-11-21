@@ -209,6 +209,18 @@ group-readable state-root path (`/var/lib/daharness/dacustoms`). An operator
 who keeps customs in `$HOME` sets `DACUSTOMS_DIR` in both their shell and
 `daharness.env` — both lanes agree on the path.
 
+Shell-launched lanes get that pin from `/etc/profile.d/daharness.sh` too
+(2026-11-21): the profile script carries `DACUSTOMS_DIR` out of the conffile
+alongside `WORKSPACE_ROOT`/`BRAIN_SOCKET`, with the same guarded semantics
+(a value already in the shell wins). Before it rode along, the units saw
+customs via `EnvironmentFile` while the operator shell resolved the
+`~/.dacustoms` fallback — discovery minted 0 `dacustoms.*` manifests from the
+REPL for modules that were indexed, Brain-dispatchable, and registered. The
+doctor's customs check reports the split-brain as
+`customs dir <fallback> does not exist`; a missing `DACUSTOMS_DIR` in a shell
+that should carry it is `grep DACUSTOMS /etc/daharness/daharness.env` +
+re-login (or `daharness-repl`, which sources the profile for non-login runs).
+
 `framework_doctor(provider='customs')` is the readiness check: it traces the
 full finder registration chain (`finder_status()`), then `ast.parse`s every
 `.py` in the customs dir for syntax errors — zero execution, per the

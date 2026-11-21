@@ -152,6 +152,7 @@ TOOL_TAGS: dict[str, tuple[str, ...]] = {
     "payloads.searchsploiting.search_exploit": ("exploit.msf",),
     # --- brute.crack -----------------------------------------------------------
     "payloads.hash_crack.suggest_crack_mode": ("brute.crack",),
+    "payloads.hash_crack.cracker_backends": ("brute.crack",),
     "payloads.hash_crack.run_john": ("brute.crack",),
     "payloads.hash_crack.john_status": ("brute.crack",),
     "payloads.hash_crack.john_show": ("brute.crack",),

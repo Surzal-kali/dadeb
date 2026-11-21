@@ -127,12 +127,41 @@ def write_dispatch(
     envelope_meta: dict[str, Any] | None = None,
 ) -> int | None:
     """Insert one dispatch row. Returns the entry_id, or None when skipped
-    (Postgres down, unarmed+unregistered, or write failure — all silent).
+    (write failure, or unarmed+unregistered — both silent).
 
     ``status``: ok|error|timeout|budget_exhausted. Never raises.
+
+    Down-lane behavior (journal spool, 2026-11-21): while Postgres is
+    unreachable, the row is parked in ids.db's ``journal_spool`` table and
+    flushed by the next successful connect — the dispatch spine records
+    the outage instead of silently dropping everything it covered.
     """
     conn = engagement.connect()
     if conn is None:
+        # Spool the full write-intent so the next connect replays it — but
+        # ONLY when the driver exists (lane opted in, cluster transiently
+        # down). A never-installed psycopg would otherwise spool every row
+        # forever into ids.db under dead weight: skipping IS the honest
+        # degrade there, as before.
+        if engagement._db_spool_eligible():
+            engagement._spool_dispatch_row({
+                "engagement": engagement.current_slug(),
+                "lane": lane,
+                "tool_id": tool_id,
+                "args": _redact_args(args or {}, str(session_id)),
+                "scope_verdict": scope_verdict,
+                "approval_path": approval_path,
+                "agent_id": str(((envelope_meta or {}).get("identity") or {})
+                                .get("agent_id") or "0"),
+                "agent_provenance": ((envelope_meta or {}).get("identity") or {})
+                                    .get("provenance"),
+                "status": status,
+                "duration_s": duration_s,
+                "result_mode": result_mode,
+                "scratch_ref": scratch_ref,
+                "result_digest": result_digest(result) if result is not None else None,
+                "envelope_meta": envelope_meta,
+            })
         return None
 
     engagement_slug = engagement.current_slug()

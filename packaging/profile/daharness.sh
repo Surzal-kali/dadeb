@@ -25,6 +25,19 @@ if [ -r "$_dh_conf" ]; then
         BRAIN_SOCKET=$(sed -n 's/^BRAIN_SOCKET=//p' "$_dh_conf" | tail -n1 | tr -d '"')
         [ -n "$BRAIN_SOCKET" ] && export BRAIN_SOCKET
     fi
+    # DACUSTOMS_DIR joins the carried set so every shell-launched lane (REPL,
+    # JupyterLab kernels, ad-hoc python) agrees with the systemd lanes on the
+    # customs root. This is exactly the split-brain constants.py:dacustoms_dir()
+    # warns about: the units get the pin via EnvironmentFile, the operator shell
+    # resolved the ~/.dacustoms fallback, discovery minted 0 dacustoms.* tools
+    # and the REPL saw no customs while the Brain/gateway lanes saw them all
+    # (live 2026-11-21: obs/diary tools indexed, Brain-dispatchable, invisible
+    # from the REPL). Empty value still disables the lane in constants.py —
+    # only a real path is exported; an operator override in their shell wins.
+    if [ -z "${DACUSTOMS_DIR:-}" ]; then
+        DACUSTOMS_DIR=$(sed -n 's/^DACUSTOMS_DIR=//p' "$_dh_conf" | tail -n1 | tr -d '"')
+        [ -n "$DACUSTOMS_DIR" ] && export DACUSTOMS_DIR
+    fi
 fi
 unset _dh_conf
 # Lane DB credentials: engagement.py's defaults are the init bundle's
