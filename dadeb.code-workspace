@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../dadev"
+		},
+		{
+			"path": "../../../var/lib/daharness/dacustoms"
+		},
+		{
+			"path": "../../../dadev/jupyterhome/work/dabooks"
+		}
+	]
+}
