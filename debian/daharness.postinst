@@ -261,6 +261,39 @@ if ! python3 -c "import mcp, pymetasploit3" 2>/dev/null; then
         echo "  /mcp degrades to a 503 until both exist; apt install python3-pip, then see above."
     fi
 fi
+
+# Engagement-Postgres driver lane (2026-11-20): psycopg is Suggests-only, so
+# a fresh deb with postgresql installed still journals NOTHING — the whole
+# daemon (gateway REST + /mcp + Brain sidecar) ran without the driver and
+# every gateway/MCP-lane journal row was silently dropped while the kernel
+# lane (own interpreter, own psycopg) kept writing (observed live:
+# journal.entries was 100% repl_lane, and diary_schema_status answered
+# "Postgres unavailable" from the gateway lane with the CLUSTER healthy).
+# Vendored psycopg is deliberately the PURE wheel (no psycopg-binary): its
+# wheels' C extensions carry a per-interpreter cp-tag, and one tag-mismatched
+# .so in vendor/ flips the sitecustomize compat gate off entirely — the mcp
+# closure would unarm with it. Pure psycopg binds libpq through ctypes at
+# runtime; libpq5 is already present here (postgresql is installed on this
+# lane) and stays a hard req of the cluster lane. Order matters: run AFTER
+# the mcp block, skip when apt already provides the driver.
+if ! python3 -c "import psycopg" 2>/dev/null \
+    && ! PYTHONPATH="$VENDOR_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -c "import psycopg" 2>/dev/null; then
+    if python3 -m pip --version >/dev/null 2>&1; then
+        mkdir -p "$VENDOR_DIR" 2>/dev/null || true
+        if python3 -m pip install --no-cache-dir --target "$VENDOR_DIR" \
+            'psycopg==3.2.12' >/dev/null 2>&1; then
+            echo "daharness: vendored psycopg (pure, ctypes libpq) into $VENDOR_DIR — engagement/journal lane armed"
+        else
+            echo "daharness: WARNING vendored psycopg install failed (offline or no PyPI route?)"
+            echo "  the engagement/journal DB lane stays off until the driver exists:"
+            echo "  apt install python3-psycopg, or python3 -m pip install --target $VENDOR_DIR 'psycopg==3.2.12'"
+        fi
+    else
+        echo "daharness: python3-pip absent and psycopg not importable"
+        echo "  engagement/journal DB lane stays off; apt install python3-pip python3-psycopg"
+    fi
+fi
 unset VENDOR_DIR
 
 # ChromaDB retirement (2026-10-23): chromadb was removed entirely — the

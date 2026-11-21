@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS journal.entries (
     entry_id    BIGSERIAL PRIMARY KEY,
     ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
     engagement  TEXT REFERENCES engagement.engagements(slug),
-    lane        TEXT NOT NULL DEFAULT 'unknown',   -- gateway|repl|kernel|brain|mcp
+    lane        TEXT NOT NULL DEFAULT 'unknown',   -- which PROCESS ran the body: gateway|mcp|brain|repl|kernel|... (per-process role suffix: gateway_lane/mcp_lane/brain_lane/repl_lane)
     tool_id     TEXT NOT NULL,
     args        JSONB NOT NULL DEFAULT '{}'::jsonb, -- material tier: secrets stay (scrubbing is a mid-engage self-own), 24h TTL applies, purge wipes
     scope_verdict TEXT,

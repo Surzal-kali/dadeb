@@ -284,7 +284,8 @@ def _stub_registry_with_record(recorder):
                 },
             )()
 
-        async def execute_tool(self, manifest, arguments, *, session_id="0", agent_identity=None):
+        async def execute_tool(self, manifest, arguments, *, session_id="0",
+                               agent_identity=None, journal_lane=None):
             recorder.append({"manifest": manifest, "arguments": arguments, "session_id": session_id})
             return {"status": "ok", "result": {"echo": arguments}}
 
@@ -345,7 +346,8 @@ class _StubRegistry:
             },
         )()
 
-    async def execute_tool(self, manifest, arguments, *, session_id="0", agent_identity=None):
+    async def execute_tool(self, manifest, arguments, *, session_id="0",
+                           agent_identity=None, journal_lane=None):
         self.calls.append({"session_id": session_id, "agent_identity": agent_identity})
         return {"status": "ok", "result": {"echo": arguments.get("msg")}}
 

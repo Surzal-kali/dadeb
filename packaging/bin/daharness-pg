@@ -257,6 +257,7 @@ cmd_init() {
 	run_sql "$INIT_DIR/002_schemas.sql" || die "002_schemas.sql failed"
 	run_sql "$INIT_DIR/003_functions.sql" || die "003_functions.sql failed"
 	run_sql "$INIT_DIR/004_operator_registry_acl.sql" || die "004_operator_registry_acl.sql failed"
+	run_sql "$INIT_DIR/005_stream_diary.sql" || die "005_stream_diary.sql failed"
 
 	umask 027
 	{

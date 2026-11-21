@@ -1203,6 +1203,11 @@ class APIGateway:
                     result = await self.tool_registry.execute_tool(
                         manifest, tool_args, session_id=session_id,
                         agent_identity=(session_id, identity_provenance),
+                        # Journal attribution: the /mcp route is its own lane
+                        # distinct from the REST /tools/execute route sharing
+                        # this process (gateway_lane). Socket-side Brain
+                        # execution overrides this from _EXECUTED_LANE.
+                        journal_lane="mcp_lane",
                     )
                     # Result projection (same as REST path).  Default is
                     # ``large`` — capped passthrough, not unbounded ``full``.

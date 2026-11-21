@@ -128,6 +128,7 @@ _DB: dict[str, Any] = {
     "down_until": 0.0,     # monotonic — skip attempts while inside the window
     "connected_as": None,  # lane role name of the cached connection
     "warned": False,       # one-time absence warning
+    "last_error": None,    # human-readable why-not-connected, for db_status()
 }
 
 _INFERRED_LANE: str | None = None
@@ -235,6 +236,10 @@ def connect(*, role: str | None = None, force: bool = False):
                 "lane disabled (pip install 'psycopg[binary]' to enable)"
             )
         _DB["down_until"] = now + _RECONNECT_BACKOFF_S
+        _DB["last_error"] = (
+            "psycopg driver not importable on this lane "
+            "(pip install 'psycopg[binary]' or apt install python3-psycopg)"
+        )
         return None
 
     user = role
@@ -266,11 +271,16 @@ def connect(*, role: str | None = None, force: bool = False):
             )
         _DB["down_until"] = now + _RECONNECT_BACKOFF_S
         _DB["conn"] = None
+        _DB["last_error"] = (
+            f"cannot reach the lane's Postgres on {port} "
+            f"(tried {', '.join(_host_candidates())}): {last_exc}"
+        )
         return None
 
     _DB["conn"] = conn
     _DB["connected_as"] = role
     _DB["down_until"] = 0.0
+    _DB["last_error"] = None
     return conn
 
 
@@ -367,7 +377,9 @@ def sweep() -> int:
 
 def db_status() -> dict[str, Any]:
     """Diagnostics for framework_doctor / REPL: is the lane connected, as
-    which role, and what's armed."""
+    which role, and what's armed. ``reason`` explains a False ``connected``
+    (driver absent vs cluster unreachable) so the operator fixes the right
+    half of the lane instead of re-arming passwords that already match."""
     conn = connect()
     connected = False
     version = None
@@ -385,4 +397,5 @@ def db_status() -> dict[str, Any]:
         "server": version,
         "backoff_window_s": _RECONNECT_BACKOFF_S,
         "armed_engagement": (current() or {}).get("slug"),
+        "reason": None if connected else _DB.get("last_error"),
     }

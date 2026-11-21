@@ -100,6 +100,7 @@ override_dh_auto_install:
 		packaging/postgres/init/002_schemas.sql \
 		packaging/postgres/init/003_functions.sql \
 		packaging/postgres/init/004_operator_registry_acl.sql \
+		packaging/postgres/init/005_stream_diary.sql \
 		debian/daharness/usr/share/daharness/postgres/init/
 	# daharness-pg.1 is picked up by the packaging/man/*.1 glob in
 	# debian/daharness.manpages

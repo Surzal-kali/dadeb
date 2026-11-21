@@ -7,6 +7,7 @@ client (they build a bare instance via ``__new__``).
 """
 
 import asyncio
+import contextvars
 import functools
 import importlib
 import inspect
@@ -30,6 +31,22 @@ from utils.agent_identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ─── Journal lane attribution ────────────────────────────────────────────────
+# ``journal.entries.lane`` states which PROCESS executed the tool body, not
+# which process dispatched it. The two differ on every BRAIN_DISPATCH /
+# MCP_RPC call that ran socket-side: the tool body ran on the Brain sidecar
+# (``brain_lane``) while the dispatching executor lives in the gateway, the
+# REPL, or a kernel. Without this stamp every socket-side row was attributed
+# to the caller's own lane (e.g. everything journal-visible read ``repl_lane``
+# because the gateway lane's rows were being dropped on a missing driver —
+# the Brain was invisible in the spine). Set around the socket-side branch of
+# ``_execute_brain_tool``; ``_journal_dispatch`` consumes + resets it (one-shot
+# read, so a consumer that never journals leaves the token for its finally —
+# the token-based reset here is the journaling path only).
+_EXECUTED_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "daharness_executed_lane", default=""
+)
 
 
 # Byte-identical local framing for Brain dispatch when listeners.thebrain
@@ -66,6 +83,7 @@ class ExecutorMixin:
     async def execute_tool(
         self, manifest: ToolManifest, arguments: dict, *, session_id: str = "0",
         agent_identity: "tuple[str, str] | None" = None,
+        journal_lane: str | None = None,
     ):
         manifest = self._ensure_valid_manifest(manifest)
 
@@ -82,6 +100,12 @@ class ExecutorMixin:
         # already-minted id here minted a SECOND anon id — the executor
         # ran as a different identity than the gateway reported, splitting
         # rows from the id the client adopted (2026-10-30 code review).
+        #
+        # ``journal_lane`` overrides journal attribution at the call site —
+        # for when one process hosts several journal-visible lanes (the
+        # gateway process serves both REST -> gateway_lane and /mcp ->
+        # mcp_lane). The executed-lane contextvar below still wins: it was
+        # set by the dispatch layer that actually RAN the tool.
         from utils.agent_identity import resolve_agent_id
         if agent_identity is not None:
             resolved_agent_id, agent_provenance = agent_identity
@@ -93,6 +117,7 @@ class ExecutorMixin:
                 manifest, arguments, session_id=session_id,
                 resolved_agent_id=resolved_agent_id,
                 agent_provenance=agent_provenance,
+                journal_lane=journal_lane,
             )
         finally:
             reset_current_agent_id(_agent_token)
@@ -106,6 +131,7 @@ class ExecutorMixin:
     async def _execute_tool_inner(
         self, manifest: ToolManifest, arguments: dict, *,
         session_id: str, resolved_agent_id: str, agent_provenance: str,
+        journal_lane: str | None = None,
     ) -> dict:
         manifest = self._ensure_valid_manifest(manifest)
 
@@ -166,7 +192,8 @@ class ExecutorMixin:
         # form for continuity with legacy readers.
         self._journal_dispatch(manifest, arguments, result, status, duration_s, session_id,
                                resolved_agent_id=resolved_agent_id,
-                               agent_provenance=agent_provenance)
+                               agent_provenance=agent_provenance,
+                               journal_lane=journal_lane)
         return result
 
     async def _dispatch_by_transport(self, manifest: ToolManifest, arguments: dict, session_id: str):
@@ -196,12 +223,32 @@ class ExecutorMixin:
         raise ValueError(f"Unsupported transport type: {manifest.transport}")
 
     def _journal_dispatch(self, manifest, arguments, result, status, duration_s, session_id,
-                          resolved_agent_id=None, agent_provenance=None):
+                          resolved_agent_id=None, agent_provenance=None,
+                          journal_lane=None):
         """Append one row to the engagement journal (best-effort, never
-        raises — the journal is additive and must not affect dispatch)."""
+        raises — the journal is additive and must not affect dispatch).
+
+        Lane attribution, most specific wins:
+          1. socket-side Brain execution (``_EXECUTED_LANE`` = ``brain_lane``,
+             set around the socket branch of ``_execute_brain_tool``) — the
+             tool BODY ran in the Brain sidecar, whatever process dispatched;
+          2. ``journal_lane`` — the call-site label when one process fronts
+             several lanes (the gateway process serves REST -> gateway_lane
+             and /mcp -> mcp_lane);
+          3. the dispatching process's own role (``lane_name()``) — the
+             in-process fallback and LOCAL_FILE transports.
+        """
         try:
             from utils.journal import write_dispatch
             from utils.engagement import lane_name
+            executed = _EXECUTED_LANE.get("")
+            if executed:
+                lane = executed
+                _EXECUTED_LANE.set("")  # one-shot: never leaks to the next dispatch
+            elif journal_lane:
+                lane = journal_lane
+            else:
+                lane = lane_name()
             identity_meta = (
                 {"agent_id": resolved_agent_id, "provenance": agent_provenance}
                 if resolved_agent_id is not None else None
@@ -209,7 +256,7 @@ class ExecutorMixin:
             write_dispatch(
                 tool_id=manifest.module_id,
                 status=status,
-                lane=lane_name(),
+                lane=lane,
                 args=arguments,
                 session_id=str(session_id),
                 duration_s=duration_s,
@@ -332,6 +379,12 @@ class ExecutorMixin:
             tool_id, arguments, session_id=session_id
         )
         if brain_result is not None:
+            # The tool BODY ran in the Brain sidecar process — stamp journal
+            # attribution accordingly. The token is consumed + reset by
+            # _journal_dispatch (one-shot read); _execute_tool_inner always
+            # journals after dispatch, including on the failure path, so the
+            # stamp never leaks into a later dispatch of the same task.
+            _EXECUTED_LANE.set("brain_lane")
             return brain_result
 
         logger.info(
@@ -743,9 +796,14 @@ def _new_registry():
     return registry
 
 
-async def execute_tool(manifest: ToolManifest, arguments: dict, *, session_id: str = "0"):
+async def execute_tool(
+    manifest: ToolManifest, arguments: dict, *, session_id: str = "0",
+    journal_lane: str | None = None,
+):
     """Execute a manifest without creating a vector store client."""
-    return await _new_registry().execute_tool(manifest, arguments, session_id=session_id)
+    return await _new_registry().execute_tool(
+        manifest, arguments, session_id=session_id, journal_lane=journal_lane
+    )
 
 
 async def execute_local_script(script_path: str, arguments: dict):
