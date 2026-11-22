@@ -46,6 +46,14 @@ caller supplies one — the lane is a plain authenticated browser session,
 not a fingerprint exercise. The envelope's ``ua_applied`` field reports
 what went out.
 
+HEADERS: ``headers`` is tolerant of the shapes every lane produces — a dict,
+a list of (name, value) pairs, or a raw ``"Host: vhost\\nX-A: 1"`` block
+(verbatim or JSON-encoded). A ``Host`` header override travels on the wire
+exactly as given (vhost-gated targets): nothing re-derives it from the URL,
+whose host stays the network destination. Passing headers as a string that
+parses as neither JSON nor a header block is a clean ValueError rejection,
+never an AttributeError mid-dispatch.
+
 Blocking by design (sync ``requests`` through the gated hop loop); the
 Brain dispatchers run sync tools in worker threads, per the framework's
 blocking-calls convention.
@@ -53,7 +61,9 @@ blocking-calls convention.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -67,19 +77,70 @@ from utils.scope_gate import ScopeGateError
 _TOKEN_SCAN_LIMIT = 262144  # extract tokens from at most this much body
 
 
+def _normalize_header_pairs(value: Any) -> dict[str, str]:
+    """Normalize any requests-shaped header container to a flat dict.
+
+    Accepts: dict, list/tuple of (name, value) pairs, "Header: value\\n"
+    raw-request blocks, "K1: v1, K2: v2" strings, and JSON objects encoded
+    as strings — the shapes the gateway/MCP/REPL lanes actually hand the
+    web-session tools when the model crafts a Host-header override.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return {
+            str(p[0]): str(p[1])
+            for p in value
+            if isinstance(p, (list, tuple)) and len(p) == 2
+        }
+    if isinstance(value, str):
+        v = value.strip()
+        if not v:
+            return {}
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items()}
+            if isinstance(parsed, list):
+                return _normalize_header_pairs(parsed)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # "Host: vhost\nX-A: 1" (or with comma/semicolon separators) — the
+        # raw-request header-block form the model copies out of a Burp unit.
+        if ":" in v:
+            out: dict[str, str] = {}
+            for ln in re.split(r"[\n;,]+", v):
+                if ":" in ln:
+                    k, _, val = ln.partition(":")
+                    k, val = k.strip(), val.strip()
+                    if k:
+                        out[k] = val
+            return out
+        raise ValueError(
+            "headers must be a dict/object or 'Header: value' lines, got "
+            f"{value[:80]!r}"
+        )
+    raise ValueError(f"headers must be a dict/object, got {type(value).__name__}")
+
+
 def _merge_headers(
     base: dict[str, str] | None,
     extra: dict[str, str] | None,
 ) -> dict[str, str]:
     """Request headers: the caller's supply, last-wins. No UA is forced
     here — requests' own default UA goes on the wire when the caller
-    supplies none."""
-    merged: dict[str, str] = {}
-    if base:
-        merged.update({str(k): str(v) for k, v in base.items()})
-    if extra:
-        merged.update({str(k): str(v) for k, v in extra.items()})
-    return merged
+    supplies none.
+
+    Tolerates the arg shapes every lane can produce (dict, pair-list,
+    "Header: value" text, JSON-as-string) instead of dying on
+    ``AttributeError: 'str' object has no attribute 'items'`` the first
+    time a model crafts a Host-header override as anything but a dict.
+    """
+    headers = _normalize_header_pairs(base)
+    headers.update(_normalize_header_pairs(extra))
+    return headers
 
 
 def _host_of(url: str) -> str:
@@ -331,7 +392,8 @@ def session_get(
             body stays bounded by this; token extraction scans deeper
             internally).
         follow_redirects: Follow 3xx hops (default) or return the 3xx.
-        headers: Extra request headers (dict). The library's own User-Agent
+        headers: Request headers, same shapes as session_request (dict,
+            pair list, "Header: value" block). The library's own User-Agent
             travels on the wire unless you pass headers={'User-Agent': ...}.
     """
     return _do_session_request(
@@ -389,7 +451,8 @@ def session_post(
         body_limit: Characters of body returned as ``body_head``.
         follow_redirects: Follow the post-login 302 (default) — set False
             to inspect the raw 3xx.
-        headers: Extra request headers (dict). The library's own User-Agent
+        headers: Request headers, same shapes as session_request (dict,
+            pair list, "Header: value" block). The library's own User-Agent
             travels on the wire unless you pass headers={'User-Agent': ...}.
     """
     return _do_session_request(
@@ -435,7 +498,11 @@ def session_request(
         timeout: Per-request read timeout, seconds.
         body_limit: Characters of body returned as ``body_head``.
         follow_redirects: Follow 3xx hops (default true).
-        headers: Extra request headers (dict) — e.g. Authorization bearer.
+        headers: Request headers. A dict (``{"Host": "vhost.local"}``), a
+            list of (name, value) pairs, an HTTP header block string
+            (``"Host: vhost.local\nX-A: 1"``), or the same block JSON-encoded.
+            Host overrides travel verbatim (vhost-gated targets) — no
+            re-derivation from the URL.
     """
     return _do_session_request(
         method, url,
@@ -512,7 +579,8 @@ def session_upload(
         body_limit: Characters of body to return as ``body_head``.
         follow_redirects: Follow the post-upload 3xx (default) or inspect
             the raw redirect.
-        headers: Extra request headers (dict). The library's own User-Agent
+        headers: Request headers, same shapes as session_request (dict,
+            pair list, "Header: value" block). The library's own User-Agent
             travels on the wire unless you pass headers={'User-Agent': ...}.
     """
     import hashlib

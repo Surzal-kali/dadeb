@@ -270,6 +270,11 @@ def _coerce_arg_value(name: str, value: Any, schema_type: str) -> Any:
     if schema_type == "object":
         if isinstance(value, dict):
             return value
+        if isinstance(value, list):
+            # requests' native headers shape: a list of (name, value) pairs.
+            # Pairs of pairs collapse to their first element (dup headers are
+            # undefined in HTTP/1.1 semantics, last-value wins in requests).
+            return {str(p[0]): str(p[1]) for p in value if len(p) == 2}
         if isinstance(value, str):
             v = value.strip()
             if not v:
@@ -277,16 +282,25 @@ def _coerce_arg_value(name: str, value: Any, schema_type: str) -> Any:
             try:
                 parsed = json.loads(v)
             except json.JSONDecodeError as e:
+                # The gateway/REPL lanes stringify dicts through str() — a
+                # Python repr with single quotes, which json.loads refuses.
+                # Those strings never decode as-is; refuse with a message
+                # that names the shape instead of burying it in a TypeError
+                # inside the tool body.
                 raise ValueError(
                     f"argument '{name}' must be an object/dict, got a string that "
                     f"isn't valid JSON: {e}. Pass the dict directly, e.g. "
                     f"\"{name}\": {{\"RHOSTS\": \"10.10.10.50\"}}, NOT as a JSON-encoded string."
                 )
-            if not isinstance(parsed, dict):
-                raise ValueError(
-                    f"argument '{name}' must be an object/dict, got JSON {type(parsed).__name__}: {parsed!r}"
-                )
-            return parsed
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list) and parsed and all(
+                isinstance(p, (list, tuple)) and len(p) == 2 for p in parsed
+            ):
+                return {str(p[0]): str(p[1]) for p in parsed}
+            raise ValueError(
+                f"argument '{name}' must be an object/dict, got JSON {type(parsed).__name__}: {parsed!r}"
+            )
         raise ValueError(f"argument '{name}' must be an object/dict, got {type(value).__name__}")
 
     return value
