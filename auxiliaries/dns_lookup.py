@@ -133,9 +133,14 @@ def _resolve_one(hostname: str, timeout: float) -> dict[str, Any]:
     "CNAME chain chased) so the OPERATOR can bless the IPs into the armed "
     "scope with 'scope add-ip' in the Tool REPL, and so models have bare "
     "IPs for tools that need IP-shaped arguments (packetcraft, masscan, "
-    "raw_scan). Passive public-DNS data only — the target is never "
-    "contacted; deliberately NOT scope-gated because it exists to feed "
-    "the scope workflow. Never writes scope state itself.",
+    "raw_scan). Queries PUBLIC DNS (dnspython, /etc/resolv.conf resolvers) "
+    "and NEVER consults /etc/hosts — a lab name that exists only in "
+    "/etc/hosts reads as 'no records' here; use "
+    "dacustoms.hosts_dns.hosts_dns_lookup for hosts-file-aware resolution. "
+    "This tool keeps the lanes hosts_dns lacks: CNAME-chain chasing and "
+    "ptr_lookup for reverse DNS. Passive public-DNS data only — the target "
+    "is never contacted; deliberately NOT scope-gated because it exists to "
+    "feed the scope workflow. Never writes scope state itself.",
     next_hints=["probe_web", "run_nmap", "run_masscan", "check_scope"],
 )
 def resolve_host(
