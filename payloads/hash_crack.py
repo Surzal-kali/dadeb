@@ -16,20 +16,23 @@ secretary turn open:
 - :func:`cracker_backends` — what's actually crackable on THIS box right
   now (OpenCL devices vs CPU john), probed live.
 
-BOX REALITY (re-verified live on-boot 2026-11-21; dated corrections
+BOX REALITY (re-verified live on-boot 2026-11-24; dated corrections
 supersede older notes — don't trust a docstring older than the box):
 binaries ARE installed via Debian apt. **john the Ripper is the primary
-cracker on this box**: JUMBO build (``1.9.0-jumbo-1``), full jumbo format
-list, CPU (4× aarch64, OMP + ASIMD). **hashcat (v7.1.2) has NO usable
-backend**: ``hashcat -I`` reports ``No devices found/left`` — there is no
+cracker on this box for throughput**: JUMBO build (``1.9.0-jumbo-1``),
+full jumbo format list, CPU (4× aarch64, OMP + ASIMD). **hashcat
+(v7.1.2) has a usable CPU backend since the PoCL install**:
+``pocl-opencl-icd`` is in and ``hashcat -I`` enumerates the PoCL CPU
+device, so ``run_hashcat`` works — reach for it when a job needs what
+john's jumbo CLI lacks (mask/rule-scale ``-a 3``/``-a 1`` syntax, tuned
+``-m`` routing, hashcat-format sample files); on this Pi-class CPU it is
+not faster than john for most formats, so john stays the default. No
 dedicated GPU (the previous box's RTX 3050 is gone; pre-2026-11 notes
-calling hashcat the primary cracker are stale), and the only installed
-OpenCL ICD is ``mesa-opencl-icd`` (rusticl, a software LVP hashcat does
-not enumerate). Forcing hashcat to slug through CPU would require a
-CPU-capable ICD (e.g. ``pocl-opencl-icd`` — apt candidate present, NOT
-installed) and even then a Pi-class CPU loses to jumbo john for most
-formats. Run ``cracker_backends()`` first when unsure; it resolves and
-dates all of this live.
+calling hashcat the primary cracker are stale — and pre-2026-11-24
+"hashcat has no backend" notes are stale too: they predate the PoCL
+install, and the probe parser silently mis-read v7's one-line
+machine-readable JSON until fixed 2026-11-24). Run ``cracker_backends()``
+first when unsure; it resolves and dates all of this live.
 
 Format routing (live-verified 2026-11-21): the installed john is the
 **jumbo build** — the old CORE-only claims are retired. Raw MD5 / NT /
@@ -68,6 +71,8 @@ as ``crypto_kit``); engagement data cannot egress through these tools.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import shlex
@@ -90,20 +95,22 @@ _ROCKYOU_REL = "SecLists/Passwords/Leaked-Databases/rockyou.txt"
 _JOHN_TIMEOUT = float(os.getenv("JOHN_TIMEOUT", "3600"))
 _HASHCAT_TIMEOUT = float(os.getenv("HASHCAT_TIMEOUT", "3600"))
 
-# Re-verified live on-boot 2026-11-21 (aarch64 Pi-5-class box): john is
+# Re-verified live on-boot 2026-11-24 (aarch64 Pi-5-class box): john is
 # JUMBO here (full format list, CPU/OMP) — the "core-only" claim from the
-# previous box retired. hashcat v7.1.2 enumerates NO backend: no dedicated
-# GPU, and the only ICD is mesa/rusticl (software LVP hashcat won't use).
+# previous box retired. hashcat v7.1.2 enumerates the PoCL CPU backend
+# (pocl-opencl-icd installed) — Pi-class CPU throughput still favors john,
+# but run_hashcat works and covers mask/rule-scale syntax john's CLI lacks.
 # Steering note surfaced by suggest_crack_mode and refreshed by
 # cracker_backends().
 _BOX_NOTE = (
-    "box note (re-verified live 2026-11-21): john here is the JUMBO build "
+    "box note (re-verified live 2026-11-24): john here is the JUMBO build "
     "(raw-md5/nt/sha* available, CPU+OMP on 4x aarch64) — the primary "
-    "cracker on this box. hashcat v7.1.2 has NO usable backend: no GPU "
-    "and no CPU OpenCL ICD it can enumerate — run_hashcat will fail at "
-    "backend init ('No devices found/left') unless a CPU-capable ICD "
-    "(pocl-opencl-icd et al) is installed. Use run_john for all cracking; "
-    "cracker_backends() re-checks this live."
+    "cracker on this box for throughput. hashcat v7.1.2 ALSO has a usable "
+    "backend now (pocl-opencl-icd installed, PoCL CPU OpenCL device "
+    "enumerated) — run_hashcat works; reach for it when a job needs mask/"
+    "rule-scale -a 3/-a 1 syntax or tuned -m routing, but on this Pi-class "
+    "CPU it is generally not faster than john. cracker_backends() "
+    "re-checks this live."
 )
 
 
@@ -365,6 +372,36 @@ def _probe_hashcat_backends() -> dict[str, Any]:
     text = (proc.stdout or "") + "\n" + (proc.stderr or "")
     devices: list[str] = []
     kinds: set[str] = set()
+    # v7 emits one line of machine-readable JSON:
+    #   { "OpenCLInfo": { "Platforms": [ { "BackendDevices": [ ... ] } ] } }
+    # (v6 table probes emitted section headers like "OpenCL.Info #1" and
+    # per-device lines — handled by the line scan below).
+    for segment in text.splitlines():
+        segment = segment.strip()
+        if not segment.startswith("{") or not segment.endswith("}"):
+            continue
+        try:
+            mr = json.loads(segment)
+        except json.JSONDecodeError:
+            logging.getLogger(__name__).debug(
+                "hashcat -I --machine-readable emitted non-JSON braces "
+                "segment; falling back to line parsing", exc_info=True)
+            continue
+        if isinstance(mr, dict) and "OpenCLInfo" in mr:
+            kinds.add("OpenCL")
+        if isinstance(mr, dict) and "CUDAInfo" in mr:
+            kinds.add("CUDA")
+        stack: list[Any] = [mr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                dev_id = node.get("DeviceID")
+                name = node.get("Name")
+                if dev_id is not None and isinstance(name, str):
+                    devices.append(name)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
     for line in text.splitlines():
         s = line.strip()
         # Device-name lines across hashcat versions: v6 prints
@@ -377,14 +414,24 @@ def _probe_hashcat_backends() -> dict[str, Any]:
             kinds.add("CUDA")
         elif re.search(r"opencl", s, re.IGNORECASE) and re.search(r"(info|platform)", s, re.IGNORECASE):
             kinds.add("OpenCL")
-    version = (re.search(r"\bv?(\d+\.\d+(?:\.\d+)?)", text) or [None, None])[1]
+    devices = list(dict.fromkeys(devices))
+    # The banner (``hashcat (v7.1.2) starting ...``) is the only reliable
+    # version source here: naive in-text matches grab OpenCL/driver strings
+    # (``OpenCL 3.0``, ``7.1+debian``) instead of hashcat's own version.
+    version = None
+    m = re.search(r"\bhashcat\s+\(v?(\d+\.\d+(?:\.\d+)?)\)", text)
+    if m:
+        version = m.group(1)
     if not version:
-        # v7 -I --machine-readable suppresses the banner; -V always answers.
+        # v7 -I --machine-readable suppresses the banner; -V always answers
+        # (prints "v7.1.2" — the v is stripped so both paths agree).
         try:
             vp = subprocess.run(
                 [binp, "-V"], capture_output=True, text=True, timeout=15,
             )
-            version = (vp.stdout or vp.stderr or "").strip() or None
+            vtext = (vp.stdout or "") + "\n" + (vp.stderr or "")
+            vm = re.search(r"\bv?(\d+\.\d+(?:\.\d+)?)", vtext)
+            version = vm.group(1) if vm else vtext.strip() or None
         except (subprocess.TimeoutExpired, FileNotFoundError):
             version = None
     return {

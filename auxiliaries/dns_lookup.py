@@ -92,7 +92,8 @@ def _socket_resolve(name: str) -> list[dict[str, Any]]:
     return out
 
 
-def _resolve_one(hostname: str, timeout: float) -> dict[str, Any]:
+
+def _resolve_one(hostname: str, timeout:float) -> dict[str, Any]:
     name = _validate_hostname(hostname)
     records: dict[str, list[dict[str, Any]]] = {}
     try:
