@@ -13,8 +13,8 @@ The injection surface is r2 itself, not bash: radare2's ``-c`` parser splits
 on ``;`` and newlines, so a crafted ``addr`` could chain a second r2
 command.  We defeat this with four independent layers:
 
-1. **Exact allowlist match** on ``command`` — only the 19 frozen verbs are
-   accepted (20th slot reserved).  No substring, no prefix match.
+1. **Exact allowlist match** on ``command`` — only the 25 frozen verbs are
+   accepted.  No substring, no prefix match.
 2. **Forbidden-character scan** on every free-text input (``command``,
    ``addr``): rejects `` ! ` $ > | & ; " '`` and newline.  These are the
    characters that matter to r2's ``-c`` parser and to a shell.
@@ -36,7 +36,12 @@ One-shot shape
 --------------
 ::
 
-    r2 -q -e scr.color=0 -e scr.utf8=0 -c 'aaa; <cmd> [<count>] [@ <addr>]' <tmpcopy>
+    r2 -q -e scr.color=0 -e scr.utf8=0 -e bin.relocs.apply=true -c 'aaa; <cmd> [<count>] [@ <addr>]' <tmpcopy>
+
+``bin.relocs.apply=true`` is on unconditionally (measured 2026-11-24):
+without it every run on a linked ELF prints ``WARN: Relocs has not been
+applied`` on stderr, and reloc-sensitive commands see unresolved GOT/PLT
+slots; with it the WARN is gone and relocs are applied.
 
 A fresh r2 process is spawned per call: no session state, no seek/write
 persistence between calls.  ``aaa`` (full analysis) is always prepended as
@@ -100,12 +105,24 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Frozen command table — schema-verified against radare2 6.2.1 on production.
-# 19 slots filled; the 20th is held open for a practice-found gap.
-# Each entry: verb -> (needs_addr, needs_count, count_cap, blurb)
+# 25 slots filled (2026-11-24 expansion: /R, axg, agf, ic, ie, aae approved
+# by the operator).  Each entry:
+#   verb -> (needs_addr, needs_count, count_cap, blurb)
 # ---------------------------------------------------------------------------
+
+# Verbs whose free-text segment accepts a single-token argument appended
+# AFTER the verb (composed as "verb filter", never reachable from a shell —
+# argv list, and the filter charset has no metacharacters).  /R is the first
+# consumer: bare /R on a fat binary returns thousands of gadgets, so the
+# model filters with a gadget-name token (e.g. "pop", "ret") instead of
+# sifting.  The filter rides the FILTERABLE check + the shared flag charset,
+# NOT the free command string — spaces can never sneak in that way.
+_FILTERABLE_COMMANDS: frozenset[str] = frozenset({"/R"})
+
 _COMMAND_TABLE: dict[str, tuple[bool, bool, int, str]] = {
     # --- analysis / function discovery ---
     "aaa": (False, False, 0, "full analysis (always prepended as opener)"),
+    "aae": (False, False, 0, "emulated analysis (esil): resolve computed xrefs/pointers plain analysis misses — no code executes on the host"),
     "afl": (False, False, 0, "list discovered functions"),
     "af":  (True,  False, 0, "targeted function analysis at addr"),
     "afi": (True,  False, 0, "function info: addr/size/bbs/args"),
@@ -113,6 +130,7 @@ _COMMAND_TABLE: dict[str, tuple[bool, bool, int, str]] = {
     "iI":  (False, False, 0, "binary info: arch, format, PIE/canary/NX"),
     "iS":  (False, False, 0, "sections"),
     "iE":  (False, False, 0, "exports"),
+    "ie":  (True,  False, 0, "entrypoints incl. TLS callbacks (distinct from iE=exports)"),
     "ii":  (False, False, 0, "imports"),
     "is":  (False, False, 0, "symbols"),
     "iR":  (False, False, 0, "relocations / ASLR"),
@@ -124,12 +142,19 @@ _COMMAND_TABLE: dict[str, tuple[bool, bool, int, str]] = {
     "pdg": (True,  False, 0, "r2ghidra decompile at addr (no asm fluency needed)"),
     "pd":  (True,  True,  512, "fixed-N disassembly at addr"),
     "px":  (True,  True,  1024, "hexdump at addr"),
-    # --- cross-references ---
+    # --- cross-references / graph ---
     "axt": (True,  False, 0, "xrefs TO addr (what calls/references this)"),
     "axf": (True,  False, 0, "xrefs FROM addr (what this calls/references)"),
+    "axg": (True,  False, 0, "global call graph at addr (who reaches this function, transitively)"),
+    "agf": (True,  False, 0, "basic-block CFG graph at addr (ASCII; works without r2ghidra)"),
+    # --- class/struct (C++/vtable work) ---
+    "ic":  (False, False, 0, "class listing (C++ classes / vtables)"),
+    # --- pwn ---
+    "/R":  (False, False, 0, "ROP gadget discovery (filterable: pass a single gadget token like 'pop' via the filter param)"),
     # --- string-at-addr ---
     "ps":  (True,  False, 0, "print string at addr (pairs with axt-on-strings)"),
-    # slot 20: reserved for a practice-found gap
+    # slots 20+ : originally reserved for a practice-found gap; the 2026-11-24
+    # expansion filled it (aae/axg/agf/ic/ie//R) per operator approval.
 }
 
 ALLOWED_COMMANDS: tuple[str, ...] = tuple(_COMMAND_TABLE.keys())
@@ -458,16 +483,50 @@ def _validate_count(count: Any, cap: int) -> tuple[int | None, str | None]:
     return (n, None)
 
 
+def _validate_filter(command: str, filt: str | None) -> tuple[str | None, str | None]:
+    """Validate the optional free-token ``filter`` for FILTERABLE verbs.
+
+    Returns ``(normalized_filter, error_msg)``.  Only single-token gadget
+    names pass: the strict flag charset (shared with symbol names — no
+    whitespace, shell metachars, or r2 ``-c`` structure chars can ever
+    appear).  A space is the exact failure mode this exists to prevent —
+    the composed verb segment stays one token wide, and r2 treats the
+    remainder of the filter as the gadget NAME it prints, not a second
+    command (and we never emit a ``;`` for it anyway).
+    """
+    if filt is None or filt == "":
+        return (None, None)
+    # Forbidden-char scan first so the charset message can be specific.
+    err = _check_forbidden(filt, "filter")
+    if err:
+        return (None, err)
+    if command not in _FILTERABLE_COMMANDS:
+        return (
+            None,
+            f"command {command!r} does not accept a filter (filterable verbs: "
+            f"{', '.join(sorted(_FILTERABLE_COMMANDS))}); rejected",
+        )
+    if not _ADDR_FLAG_RE.match(filt):
+        return (
+            None,
+            f"filter {filt!r} must be a single gadget token ([A-Za-z0-9_.-]+, "
+            f"no spaces — filter one gadget word at a time, e.g. 'pop'); "
+            f"rejected",
+        )
+    return (filt, None)
+
+
 # ---------------------------------------------------------------------------
 # Command composition
 # ---------------------------------------------------------------------------
-def _compose_cmd(command: str, addr: str | None, count: int | None) -> str:
+def _compose_cmd(command: str, addr: str | None, count: int | None,
+                 filt: str | None = None) -> str:
     """Build the r2 ``-c`` string from validated pieces.
 
     The tool owns the ``;`` (chaining ``aaa``) and the ``@`` (seek).  User
     input never contributes either character.  Shape::
 
-        aaa; <verb> [<count>] [@ <addr>]
+        aaa; <verb> [<count>] [@ <addr>]      (FILTERABLE verbs: <verb> <filter> [@ <addr>])
     """
     needs_addr, needs_count, _, _ = _COMMAND_TABLE[command]
     # Build the user-command segment, then append the seek modifier to THAT
@@ -475,10 +534,25 @@ def _compose_cmd(command: str, addr: str | None, count: int | None) -> str:
     # command, so it must NOT be joined with "; " (which would yield
     # "aaa; pdf; @ main" and make r2 run a bare "pdf" with no seek).
     cmd_str = command
-    if needs_count and count is not None:
+    if filt and command in _FILTERABLE_COMMANDS:
+        # Validated single token; appended directly to the verb so r2 parses
+        # it as the gadget-list argument of /R (its documented usage is
+        # '/R pop rdi' style — we keep it single-token for context budget).
+        cmd_str = f"{command} {filt}"
+    elif needs_count and count is not None:
         cmd_str = f"{command} {count}"
-    if needs_addr and addr:
+    # Seek composition: mandatory for needs_addr verbs, but still honored
+    # when the model passes an addr on a verb that doesn't require one
+    # (e.g. a filtered /R starting from a specific address).
+    if addr and (needs_addr or command in _FILTERABLE_COMMANDS):
         cmd_str = f"{cmd_str} @ {addr}"
+    if command == "aae":
+        # aae is a SESSION mutation — its resolved xrefs die with the
+        # one-shot process unless read back in the SAME run.  Composite:
+        # run aae, then list the xref DB so the emulation's additions are
+        # IN BAND (measured 2026-11-24: axl alone 89 lines, aae;axl 110 —
+        # the +21 delta is what emulation added).
+        return f"aaa; aae; axl"
     return f"aaa; {cmd_str}"
 
 
@@ -526,6 +600,23 @@ def _hints_for(command: str, output: str) -> list[str]:
         hints.append("axt @ <import plt addr> to find callers of an import")
     elif command == "ps":
         hints.append("axt @ <addr> to find what references this string")
+    elif command == "/R":
+        hints.append("re-run with filt=<single token> to cut the list (x86: 'pop'/'ret'/'syscall'; arm64: 'ret'/'ldp'/'blr' — 'pop' does not exist as an arm64 mnemonic, so a 0-gadget answer there is correct, not a failure)")
+        hints.append("iI first to confirm arch/NX/canary/PIE before building a chain")
+        hints.append("report_finding to record the gadget offsets you intend to chain")
+    elif command == "aae":
+        hints.append("axt @ <target addr> on a follow-up call to see callers of a specific function (emulated xrefs die with this run — they are NOT persisted)")
+        hints.append("pdf @ <addr> to read the code an emulated xref row came from")
+    elif command == "axg":
+        hints.append("pdf @ <caller addr> to inspect a transitive caller")
+        hints.append("axt @ <addr> for direct two-hop xrefs instead")
+    elif command == "agf":
+        hints.append("pdf @ <addr> for line-level disassembly of a block")
+        hints.append("pdg @ <addr> for decompiled pseudocode (if r2ghidra available)")
+    elif command == "ic":
+        hints.append("afl to find the methods inside a listed class")
+    elif command == "ie":
+        hints.append("pdf @ entry0 to disassemble the entrypoint")
     hints.append("report_finding to record a discovered artifact")
     return hints
 
@@ -603,16 +694,19 @@ def _run_r2_digest(result: dict[str, Any]) -> dict[str, Any]:
 
 @framework_tool(
     "Static binary analysis with radare2: disassemble, decompile (r2ghidra), "
-    "enumerate symbols/imports/exports/sections/strings, and query cross-"
-    "references against an ELF/PE/Mach-O binary. One composite tool — pass a "
-    "command verb from the allowlist (aaa, afl, afi, af, iI, iS, iE, ii, is, "
-    "iR, iz, izz, pdf, pdg, pd, px, axt, axf, ps) plus an optional addr "
-    "(hex int like 0x401000 or flag name like sym.main) and optional count "
-    "(for pd/px). Runs read-only against a temp copy of the binary; analysis "
-    "(aaa) is always prepended. Oversized output is head+tail-truncated to "
-    "a 32 KiB default cap (R2_OUTPUT_CAP env) with an omission marker and "
-    "stated policy — narrow with addr/count or a targeted verb instead of "
-    "raising the cap.",
+    "enumerate symbols/imports/exports/sections/strings/classes, query cross-"
+    "references and call graphs, discover ROP gadgets (/R), and run esil "
+    "emulated analysis (aae) against an ELF/PE/Mach-O binary. One composite "
+    "tool — pass a command verb from the allowlist (aaa, aae, afl, afi, af, "
+    "iI, iS, iE, ie, ii, is, iR, iz, izz, pdf, pdg, pd, px, axt, axf, axg, "
+    "agf, ic, /R, ps) plus an optional addr (hex int like 0x401000 or flag "
+    "name like sym.main), optional count (for pd/px), and — for /R only — an "
+    "optional filter token (single gadget word like 'pop' to cut the gadget "
+    "list to size). Runs read-only against a temp copy of the binary; "
+    "analysis (aaa) is always prepended. Oversized output is head+tail-"
+    "truncated to a 32 KiB default cap (R2_OUTPUT_CAP env) with an omission "
+    "marker and stated policy — narrow with addr/count/filter or a targeted "
+    "verb instead of raising the cap.",
     next_hints=["report_finding"],
     result_digest=lambda r: _run_r2_digest(r),
     untrusted_target=True,
@@ -622,6 +716,7 @@ def run_r2(
     command: str,
     addr: str | None = None,
     count: int | None = None,
+    filt: str | None = None,
     cache: bool = True,
     refresh: bool = False,
 ) -> dict[str, Any]:
@@ -649,10 +744,15 @@ def run_r2(
         addr: Optional target address — hex integer (``0x401000``) or
             flag/symbol name (``sym.main``, ``entry0``).  Required for
             commands marked as needing an addr in the table (pdf, pdg, pd,
-            px, afi, af, axt, axf, ps); ignored for metadata commands.
+            px, afi, af, axt, axf, axg, agf, ie, ps); ignored for metadata
+            commands.
         count: Optional integer for ``pd`` (instruction count, capped at
             512) and ``px`` (byte count, capped at 1024).  Ignored by other
             commands.
+        filt: Optional single-token gadget filter for ``/R`` only — a bare
+            gadget word like ``pop`` or ``ret`` (charset: A-Za-z0-9_.-).
+            Bare ``/R`` on a fat binary floods the output cap; the filter
+            pulls only matching gadgets.  One token per call.
         cache: Use the snapshot cache (read on repeat, write on success).
             False skips both — a fresh r2 run, nothing stored.
         refresh: Force a real r2 run even if a snapshot exists, and
@@ -713,6 +813,11 @@ def run_r2(
     if needs_count and count_val is None:
         count_val = 16 if command == "pd" else 64  # sensible defaults
 
+    # --- Layer 3b: filter validation (FILTERABLE verbs only) ---
+    filt_val, ferr = _validate_filter(command, filt)
+    if ferr:
+        return _err_envelope(target, command, ferr)
+
     # --- r2ghidra preflight for pdg ---
     ghidra_ok = _r2ghidra_available()
     if command in _R2GHIDRA_COMMANDS and not ghidra_ok:
@@ -759,6 +864,7 @@ def run_r2(
                 "verb": command,
                 "addr": addr or "",
                 "count": count_val,
+                "filter": filt_val or "",
                 "r2ghidra": ghidra_ok,
                 "output_cap": _OUTPUT_CAP,
                 "timeout": _R2_TIMEOUT,
@@ -788,7 +894,7 @@ def run_r2(
             logger.debug("[r2] snapshot lookup skipped: %s", exc)
 
     # --- compose the -c string from validated pieces ---
-    composed = _compose_cmd(command, addr, count_val)
+    composed = _compose_cmd(command, addr, count_val, filt_val)
 
     # --- per-run temp copy (read-only by construction: never -w) ---
     tmp_fd, tmp_path = tempfile.mkstemp(
@@ -804,6 +910,13 @@ def run_r2(
             r2_bin, "-q",
             "-e", "scr.color=0",
             "-e", "scr.utf8=0",
+            # Apply relocations: without this every linked ELF prints
+            # "WARN: Relocs has not been applied" on stderr and
+            # reloc-sensitive commands (gadget search across PLT stubs,
+            # import-driven analysis) see unresolved GOT/PLT slots
+            # (measured 2026-11-24 — the WARN was confirmed on every run
+            # of the flagged /R + aae batch).
+            "-e", "bin.relocs.apply=true",
             "-c", composed,
             tmp_path,
         ]
@@ -851,8 +964,8 @@ def run_r2(
         and ln.strip()
     ]
 
-    summary = _summarize(command, clean_lines, addr)
-    delta = _delta_note(command, clean_lines, addr)
+    summary = _summarize(command, clean_lines, addr, raw_out)
+    delta = _delta_note(command, clean_lines, addr, raw_out, filt_val)
 
     envelope = {
         "status": "ok" if proc.returncode == 0 else "error",
@@ -930,9 +1043,22 @@ def _err_envelope(
     }
 
 
-def _summarize(command: str, clean_lines: list[str], addr: str | None) -> str:
-    """One-line human summary of the r2 output."""
+def _summarize(command: str, clean_lines: list[str], addr: str | None,
+               raw_out: str = "") -> str:
+    """One-line human summary of the r2 output.
+
+    ``/R`` gadget lines are INDENTED ("  0x...    bytes  mnemonics"), so
+    the cleaned-lines pipeline — which strips lines starting with a space
+    to drop r2's own log noise — filters every gadget line out.  For /R we
+    therefore count gadget rows directly from the raw output (lines
+    matching the gadget address column); a filter that matches nothing is
+    reported as 0 gadgets, which is a legitimate answer, not an error.
+    """
     n = len(clean_lines)
+    if command == "/R":
+        gadgets = sum(1 for ln in raw_out.splitlines()
+                      if re.match(r"^  0x[0-9a-f]+\s+", ln))
+        return f"/R{f' @ {addr}' if addr else ''}: {gadgets} ROP gadget(s) found"
     if n == 0:
         loc = f" @ {addr}" if addr else ""
         return f"{command}{loc}: no output (empty result)"
@@ -947,7 +1073,8 @@ def _summarize(command: str, clean_lines: list[str], addr: str | None) -> str:
 _TABLE_COMMANDS: frozenset = frozenset({"iz", "izz", "iE", "ii", "is", "iS"})
 
 
-def _delta_note(command: str, clean_lines: list[str], addr: str | None) -> str:
+def _delta_note(command: str, clean_lines: list[str], addr: str | None,
+                raw_out: str = "", filt: str | None = None) -> str:
     """Short note on what this run surfaced (for the model's working memory).
 
     Table-format commands (iz, izz, iE, ii, is, iS) emit a header row and a
@@ -987,6 +1114,32 @@ def _delta_note(command: str, clean_lines: list[str], addr: str | None) -> str:
         return f"decompiled function @ {addr} ({len(clean_lines)} lines)"
     if command == "afi":
         return f"function info @ {addr}"
+    if command == "ie":
+        return f"{entity_count} entrypoint(s) listed"
+    if command == "axg":
+        return f"global call graph @ {addr} ({len(clean_lines)} lines)"
+    if command == "agf":
+        return f"basic-block graph @ {addr} ({len(clean_lines)} lines)"
+    if command == "ic":
+        return f"{entity_count} class(es) listed"
+    if command == "aae":
+        # Composite run (aae; axl): the axl listing is the only in-band
+        # evidence a one-shot run can carry of what the emulation added.
+        # Measurement note (2026-11-24, radare2 6.x): aae-resolved refs are
+        # NOT type-marked in axl output (type vocabulary is DATA/CODE/CALL
+        # only), so the honest count is total rows listed POST-aae — the
+        # delta text says exactly that rather than claiming a per-row
+        # classification the tool cannot verify from this build's output.
+        rows = sum(1 for ln in (raw_out or "").splitlines() if ln.strip())
+        return f"emulated analysis: {rows} xref row(s) listed post-aae"
+    if command == "/R":
+        # Gadget rows are indented — count them from the raw stream, not
+        # from clean_lines (see _summarize).  This is the delta NOTE (the
+        # working-memory line); the summary carries the same count.
+        gadgets = sum(1 for ln in (raw_out or "").splitlines()
+                      if re.match(r"^  0x[0-9a-f]+\s+", ln))
+        filt_txt = f" matching {filt!r}" if filt else ""
+        return f"{gadgets} ROP gadget(s) found{filt_txt}"
     loc = f" @ {addr}" if addr else ""
     return f"{command}{loc}: {len(clean_lines)} line(s) of output"
 

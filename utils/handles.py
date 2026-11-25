@@ -14,6 +14,8 @@ Kinds:
     collab    - the OOB collaborator listener                       -> ``collab:<id>``
     db        - a direct-database connection (auxiliaries/db_client.py)
               -> ``db:sess-0001``
+    tube      - a raw protocol-dialogue socket (payloads/tube.py)
+              -> ``tube:sess-0007``
 
 The kind prefix makes the namespace unforgeable as a string: an ``ssh:`` handle
 can never be silently passed to a Metasploit-only tool because the prefix will
@@ -34,7 +36,7 @@ HANDLE_SEPARATOR = ":"
 # The closed set of namespaces.  Adding a new session type means: (1) extend
 # this set, (2) emit handles from the creating tool, (3) declare
 # accepted_handle_kinds on the consuming tools.
-VALID_KINDS = {"ssh", "msf", "listener", "collab", "db"}
+VALID_KINDS = {"ssh", "msf", "listener", "collab", "db", "tube"}
 
 
 def format_handle(kind: str, sid: str) -> str:

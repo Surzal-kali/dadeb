@@ -8,13 +8,15 @@ matches the tagged tools even when the tool's own prose never used that word.
 
 DESIGN (three small pieces, no find_tools changes):
 
-1. ``CANONICAL_TAGS`` — the frozen 13-bucket vocabulary the operator defined:
+1. ``CANONICAL_TAGS`` — the frozen 14-bucket vocabulary the operator defined:
    recon.subdomain, recon.web, recon.dns-certs, recon.scope, web.fuzz,
    web.probe, web.auth, exploit.web, exploit.msf, brute.crack, net.raw,
-   net.services, infra.
+   net.services, net.interactive, infra.
    ("infra" = main framework tooling and internals; "net.services" = non-HTTP
    network-service tooling — SSH/SMB/FTP access, remote exec, secrets dump,
-   callback listeners.)  Extending it is a one-tuple edit here; discovery
+   callback listeners; "net.interactive" = raw byte-level protocol dialogue
+   with a discovered service — the tube lane: connect → send arbitrary bytes
+   → recv-until, for protocols no hardcoded client speaks.)  Extending it is a one-tuple edit here; discovery
    WARNS on non-canonical tags but keeps them (warn-and-keep: a typo never
    silently kills a tag's discoverability, and the operator sees the warning
    in the bootstrap/reindex log).
@@ -46,6 +48,12 @@ authoring).  All 27 formerly-pending tools are tagged ``net.services`` (see
 the map section below; pinned by tests/test_tool_tags.py NET_SERVICES_IDS).
 Line kept deliberate: port SCANNERS (nmap/masscan/syn_scan) stay ``net.raw``
 (scan lane) — ``net.services`` is for INTERACTING with a discovered service.
+OPERATOR DECISION 2026-11-24 — 14th bucket ``net.interactive`` ADDED for the
+tube lane (payloads.tube): raw byte-level protocol dialogue — connect, send
+arbitrary bytes (hex/base64 capable), recv-until-marker — against protocols
+no hardcoded client speaks (custom pwn services, odd banner protocols).
+Sits between net.raw (scan/observe) and net.services (a real client for a
+known protocol): the tube is a RAW CLIENT for UNKOWN/custom protocols.
   (utils.paramiko_client.list_sessions and TCPListener.send_to_brain ARE
   tagged infra: framework control-plane, not target-facing.)
 Judgment-call interims (tagged, but operator may disagree — one-line edits):
@@ -73,6 +81,7 @@ CANONICAL_TAGS: tuple[str, ...] = (
     "brute.crack",
     "net.raw",
     "net.services",
+    "net.interactive",
     "infra",
 )
 

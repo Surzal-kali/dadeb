@@ -173,7 +173,11 @@ def _load_state() -> dict[str, Any] | None:
         mtime = p.stat().st_mtime
     except OSError:
         return None
-    if _CACHE["mtime"] == mtime and _CACHE["state"] is not None:
+    # .get(), not []: the cache may have been externally cleared (tests do
+    # _CACHE.clear() in teardown). An empty cache must be a cache miss, not
+    # a KeyError — the mtime check is an optimization, not an invariant
+    # (web_session_headers lane hit this 2026-11-24 after tube tests ran).
+    if _CACHE.get("mtime") == mtime and _CACHE.get("state") is not None:
         return _CACHE["state"]
     try:
         state = json.loads(p.read_text())
