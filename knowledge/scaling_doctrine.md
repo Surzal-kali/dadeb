@@ -3,6 +3,9 @@
 A doctrine for "which tools can take several requests at once" and how to build
 scalable orchestration around any of them. Tool-agnostic by design; the sqlmap
 fleet design (Annex A) is the first adapter, not the centerpiece.
+Annexes B–E record the shipped phases of the substrate (identity + jobs,
+scheduler, sqlmap adapter, worker queue) — read them as history +
+implementation map, not design proposals.
 
 ## 0. The axis that matters
 
@@ -178,3 +181,42 @@ What fleet mode DOES fix: throughput across targets (partition lanes).
 What it does NOT fix: per-target wall-clock for blind inference — a
 time-based oracle is a serial conversation no matter what; that's where
 the tamper-prescreen wedge (section 6.1) narrows the work later.
+
+## Annex B — Phase 0: agent identity + job store shipped shapes
+
+The identity + jobs substrate as implemented: `utils/agent_identity.py`
+(announce-or-mint at one choke point), `utils/job_store.py` (SQLite job
+rows with agent-scoped ownership, TTL sweep, one shared reaper with
+pid-reuse-fenced signaling, log-file GC, roll-down-honest launches),
+`utils/brain_sessions.py` (agent → stable int for the C wire, durable
+across restarts, namespaced fallback band). Which test gaps missed which
+crash bug (zombie discipline, PID-reuse fence, degraded-lock deadlock)
+and why: `tests/test_job_store.py`, `tests/test_agent_identity.py`.
+
+## Annex C — Phase 1: the fleet scheduler (shipped)
+
+`utils/fleet_scheduler.py` over the job store: per-TARGET-HOST regulator +
+dedupe ledger, numeric-span aware (a `/24` sweep contends with its member
+hosts). Adapter contract `request_unit` → acquired/duplicate/refused;
+canonical keys cover param NAMES only. Slots default 2 under absolute
+ceiling 4; auth-adjacent units hold the host exclusively. Every
+traffic-sending launcher passes `target=` on `launch_job`. Observability:
+`fleet_host_status`.
+
+## Annex D — Phase 2: sqlmap fleet over the scheduler (shipped)
+
+`payloads/sqlmap.py`: the scheduler rides the launch path
+(`launch_job(..., target=..., fleet_body=...)` — request→launch→bind
+atomic). Fleet twins `run_sqlmap_fleet` / `sqlmap_fleet_status` /
+`sqlmap_fleet_results(dedupe=param|host)` / `sqlmap_fleet_stop`; verdict
+parsers are process-wide (`utils.job_store._PARSERS`).
+
+## Annex E — Phase 3: the worker queue (shipped)
+
+`utils/worker_queue.py` + `payloads/jadx_fleet.py` + the Burp replay twins
+(`payloads/burp_fleet.py`): Arch-D units queue on LOCAL WORKER RAM
+instead of target host. Content-keyed dedupe on input BYTES, admission =
+dedupe → hard caps → slots → free-RAM formula; everything merely scarce
+QUEUES instead of refusing. Measured VmHWM evidence raises the next claim
+(`claim = budget + (peak − pin)`). §13 in the older revision list below
+maps to this annex.

@@ -116,7 +116,12 @@ ALLOWED_TOOL_ROOTS = _RootsProxy()
 
 # Semantic top_k ceiling — bound to the API/MCP search lanes (find_tools
 # clamps per-request top_k with this).
-SECRETARY_MAX_TOP_K = 10
+SEARCH_MAX_TOP_K = 10
+# Backwards-compat alias: the old name leaked the dead "secretary chat lane"
+# vocabulary (removed 2026-10-20) into a knob that is pure registry plumbing.
+# Keep accepting it for one release so stale .env / imports don't break;
+# new code reads SEARCH_MAX_TOP_K.
+SECRETARY_MAX_TOP_K = SEARCH_MAX_TOP_K
 # Router abstention: with no human in the loop, the API dispatch path
 # refuses to run anything whose semantic match is not this close.
 # Distance is cosine (1 - similarity) on nomic-embed-text normalized vectors

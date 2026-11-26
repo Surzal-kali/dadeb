@@ -850,8 +850,8 @@ class APIGateway:
             that tool_id.  This avoids the misfires that happen when
             /tools/execute auto-resolves a vague intent to the wrong sibling.
             """
-            from daharness.registry import SECRETARY_MAX_TOP_K
-            top_k = max(1, min(int(req.top_k or 5), SECRETARY_MAX_TOP_K))
+            from daharness.registry import SEARCH_MAX_TOP_K
+            top_k = max(1, min(int(req.top_k or 5), SEARCH_MAX_TOP_K))
             if self.tool_registry is None:
                 raise HTTPException(503, self._registry_unavailable("tool search"))
             manifests = await self.tool_registry.find_tools(req.intent, top_k=top_k)
@@ -1134,8 +1134,8 @@ class APIGateway:
                     intent = arguments.get("intent")
                     if not intent:
                         return self._error(f"{TOOL_SEARCH}: 'intent' is required")
-                    from daharness.registry import SECRETARY_MAX_TOP_K
-                    top_k = max(1, min(int(arguments.get("top_k") or 5), SECRETARY_MAX_TOP_K))
+                    from daharness.registry import SEARCH_MAX_TOP_K
+                    top_k = max(1, min(int(arguments.get("top_k") or 5), SEARCH_MAX_TOP_K))
                     if self.tool_registry is None:
                         return self._error(self._registry_unavailable("mcp tools_search"))
                     manifests = await self.tool_registry.find_tools(intent, top_k=top_k)

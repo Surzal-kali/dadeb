@@ -5,9 +5,11 @@ Headless orchestration harness for authorized security research. An external LLM
 searches a SQLite + numpy vector-indexed tool registry and selects modules to
 execute — the harness itself ships no conversation model and no approval gate;
 an integrating harness that wants sign-off adds its own layer in front of the
-gateway. Python handles orchestration; C/C++ handles low-level systems work.
-`AGENTS.md` is the canonical agent doc — consult it for deep architectural
-detail (Metasploit client quirks, Brain protocol specifics).
+gateway. Python orchestrates; a Rust port owns the dispatch plane
+(`rust/brain`, `rust/scratch`, `rust/pcap`); C plugins are an optional seam.
+`AGENTS.md` is the canonical agent doc — consult it for the invariants +
+pitfalls; per-subsystem deep dives live in `knowledge/` (Metasploit client
+quirks: `payloads/README.md`).
 
 ## Commands
 

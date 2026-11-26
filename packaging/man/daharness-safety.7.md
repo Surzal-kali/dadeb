@@ -53,6 +53,18 @@ model) run on a locally hosted endpoint (Ollama, loopback/LAN) — never a
 cloud LLM API. Tool outputs from live targets (credentials, tokens, internal
 IPs) must not egress to third parties.
 
+**Loopback vs LAN is a real distinction.** A `127.0.0.1` LLM/embed endpoint
+keeps target text inside the box; a LAN endpoint (`10.0.0.x:11434` is a
+supported and common shape — e.g. a Pi-hosted Ollama) means every embedded
+string and every target response the driving model reads traverses a network
+segment you control but do not own like loopback. When `EMBED_URL` (or the
+driving-LLM endpoint) is LAN-hosted: keep the segment private to your lab
+(firewall the Ollama port to your harness hosts), prefer a static LAN bind
+address over `0.0.0.0` exposure, and treat any untrusted host joining that
+segment as a target-text collector. mTLS / token auth on the endpoint is the
+hardening step if the segment is shared. `framework_health` reports the
+configured endpoint + model so you can verify what you are actually running.
+
 ## Engagement cobweb
 
 An engagement's rows (journal, evidence, findings, unknowns) unify under one

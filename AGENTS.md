@@ -4,11 +4,16 @@ A headless orchestration harness for security research. An external LLM (whateve
 model the operator wires into the Open WebUI / gateway / MCP lanes)
 semantically searches a vector-indexed tool registry and selects modules to
 execute — the harness itself ships no conversation model and no approval
-gate. Python handles
-orchestration; C/C++ handles low-level systems work.
+gate. Python orchestrates; a Rust port owns the dispatch plane
+(`rust/brain`, `rust/scratch`, `rust/pcap` — see their READMEs and
+`packaging/man/daharness-rust.1`); C plugins remain a small optional seam.
 
 See `README.md` for the user-facing overview. This document is for agents
-working **on** the codebase.
+working **on** the codebase — here: the agent contract (invariants,
+pitfalls, "adding a tool"). The per-subsystem deep dives moved to
+`knowledge/` (the operator/model reference tree) on 2026-11-26 to keep this
+file within an auto-load budget; every section below that gained a pointer
+still carries the invariant it enforced.
 
 ## Architecture
 
@@ -19,8 +24,9 @@ The registry/dispatch machinery lives in `daharness/registry.py` +
 gateway, the MCP endpoint, the tool REPL, or the Jupyter kernel:
 
 - **Search** — semantic search over the SQLite-backed tool registry
-  (`ToolRegistry.find_tools`, bounded by `SECRETARY_MAX_TOP_K`), returns
-  full manifests.
+  (`ToolRegistry.find_tools`, bounded by `SEARCH_MAX_TOP_K` — formerly the
+  secretary-flavored name, renamed 2026-11-26 after the chat lane's removal),
+  returns full manifests.
 - **Dispatch** — `find_best_tool` resolves an intent to one tool (abstains
   beyond `ROUTER_MAX_DISTANCE`) and executes through preflight manifest
   validation, the scope gate, and result projection.
@@ -201,548 +207,135 @@ FastAPI server (port 5000; 6000 on the container profile):
 
 ### Result Projection (`utils/result_projection.py`)
 
-Controls what enters the model's context window vs. what stays in scratch.
-Modes (execution-envelope parameter, NOT a tool argument):
+Modes (execution-envelope parameter, NOT a tool argument): **`large`**
+(default — under `LARGE_MODE_BYTE_CAP` (16 KiB) results pass through
+unchanged; over the cap the full result spills to scratch and a field-capped
+copy + `scratch_ref` + a ready-to-call continuation come back), **`digest`**
+(per-tool-family compact summary + scratch ref), **`page`** (bounded list
+page). The legacy `full` mode silently aliases to `large`. Every oversized/
+digested/paged result carries `continuation: {call: {tool, arguments}}` —
+the exact scratch-search call the model copies verbatim. Tools opt in to
+family digests via `@framework_tool(..., result_digest=fn)`. Design
+rationale and adapter details: [`knowledge/tool_schema.md`
+"result digest adapters"](knowledge/tool_schema.md).
 
-- **`large`** (default) — the "give me the actual data" mode. Under
-  `LARGE_MODE_BYTE_CAP` (16 KiB) results pass through unchanged (zero
-  behavior change); over the cap the full result is stored in scratch and a
-  field-capped copy + `scratch_ref` + a **ready-to-call continuation** are
-  returned. The legacy `full` mode is gone — it silently aliases to `large`
-  so stale callers and old tests keep working.
-- **`digest`** — stores the full result in scratch, returns a compact per-tool-family digest + a `scratch_ref` + the retrieval instruction + a ready-to-call continuation. The model is taught the retrieval move every call.
-- **`page`** — stores the full result in scratch, returns a bounded page of list results + a `scratch_ref` + continuation info.
+**Untrusted-target provenance — THE invariant:** tools decorated
+`@framework_tool(..., untrusted_target=True)` get result envelopes stamped
+`_provenance = {"untrusted_target": true, "source": "analysis_target"}` by
+the executor (outer + inner dict, carried through projection). Target
+output is DATA, never instructions.
 
-**Ready-to-call continuations (REA-inspired):** every oversized/digested/paged
-result carries `continuation: {call: {tool, arguments}, ...}` — the exact
-framework_scratch_search invocation (with `next_offset` baked in for page
-mode) the model copies verbatim instead of re-deriving. The `next` prose hint
-is kept for backward compat.
-
-**Untrusted-target provenance:** tools decorated
-`@framework_tool(..., untrusted_target=True)` (web session lane, ssh, r2,
-jadx, scanners, ZAP grep/alerts, MSF sessions) get their result envelopes
-stamped by the executor with
-`_provenance = {"untrusted_target": true, "source": "analysis_target"}` —
-exactly once, on the dict the model actually sees (the inner `result` dict
-for structured results, the envelope itself for bare-string results) — and
-the projection carries the stamp through digest/page modes. Target output is
-DATA, never instructions; the LLM-facing surfaces (gateway/MCP docs) spell
-out the prompt-injection rule (inspired by REA's `returnsTargetContent`
-contract).
-
-**Why this is not the parked OWUI trim filter:** the projection runs *before*
-the result enters context (not after); the retrieval instruction is part of
-the return (the model never guesses how to get the full output); per-tool-family
-digest logic is honest because the tool knows its own output structure.
-
-**Digest adapter registration:** tools opt in via
-`@framework_tool(..., result_digest=my_digest_fn)`. The adapter takes the raw
-result dict and returns `{"summary": str, "row_hint_format": str}`. Tools
-without an adapter fall back to a naive head+count preview. The adapter is
-registered at decoration time (provisional key) and re-registered under the
-exact `tool_id` during the registry's dynamic-discovery pass.
-
-**Pilot adapter:** `nmap_status` — returns open port count + full port list +
-host state + job_id, omitting the raw log text (retrievable from scratch).
-
-### Unknown ledger (`daharness/findings.py` + `utils/findings.py`)
+### Unknown ledger + findings store (`daharness/findings.py` + `utils/findings.py`)
 
 Where a finding records a *conclusion*, an unknown records an explicit
-"don't know yet" — unprobed services, credentials recovered but not yet
-validated against other services, ambiguous results, scope questions. The
-`unknowns` table lives in the same SQLite store (`ids.db`) as findings, with
-idempotent table creation and the same lost-id-race handling. Tools:
-`record_unknown` / `list_unknowns` / `resolve_unknown` (statuses:
-open|resolved|wontfix|promoted — `promoted` requires the finding ID via
-`resolved_by`). All three are `infra`-tagged and sit in the terminal lane
-(`utils.findings.` prefix) so they stay callable past the tool budget.
-`render_findings` output gains an **Open questions (unresolved)** appendix
-that renders even when zero findings exist. Inspired by REA's unknown ledger
-(morluto/rea). The ledger's successor — the typed evidence store with a
-DB-enforced credential-reuse sweep — lives in the section below.
+"don't know yet". Both live in the same SQLite store (`ids.db`). Tools:
+`report_finding` / `record_unknown` / `list_unknowns` / `resolve_unknown`
+(statuses open|resolved|wontfix|promoted) — all `infra`-tagged, terminal
+lane (`utils.findings.` prefix), callable past the tool budget. Lifecycle
+detail: [`knowledge/findings.md`](knowledge/findings.md).
 
 ### Engagement cobweb + journal (`utils/engagement.py`, `utils/journal.py`, `utils/evidence.py`)
 
-One engagement slug ties every store row together so a **purge erases one
-engagement in one transaction** while the audit trail stays append-only
-until the operator closes it (2026-10-19 design):
-
-- **Arming is REPL-only** (`engagement on <slug>`), mirroring the scope
-  gate — deliberately not an `@framework_tool`, so no model lane can ever
-  tag rows with a new key or erase the audit trail. State persists to
-  `engagement/.armed_engagement.json`, mtime-checked per dispatch; rows
-  written while disarmed carry NULL engagement and are engagement-bound.
-- **Postgres lane (optional)**: shipped on the deb as `daharness-pg(1)` —
-  it provisions a dedicated cluster and runs the init bundle
-  (`packaging/postgres/init/`) that mints per-lane LOGIN roles (brain_lane /
-  gateway_lane / repl_lane), and only `harness_operator` may run
-  `engagement.purge()` — lanes hold INSERT/SELECT (+ evidence UPDATE), the
-  retention sweep (`engagement.sweep_expired()`) runs as a SECURITY DEFINER
-  owner function called lazily on journal writes. One database,
-  schema-per-store keeps the cobweb pull a single transaction and backup a
-  single `pg_dump`. Install with `pip install -e ".[db]"` (psycopg).
-  **Boot arming** (2026-11-21 boot-bug fix): `daharness-pg init` re-arms
-  `postgresql.service` when the distro preset left it disabled (Kali's
-  preset policy disables every unclaimed unit — a fresh install booted with
-  the autostarted cluster dead because the umbrella unit never ran).
-- **Journal spool** (2026-11-21): while Postgres is down, `write_dispatch`
-  rows park in the `journal_spool` table in `ids.db` (payload JSON +
-  fail_count) and `_flush_spool` replays them on the next successful
-  connect — no rows silently dropped by an outage. Poison-row discipline:
-  a row failing replay twice parks itself as an honest `journal_spool_*`
-  error row in the journal itself (engagement slug dropped — the arm-time
-  registry upsert also degrades while down, so its FK can legitimately
-  refuse), never wedging the queue head. The down-warning logs at most 3
-  times per outage then drops to debug; backoff window 300s (was 30s —
-  there is NO retry loop, the window is only bridged by real lane
-  consumers, so a 30s/attempt cadence on a dead cluster just burned a
-  4s connect budget on every dispatch).
-- **Journal** (`journal.entries`): one row per dispatch, stitched across
-  lanes, written at the executor choke point (`execute_tool`, plus
-  preflight rejects). Append-only by grants. **Residency decision
-  (2026-10-19): no mid-engage scrubbing** — args keep secret material
-  verbatim because scrubbing live breaks the credential-reuse sweep;
-  bounds are structural instead (24h cred TTL floor + engagement purge +
-  `expires_at` sweep). The single redaction: session `handle` values become
-  `{"$sessref": session_id}` pointers (process-local meaning). Tiny
-  `result_digest` scalar summaries keep rows meaningful after material
-  expiry. `what_touched(target)` = GIN-cached scope-compliance query.
-- **Evidence** (`utils/evidence.py`): the unknown ledger promoted — typed
-  kinds (credential|service|ambiguity|scope_question|observation) with a
-  per-kind TTL (credential 24h, scope_question never, others 7d) and the
-  **credential-reuse sweep as a DB constraint**: `UNIQUE(entry_id, service,
-  target)` on `evidence.attempts` refuses a second validation attempt with
-  re-mint guidance (re-acquisition is cheap, brute-forcing isn't).
-  Phase 1 ships SQLite-backed (same schema); the PG lane takes over when
-  psycopg + the `daharness-pg` cluster are up. Tools: `record_evidence` /
-  `add_validation_attempt` / `list_open_evidence` / `resolve_evidence`.
-- **Envelope contract**: `daharness/models.py:ExecutionEnvelope` (+
-  `EnvelopeMeta`/`Provenance`/`BudgetDirective`) pins the dispatch-result
-  shape the kernel helpers and per-lane workarounds were guessing at —
-  budget directives are a top-level model field so projection can never
-  clobber them, provenance is stamped once. Writers still emit the legacy
-  dict shape; readers migrate via `from_legacy()` / warn-mode validation
-  (`to_legacy()` keeps old consumers green during the window).
+One engagement slug ties every store row together; **arming is REPL-only**
+(`engagement on <slug>`) and purge is operator-only, so no model lane can
+re-key rows or erase the audit trail. The journal records one row per
+dispatch at the executor choke point; the evidence store is the typed
+unknown-ledger successor with the credential-reuse sweep as a DB constraint
+(`UNIQUE(entry_id, service, target)` — one validation attempt per
+service/target pair). Envelope contract:
+`daharness/models.py:ExecutionEnvelope` pins the dispatch-result shape;
+projection can never clobber budget directives. Full design (Postgres lane,
+spool, retention, roles): [`knowledge/engagement_lane.md`](knowledge/engagement_lane.md).
 
 ### Analysis snapshot cache (`utils/snapshot_cache.py` + `auxiliaries/radare2.py`)
 
-Deterministic-lane memoization (REA-inspired). r2 analysis is a pure function
-of (target bytes, verb/addr/count, settings), so `run_r2` stores successful
-envelopes keyed on the target's **sha256** + op key (verb, addr, count,
-r2ghidra availability, output cap, timeout) and serves identical repeat
-queries verbatim — exploring a binary pays ``aaa`` once instead of once per
-call. Rules that keep it honest:
-
-- **Pure functions only.** Scanners (nmap/ffuf/masscan) deliberately don't
-  share this cache — their results are observations of a changing world (and
-  their job-log lane already persists per-job results). Errors are never
-  cached; a cached timeout is a lie about the next attempt.
-- **Content keys, not paths**: identical bytes rebuild-and-hit (gcc strips
-  comments — two different sources can compile to identical bytes and
-  legitimately share a snapshot); changed bytes miss automatically. No
-  invalidation problem for a read-only lane.
-- **Contextual fields are patched on hits**: a cached envelope's `target` is
-  rewritten to the current call's resolved path (identical bytes at a new
-  path must report the path the model actually asked about).
-- Storage: SQLite WAL at `run/analysis_snapshots.db` (scratch-store
-  conventions incl. root-ownership repair), TTL `SNAPSHOT_TTL_HOURS`
-  (default 168h, growth-bounding only), per-target cap
-  `SNAPSHOT_MAX_ENTRIES` (default 200, oldest evicted). `cache=False` skips
-  read+write; `refresh=True` recomputes and overwrites. Cache failures
-  degrade silently to a normal run — caching must never break a tool.
+Deterministic-lane memoization: r2 analysis is a pure function of (target
+sha256, op, settings), so identical repeat queries serve verbatim. The
+invariant: **pure functions only** — scanners never share this cache and
+errors are never cached. `cache=False` skips, `refresh=True` recomputes.
 
 ### Capability doctor (`auxiliaries/framework_status.py:framework_doctor`)
 
-`framework_health` answers "is the harness alive" (Brain/embedding endpoint/
-registry/ZAP/ids.db up/down). `framework_doctor` answers "can I actually run X" —
-REA-style per-provider probes returning `{available, reason, remediation}`:
-r2 + r2ghidra plugin + drop dir, jadx + java + apk dir, masscan + raw-socket
-(CAP_NET_RAW) capability, msfconsole/msfvenom + RPC port, PATH probes for
-nmap/ffuf/hydra/sqlmap, snapshot cache stats, the engagement-cobweb
-Postgres lane, and the scapy packetcraft lane's raw-socket capability
-(`packetcraft` — in-process execution means no setcap path; the only levers
-are ambient CAP_NET_RAW on the lane or root). Drill down with `provider=`
-(r2|jadx|masscan|msf|scanners|snapshot_cache|brain_sessions|postgres|
-packetcraft). The remediation strings agree with the
-tools' own error paths (e.g. pdg's "run: r2pm -ci r2ghidra"), so the model
-reads the same fix from either side. Probes reuse existing module helpers
-(`_r2ghidra_available` etc.) so doctor and tools cannot drift.
+`framework_health` answers "is the harness alive" (infra up/down);
+`framework_doctor` answers "can I actually run X" — per-provider
+`{available, reason, remediation}` probes (r2+ghidra, jadx, masscan caps,
+msf RPC, scanners, postgres, packetcraft). Drill down with `provider=`.
+Probes reuse the tools' own module helpers so doctor and tools cannot
+drift.
 
 ### Per-turn tool budget (`utils/tool_budget.py`)
 
-A hard cap on tool executions per turn, enforced in the gateway so the
-conversational lanes (Open WebUI bridge, MCP, REST) get a brake beyond the
-model's own discipline.
-
-- **Counting**: every `/tools/execute` / MCP `tools/call` dispatch counts once. The request's
-  `turn_key` (Open WebUI passes `chat_id:message_id` from `__metadata__`; the
-  model never fills it) starts a fresh budget per value; when omitted, a
-  per-agent rolling counter resets after `TOOL_BUDGET_IDLE_RESET_MIN` idle.
-- **Final call executes, wrapped**: call N (the last allowed) runs normally but
-  its result gains a `tool_budget` directive — report findings and end the
-  turn. Applied *after* result projection so it survives digest replacement.
-- **Past the cap → refused**: the call does not execute; the response is a
-  structured `budget_exhausted` envelope (HTTP 200 / plain MCP text, not an
-  error — an instruction to reason over, not a transient failure to retry).
-- **Terminal lane**: memory (`utils.memory_tools.`), findings, and the
-  unknown ledger (`utils.findings.`) tools stay callable past the cap and
-  don't consume budget, so the model can actually comply instead of being
-  trapped.
-- **Knobs**: `TOOL_BUDGET_PER_TURN` (default 10, 0 = disabled),
-  `TOOL_BUDGET_IDLE_RESET_MIN`, `TOOL_BUDGET_TERMINAL_ALLOWLIST`. Counters
-  are in gateway process memory and reset on restart.
+Hard cap on tool executions per turn (gateway lanes, `TOOL_BUDGET_PER_TURN`,
+default 10). The final allowed call executes but carries a report-and-end
+directive; past the cap the call is refused with a structured envelope (an
+instruction, not a transient error). Terminal-lane tools (memory, findings,
+unknowns) stay callable past the cap so the model can comply.
 
 ### Scratch Store (`utils/scratch_store.py`)
 
-Durable, ownership-scoped storage for raw tool results. NOT vector memory
-(no embeddings, no semantic recall) and NOT the findings store (no lifecycle).
-Deterministic, reference-keyed store the model retrieves from via
-`scratch_search` when it needs the full or filtered output of a prior tool call.
-
-- **Storage:** `scratch.db` (SQLite metadata) + `scratch-data/` (compressed JSON payloads, 0700/0600). The db and its `-wal`/`-shm` sidecars are chmodded 0600 on init and re-hardened on every store/retrieve/list/stats/cleanup call (SQLite re-mints absent sidecars at its first statement on a re-opened WAL db). Rust refuses symlinked sidecars and planted FIFO db files at open; python (no `lchmod`) skips symlinked files and never chmods through a link.
-- **IDs:** opaque random values (`scratch:<16-hex>`), never sequential — a guess from another chat cannot leak data.
-- **Ownership:** every entry is scoped to `agent_id`; a valid-looking ref from the wrong agent returns "not found".
-- **Persistence:** entries survive a framework restart (on-disk).
-- **TTL:** 24h (env `SCRATCH_TTL_HOURS`); cleanup runs on every `store()` call.
-- **Caps:** per-entry 256 MiB (`SCRATCH_MAX_PAYLOAD_MB`), per-agent 1 GiB (`SCRATCH_MAX_AGENT_MB`).
-- **Atomic writes:** payload written to temp → fsync → rename → metadata commit. A crash never leaves a torn entry.
+Durable, ownership-scoped storage for raw tool results — NOT vector memory,
+NOT the findings store. Opaque ids (`scratch:<16-hex>`), per-`agent_id`
+ownership, 24h TTL, atomic writes, 0600 db + sidecar hardening (root-guard
+repair mirrors scratch conventions). The Rust port
+(`rust/scratch`) is cross-compatible over the same db.
 
 ### Agent identity + jobs substrate — Phase 0 (`utils/agent_identity.py`, `utils/job_store.py`, `utils/brain_sessions.py`, scale-doctrine Annex B)
 
 Identity is **announce-or-mint** at one choke point
-(`utils.agent_identity.resolve_agent_id`): a normalized announcement
-(`[a-z0-9_.:-]{3,64}`) is used verbatim, exact `"0"` is the explicit
-shared-session opt-in, and anything else mints ephemeral
-`anon-<hex>` echoed as `result["identity"] = {agent_id, provenance}`
-(declared|shared|minted) — adopt-on-echo for clients that want
-continuity. The `anon-` prefix is gateway-reserved: an announced
-`anon-x` is re-minted. The executor resolves identity around every
-dispatch and sets the ambient ContextVar; tool bodies read
-`utils.agent_identity.current_agent_id()` for row ownership (jobs,
-evidence). **Never add a default agent_id to a store schema** — stores
-take NOT NULL columns and resolved callers only (the old three
-spellings — executor `"0"`, evidence `"secretary"`, PG `'unknown'` —
-are collapsed; evidence keeps `"secretary"` only for direct
-operator-store use). `replkit.core.run_tool` dispatches under the
-explicit `repl` identity.
+(`utils.agent_identity.resolve_agent_id`): a normalized announcement is
+used verbatim, exact `"0"` opts into the shared session, anything else
+mints ephemeral `anon-<hex>` (the `anon-` prefix is gateway-reserved).
+The executor resolves identity around every dispatch; tool bodies read
+`current_agent_id()` for row ownership. **Never add a default agent_id to
+a store schema.**
 
-Background jobs (`launch_job`/`poll_job`/`get_job`/`terminate_job`,
-`utils/background_job.py` — same signatures as ever) are rows in the
-SQLite job store (`run/jobs/jobs.db`, scratch-store conventions, env
-`BG_JOB_*`): agent-scoped ownership (cross-agent `terminate_job`
-refused without `force=True`), per-agent finished-cap eviction that
-never evicts running jobs, TTL sweep, one shared reaper thread (a cap
-kill stamps `timed_out=True` — poll-side cap enforcement marks first,
-kills second, so a racing poll can't downgrade a timeout to a clean
-exit). Logs live under `run/jobs/<tool>/` — never /tmp.
-
-**Log collection (2026-10-29):** rows were always collected (TTL +
-finished-cap) but the log FILES they pointed at never were — a busy
-fleet leaked disk forever. A mtime-based GC (window `BG_LOG_GC_HOURS`,
-default 48h — comfortably above `BG_JOB_TTL_HOURS` so a known row's log
-is never GC'd early; throttle `BG_LOG_GC_INTERVAL_S`, default 30 min;
-window `0` disables) runs anchored at row-collection points
-(`_enforce_caps`, the reaper pass); an idle lane can invoke
-`utils.job_store.garbage_collect_logs()` directly. Deletion is decided
-by the FILE's age, not the row table — young files keep existing even
-when their row is already gone, so an unflushed writer is never
-truncated. Logs written to an explicit per-call `log_dir` remain their
-tool's own collection duty.
-
-**Launch roll-down (2026-10-29):** the request→launch→INSERT window no
-longer leaks orphans. A spawn failure (missing binary) closes the log
-handle and unlinks its (empty) file before raising — no row, no
-sidecar. An INSERT failure after a successful spawn rolls the launch
-DOWN: the spawned tree is terminated, reaped and deregistered, and no
-row is written — a pid-without-row envelope would hand the model a
-job_id every poll answers "unknown". The launch is honest in both
-directions: no phantom rows, no unrecorded running processes. Note
-`register_verdict_parser` no longer constructs the store at import
-time: with the default store dir unavailable it defers registrations
-and applies them at the next `launch_job` (otherwise one unreadable
-path aborted the import of every tool module that registers a parser —
-seven of them at last count).
-
-Brain session ints (`agent_id → stable int` for the C wire protocol)
-resolve through `utils/brain_sessions.py` (SQLite, keyed by workspace+
-agent) so the same agent re-resolves identically across restarts and
-lanes; in-process fallback when the store is down. `"0"` short-circuits
-to the shared session. The store's db + WAL sidecars self-heal group-rw
-at every open (`utils/state_perms.py:reconcile_sqlite_modes` — shared
-with the snapshot cache + fleet scheduler stores; a db minted under a
-tighter umask otherwise leaves every non-owner lane readonly with
-"attempt to write a readonly database", 2026-10-31 deb kernel-lane
-incident — the snapshot store carries the identical heal, and the deb
-postinst sweep covers run/ depth-2 stores offline). The degraded-fallback int space is NAMESPACED
-(2026-10-29): fallback ints come from a high per-instance-random band
-(≈100M+) that durable ints (ascending from 1) can't realistically
-reach, so a degraded lane's calls can never land in another agent's
-Brain-side session instances (the wire field is a C int, so the fix is
-a disjoint space, not a format). The fallback lock is an RLock —
-`resolve()` holds it while minting a slot, and a plain Lock made the
-first-ever degraded resolve self-deadlock (never caught by tests until
-the band itself was tested, 2026-10-29).
-
-Zombie discipline (cost a full test-suite debug 2026-10-29): a dead
-child nobody `wait()`ed on still answers `os.kill(pid, 0)` — the
-launching store reaps via live `Popen.poll()`; pid-probe is the
-cross-lane fallback; terminate-grace uses `waitpid(WNOHANG)` so the
-kill path can't stall on our own zombies.
-
-**PID-reuse fence (2026-10-29):** the process start-time from
-`/proc/<pid>/stat` (field 22) is stored next to each pid, and every
-signal path (`stop()`, the reaper's timeout `killpg`) verifies it
-before signaling — a reused pid is refused (no signal, `pid_reused:
-True`, row settles at exit code -1) instead of killing an unrelated
-process. `stop()` reaps via raw `os.waitpid(WNOHANG)` FIRST so the
-real exit code is observable: CPython's `Popen.wait()` fabricates
-`returncode=0` for a child someone else already reaped (its internal
-`_try_wait` swallows ChildProcessError), and a TERM-fast death can be
-stamped `-15` — trust the waitpid result, fall back to the legacy -9
-only when the code is truly unobservable.
+Background jobs (`launch_job`/`poll_job`/`get_job`/`terminate_job`) are
+rows in the SQLite job store with agent-scoped ownership, TTL sweep, one
+shared reaper (pid-reuse-fenced signaling), and log-file collection. Launch
+is roll-down honest in both directions: no phantom rows, no unrecorded
+processes. Crash lessons and rationale (which tests missed which bug, and
+why): [knowledge/scaling_doctrine.md Annex B](knowledge/scaling_doctrine.md)
+and `tests/test_job_store.py`.
 
 ### Fleet scheduler — Phase 1 (`utils/fleet_scheduler.py`, scale-doctrine Annex C)
 
-Per-host concurrency regulator + dedupe ledger over the job store — the
-coherence primitive for fleet adapters (sqlmap fleet first, Phase 2).
-Accounting axis is the TARGET HOST, not the agent; NOT a process
-supervisor (adapters launch via `utils.job_store`; the scheduler decides
-may-this-start/dedupe/wait per unit). The axis is NUMERIC-SPAN AWARE
-(2026-10-30): bare IP/CIDR/range targets collapse to canonical network
-spans (`10.0.0.7/24`, `10.0.0.0/24`, `10.0.0.0-10.0.0.255`, `10.0.0.5-30`
-all normalize to the same axis), and slot/auth accounting treats two
-targets as contending on host equality OR span overlap — a `/24` sweep
-now holds the same courtesy as scans of its member hosts. Hostnames take
-no part in numeric contention (no DNS).
-
-Adapter contract (each adapter contributes only these; scheduling logic
-is never copied between adapters):
-
-1. `request_unit(tool, target, agent_id=..., body=...)` — decision
-   envelope: `acquired` (launch now via job store, then `bind_job`),
-   `duplicate` (a live unit with the same canonical key runs — POLL its
-   `job_id`, never launch a second process), or `refused`
-   (`slots_exhausted` | `host_serialized_auth`, with guidance).
-2. Canonical key = `<tool>:<host>:<path>:<hash>` where the hash covers
-   param/field NAMES only (shape keys — per-run CSRF/nonce values must
-   not fork units). Never key on raw body bytes.
-3. `release_unit` when the unit's job finishes (owner or `force=True`).
-
-Policy (rules 6/7, env `FLEET_*`): per-host slots default 2 with an
-ABSOLUTE hard ceiling 4 (override above it is refused; raising above
-default needs explicit `override_slots` + a warning stamped on the
-envelope). Auth-adjacent units (`FLEET_AUTH_ADJACENT_RE` —
-login/auth/session/token/...) hold the host exclusively in both
-directions. Crash-stale reclaim (`sweep_stale()`, runs inside every
-request): finished-job (VERIFIED exit only — a missing job row is not
-proof of completion), jobless past `FLEET_BIND_GRACE_S`, or past
-`FLEET_UNIT_TTL_HOURS`. Storage `run/fleet/fleet.db`; rows are
-agent-attributed and cross-actor visible (dedupe is the point);
-`fleet_host_status` is the observability lens (`@framework_tool`,
-infra tag — `utils/` runs in-process, cookie-jar lane).
-
-**Courtesy contract is single-target (2026-10-30):** every
-traffic-sending launcher passes `target=` on its `launch_job` call
-(sqlmap, nmap, ffuf, hydra, masscan, amass ×both launchers) — single-
-target runs ARE fleet units, so any lane's duplicate launch gets the
-running job's id instead of a second process. Release is generic:
-`poll_job` frees bound units at the first done observation
-(`release_units_for_job` — no-ops when no fleet store exists, so a
-never-fleety lane never conjures `fleet.db`); sqlmap's twins keep
-their own releases, which are idempotent.
+Per-host concurrency regulator + dedupe ledger; the accounting axis is the
+TARGET HOST (numeric-span aware — a `/24` sweep contends with its member
+hosts) and not the agent. Adapter contract: `request_unit` returns
+acquired/duplicate/refused; canonical keys cover param NAMES only,
+never raw body bytes. Per-host slots default 2 under an absolute ceiling
+4; auth-adjacent units hold the host exclusively. Every traffic-sending
+launcher passes `target=` on `launch_job` (single-target runs ARE fleet
+units).
 
 ### sqlmap fleet adapter — Phase 2 (`payloads/sqlmap.py`, scale-doctrine Annex D)
 
-Annex A over the Phase 0/1 substrate. The scheduler rides the **launch
-path**, not a parallel API: `launch_job(..., target=..., fleet_body=...,
-override_slots=...)` (`utils/background_job.py`) runs `request_unit →
-launch → bind_job` atomically — duplicate/refused decisions return
-WITHOUT launching (structured envelopes the model reads). Single-target
-`run_sqlmap` IS one fleet unit, so single launches and fleet fanouts
-share the per-host courtesy contract; adapters opt in with one kwarg.
-Models never touch `request_unit` themselves — acquire-and-use is one
-step inside the tool body (a model that could hold slots without
-launching would DoS the host table).
-
-Adapter contributions (the only per-tool pieces): policy table
-(`_build_sqlmap_command`: forced `--batch`, threads policy
-`--threads=1`, per-unit `--output-dir=run/sqlmap_fleet/<key>/` +
-`-t traffic.log`, caller options last, `--purge` REFUSED per rule 5),
-aggregator (`_aggregate_log`: verdict + technique tags + params), and
-the fleet twins: `run_sqlmap_fleet(targets) -> fleet_id` (per-unit
-acquired/duplicate/refused/scope-blocked), `sqlmap_fleet_status`
-(releases finished units), `sqlmap_fleet_results(dedupe=param|host)`
-(rule 8: rows cite `traffic.log`), `sqlmap_fleet_stop` (ownership
-fenced). `fleet_id` records live in the scheduler's generic batch
-registry (PK `(batch_id, seq)` — same-shape targets in one batch are
-two decisions, not one row).
-
-**Verdict parsers are process-wide**: `utils/job_store._PARSERS` is
-module-level, NOT per-instance — the env-override singleton dance
-(launch on instance A, poll on instance B) silently parsed nothing when
-the registry was instance state. A job's fleet unit is released at the
-first `done` poll; `sweep_stale` stays the crash backstop.
+The scheduler rides the **launch path** (`launch_job(..., target=...,
+fleet_body=...)` runs request→launch→bind atomically); models never touch
+`request_unit` themselves. Fleet twins: `run_sqlmap_fleet` /
+`sqlmap_fleet_status` / `sqlmap_fleet_results` / `sqlmap_fleet_stop`.
+Verdict parsers are process-wide (`utils.job_store._PARSERS`), not
+per-instance.
 
 ### Worker queue — Phase 3 (`utils/worker_queue.py` + `payloads/jadx_fleet.py`, scale-doctrine §13)
 
-Bounded-memory process pool for Arch-D units (jadx per-APK now, Burp-class
-later) — the accounting axis is the LOCAL WORKER (RAM), not the target host.
-The fleet scheduler answers "is this TARGETS's host busy?"; the worker queue
-answers "CAN THIS BOX BACK ONE MORE JVM?". Evidence base (2026-10-30): real
-APKs reach multi-GB RSS (upstream issues: 9 GB TikTok #2457, 11 GB/200 MB jar
-#2170, 35 GB large-app runaway #2189; measured ~300 MB on trivial synthetic
-corpora, flat across -j 1..16), and jadx's default launcher sets
-`-XX:MaxRAMPercentage=70.0` — N concurrent JVMs EACH claim 70% of total RAM
-with zero coordination. The queue exists because that arithmetic OOMs boxes.
-
-- **Content-keyed dedupe** (`content_key`): `"<tool>:c<sha256[:12]>"` of the
-  BYTES — identical APK bytes at a different filename are the same unit
-  (snapshot-cache precedent). Unhashable input falls back to a path+size key.
-  Dedupe hits are labelled at the SOURCE: `_existing_envelope` returns
-  decision `duplicate` + `state` (`running`/`launching`/`queued`, with the
-  twin's `job_id` or queue `position`) — adapters never relabel it.
-- **Admission is one formula** (`request_unit`): dedupe → hard caps → slots
-  (`WORKER_QUEUE_SLOTS`, default 2) → claims+budget ≤ (free RAM − pool floor
-  `WORKER_QUEUE_RAM_FLOOR`, default 25% of total RAM, min 2 GiB). The hard
-  caps run BEFORE the queue-wait branches, inside the tx: `budget > total
-  RAM − floor` is refused outright (`budget_impossible` — a permanen
-  impossibility must not silently wedge the queue behind it) and an
-  unmeasurable free-RAM probe fails closed (`memory_unmeasurable`); both
-  commit and return with no row written. Everything else failing
-  memory/slots ⇒ QUEUED, never refused — waiting is cheap, OOM-killing a
-  started decompile loses its work. Queue depth is capped
-  (`WORKER_QUEUE_MAX_Q`, 16) — deeper demand is an operator signal.
-- **Heap pin rides the row**: `heap_pin_env(budget)` writes
-  `JAVA_OPTS="… -Xms32m -Xmx<budget>m"` into the stored env (last-wins after
-  the launcher's DEFAULT_JVM_OPTS) — the row's budget IS the worker's claim.
-  Caller env merges UNDER the pin.
-- **Launch is inline + atomic** (fleet roll-down precedent): admission claims
-  the row (`launching`), launches through the job store OUTSIDE the DB tx,
-  binds on success; launch failure deletes the claim (no phantom). Bind-fail
-  kills the launched job (no slot leak).
-- **Promotion is queue-side**: queued rows carry resolved argv + pinned env;
-  `advance_queue()` (wired into `JobStore._reaper_pass`, also called from
-  `jadx_fleet_status`) releases `launched` rows whose job VERIFIED finished
-  (`poll()`, not `get()` — only poll observes/reaps; get-only sweeps leak
-  slots) and launch-promotes FIFO heads while admission fits, one attempt
-  per pass (a persistently failing binary cannot wedge the reaper). FIFO
-  order is deterministic — head is `ORDER BY requested, unit_key`, and the
-  impossible-head cancel from the admission cap (legacy rows predating it)
-  keeps the queue moving instead of wedging behind a permanently
-  impossible budget.
-- **Statuses**: `queued → launching → launched → finished|cancelled`.
-  `finished` = ran, exited, slot freed (SUCCESS — keep it distinct from
-  `cancelled` = operator stop/crash reclaim; conflating them made the pool
-  ledger unobservable, first lesson of Phase 3). Terminal rows age out (TTL
-  7d); queued rows TTL 24h (`WORKER_QUEUE_TTL_HOURS`); `launching` claims
-  past `WORKER_QUEUE_BIND_GRACE_S` are swept as crashed launchers — the
-  grace reads the `launching_at` CLAIM stamp (stamped on `queued →
-  launching`), never `requested` (the queue-entry time, never rewritten on
-  promotion — measuring from it would kill a long-queued unit at the
-  instant it finally launches). Legacy rows without the stamp fall back
-  via `COALESCE(launching_at, requested)`. Terminal envelopes keep their
-  output: `poll_unit` finished/failed branches attach the job's log tail
-  (`_terminal_job_tail`) so adapters (burp verdicts) read results off the
-  status lane even after the release sweep settled the unit before any
-  live poll observed the log.
-- **Popen(env=) is a REPLACEMENT, not a merge** — found live: queue-launched
-  children got ONLY the pin env (no PATH → execvp fell back to the compiled-in
-  default and silently ignored both test stubs and the operator's bin dir;
-  the JVM's slower boot masqueraded as flaky test timing). `_launch_claim`
-  merges into `os.environ`, pin merged last. RULE: any launch through the
-  store with a custom env starts from `os.environ` and updates.
-- **jadx twins** (`payloads/jadx_fleet.py`): `jadx_fleet(targets,
-  memory_budget=640, threads, deobf, no_res)` → per-unit
-  launched/queued/duplicate/refused + `fleet_id` (decisions are consumed as
-  the queue labelled them — no downstream relabelling);
-  `jadx_fleet_status` (per-unit state via `WorkerQueue.units_by_note`,
-  workspace-done check resolved directly from the row's stored target —
-  already an absolute path at admission, and may be gone post-decompile —
-  pools the advance sweep); `jadx_fleet_stop` (terminate jobs + cancel
-  queued, ownership-fenced, same queue API); `worker_queue_status`
-  observability lens. Default budget 640 MiB (2× the measured synthetic
-  peak — operators raise for real APKs 1-4 GB+).
-- Budget cap 16 GiB/unit (`_JADX_FLEET_BUDGET_CAP`); `-j` per unit defaults
-  to half the cores clamped 1..8 (the pool bounds processes, -j tunes
-  threads within one).
-
-**RSS ledger feedback (2026-10-30):** every finished unit's measured
-kernel VmHWM peak (`utils/worker_queue.py:_rss_hwm_mib`, single /proc read
-while the unit runs — sampled live by `poll_unit` and by the release loop's
-last-chance sample before the process takes its /proc entry away) is
-recorded in the `worker_rss` evidence table (MAX-of-runs upsert, TTL
-`WORKER_QUEUE_EVIDENCE_TTL_HOURS` default 720h). Future `request_unit` calls
-for the same content key claim `max(budget, recorded_peak)` via
-`_effective_claim`, and the envelope stamps the overrulement additively
-(`claim_mib` + `evidence_peak_mib` only when the measurement actually
-overruled the guess — a plain-budget envelope stays shape-identical to
-pre-evidence). Envelope budget caps (`budget_impossible`) now track the
-evidence-backed claim, so the honest message carries the measured
-justification. **Delta model (2026-10-30):** a JVM's resident footprint
-is its heap pin (-Xmx) plus roughly-fixed native overhead, so the claim
-tracks the PIN — `claim = budget + (recorded_peak − recorded_pin)`, the
-measured overhead of the recording run — instead of the absolute
-`max(budget, peak)` escalation that permanently refused near-capacity
-budgets after one real run (a JVM's RSS always exceeds -Xmx). Lowering
-the budget is an honest remedy again; only a pin above `capacity −
-measured_overhead` refuses. Legacy evidence rows predating the stored
-pin fall back to the old absolute model. Same-day queue fixes found by the RSS suite-run flake
-debug: the job store's live-proc registry is PROCESS-SCOPED
-(`_LIVE_CHILD_PROCS`, `utils/job_store.py`) — the env-keyed singleton
-rebuilds at fixture boundaries, and a poll through the second instance
-used to miss the launcher's Popen and sit on the cross-lane pid path,
-which reports our own unreaped zombie alive forever (drains stalled);
-and terminal-row re-requests are honest (`worker_units.unit_key` PK): a
-`finished` content key returns a finished-duplicate pointing at the
-completed run's `job_id` (same bytes need not run again), a `cancelled`
-row is deleted so `release_unit`'s fresh-row promise finally holds.
+Bounded-memory process pool for Arch-D units (jadx per-APK); the
+accounting axis is the LOCAL WORKER's RAM, not the target host
+(multi-GB-RSS evidence in the doctrine). Content-keyed dedupe of input
+BYTES, admission = dedupe → hard caps → slots → free-RAM formula, and
+everything merely scarce QUEUES instead of refusing. Heap pins ride the
+row (`-Xmx`); measured VmHWM evidence raises the next claim
+(`claim = budget + (peak − pin)`). **Popen(env=) is a REPLACEMENT, not a
+merge** — any launch through the store with a custom env starts from
+`os.environ` and updates.
 
 ### Burp fleet twins (`payloads/burp_fleet.py` + `payloads/burp_worker.py`, scale-doctrine §13 annex)
 
-Adapters the queue over the MCP BApp lane — the workload shape that hurts
-next is replaying MANY captured requests without burning the turn budget
-on N sequential MCP calls. Measured constraints (2026-10-30, live lane)
-that shaped the adapter:
-
-- The MCP BApp exposes 24 request-crafting tools and NO scan surface —
-  no `start_active_scan`; active scanning stays ZAP's job. The twins are
-  replay/craft tools, not scanners, and say so in their descriptions.
-- ONE Burp JVM is shared infra (measured VmHWM ~961 MiB at idle). A unit's
-  queue claim is the CHILD worker's RAM (default 128 MiB, ceiling 1024) —
-  never the JVM's (claiming it per unit would double-count a long-lived
-  consumer on every admission). The JVM's live RSS/VmHWM (`_burp_jvm_pressure`,
-  `BURP_JVM_PID` override) is reported by `burp_replay_status` instead.
-
-Adapter mechanics (the queue lane composing the sqlmap adapter's
-per-unit scope checks + verdict parsing):
-per unit, the request's Host header is scope-checked BEFORE admission
-(sqlmap pattern — a blocked target is a row decision, not a launch);
-`check_scan` may block before launch while the CHILD's decorated wrapper
-applies the armed gate again at send time (`ScopeGateError` → the unit
-aborts with an honest `aborted` verdict, exit 2). Unit definition is a
-MANIFEST: the raw request text EMBEDDED (never referenced by path —
-identical bytes at different filenames produce byte-identical manifests),
-plus host/port/https/retries — `content_key("burp", manifest)` therefore
-keys on the unit's whole meaning, and a `retries` change re-keys honestly.
-A child (`burp_worker.py`, `_NO_LOCAL_TOOL` — internal plumbing, not an
-operator CLI) replays the request `retries` times through
-`burp_send_http1_request`, writing `BURP-RETRY` lines + one structured
-`BURP-VERDICT` line that `register_verdict_parser("burp", ...)` reads.
-Batch handle is the queue `note`; twins are `burp_replay_fleet` /
-`burp_replay_status` (per-unit verdicts parsed from the log tail + JVM
-pressure + advance piggyback) / `burp_replay_stop` (queued rows cancel;
-launched rows release BEFORE the job-store stop — releasing after races
-the reaper's done-observation, which would stamp a killed unit
-`finished`; the stop failure stays reportable in `refused`). Test stubs
-ride `BURP_WORKER_PY`; the drop folder `burp/` relocates with
-`BURP_DROP_DIR`, unit manifests with `BURP_FLEET_UNIT_DIR` — manifests
-are written 0600 inside a 0700 dir (they embed raw requests verbatim)
-and are swept TTL-style (`BURP_FLEET_UNIT_TTL_HOURS`, default 48h,
-0 disables) on every write. Honest v1
-limits: verbatim replay only (no mutation per attempt — change the file
-for a new unit); BApp session concurrency is unmeasured, slots default
-low is the guidance; no scan surface.
+Replay/craft adapters over the queue with **no scan surface** (active
+scanning stays ZAP's job). One shared Burp JVM; a unit's claim is the child
+worker's RAM. Unit manifests embed the raw request (content-keyed on the
+bytes); the child writes structured `BURP-VERDICT` lines a registered
+parser reads. Honest v1 limits in the doctrine.
 
 ### Memory Service (`memories.py`)
 
@@ -756,10 +349,6 @@ SQLite + numpy vector store (`.memory/vectors.db`). Namespaced collections
 Thread-safe singleton holding live connection objects keyed by `session_id`
 (e.g. `sess-0001`). Tools call `register()` on open, `get()` for follow-up
 commands. `cleanup_stale()` closes sessions idle beyond a threshold.
-
-**Process-local:** sessions live in whichever process ran the tool (Brain or
-in-process launcher). If the Brain dies and a call falls back in-process,
-it cannot see sessions the Brain was holding.
 
 ### Universal Cookie Jar (`utils/cookie_jar.py`) + Stateful HTTP Lane (`auxiliaries/web_session.py`)
 
@@ -811,35 +400,15 @@ are just strings, so they live in SQLite, not in process memory:
 `dispatch_metasploit(module_path, category, options, start_handler=False)`
 is the single entry point for MSF module execution; `category` must match
 the `module_path` prefix ('exploit'/'auxiliary'/'post', with `post`
-requiring `SESSION`). `payloads/msfvenom_tools.py` + the
-`session_upload` delivery step (`auxiliaries/web_session.py`) form the
-generate → upload → trigger file-upload lane (`dropbox/` output, shared
-`_start_handler_job` listener primitive, meterpreter payloads work through
-both lanes).
-
-The operational rules live in the canonical deep-dive,
-[`payloads/README.md`](payloads/README.md) — keyed facts: a binary
-FTP/TFTP-stager payload cannot stage an ELF through a raw-shell backdoor
-channel ("Unsupported Binary Selected") — use pure-command `cmd/unix/*`
-payloads; meterpreter payloads now run through this client (the old
-`AutoLoadExtensions` non-scalar bug no longer reproduces); `AutoCheck=False` +
-`ForceExploit=True` are harness defaults for exploit modules;
-`start_handler=True` starts a persistent handler job and sets
-`DisablePayloadHandler=True`, `start_handler=False` for auxiliaries and
-manual-handler exploits (vsftpd_234_backdoor); LHOST must be reachable FROM
-the target — bind `cmd/unix/bind_*` payloads for unroutable targets;
-launch failures (`job_id: null` / error envelope) surface immediately with
-handler cleanup instead of the "No new sessions detected" mask; msfvenom
-generation is offline compute (not gated) while `session_upload` and the
-trigger `session_get` are per-hop scope-gated.
-
-`payloads/msfvenom_tools.py:generate_payload` gained `encrypt` /
-`encrypt_key` / `encrypt_iv` (aes256/aes256cbc/rc4/xor/base64; key+iv
-hex-validated before any subprocess; exact cipher names come from
-`msfvenom_menu(kind='encrypt')`). It emits **encrypted raw shellcode only** —
-no decryptor stub, no wrapper. An encrypted blob alone is inert; a pairing
-loader (decrypt + execute at runtime) is a future expansion lane
-(see `payloads/README.md` for the encrypt block).
+requiring `SESSION`) — harness defaults: `AutoCheck=False` +
+`ForceExploit=True` for exploit modules; persistent handler jobs via
+`start_handler`; `cmd/unix/bind_*` payloads for unroutable targets.
+`payloads/msfvenom_tools.py` + `session_upload` form the
+generate → upload → trigger file-upload lane; `generate_payload` emits
+**encrypted raw shellcode only** (no decryptor stub — an encrypted blob
+alone is inert). ALL operational rules and quirks live in the canonical
+deep-dive, [`payloads/README.md`](payloads/README.md) (Metasploit client
+quirks, handler flags, the encrypt block — read it before MSF work).
 
 ## Development Guidelines
 

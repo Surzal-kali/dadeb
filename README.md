@@ -1,8 +1,11 @@
 # daharness
 
 A headless orchestration harness for authorized security research: plug your
-own LLM into a registry of 150+ security tools it can search, pick, and run
-inside operator-armed scope gates — with target data never leaving your
+own LLM into a vector-indexed registry of security tools (near-250 and
+growing — check the live count with `daharness doctor registry`, where
+`framework_health` reports `tool_count`; the registry also auto-grows with
+whatever the operator drops in `~/.dacustoms`) that it can search, pick, and
+run inside operator-armed scope gates — with target data never leaving your
 hardware. The harness ships no conversation model of its own; whatever LLM
 you wire into the gateway/MCP/REPL lanes does the driving.
 
@@ -45,6 +48,61 @@ data-protection law. The framework defaults to a locally hosted Ollama
 endpoint; see the [Legal Addendum](#legal-addendum--local-models-only-for-pentesting)
 and `daharness-safety(7)`. The same rule applies to the embeddings provider
 (`EMBED_URL`) — it receives the text being embedded.
+
+## What it looks like
+
+A short REPL transcript (abridged). The point is the last step — the
+refusal is the feature, so it is shown:
+
+```
+$ daharness-repl
+daharness> scope on local-lab --platform lab
+  Scope gate ARMED: local-lab (lab)
+  In-scope: 10.0.0.0/24   out-of-scope assets listed in the manifest
+
+daharness> search "enumerate open ports"
+  1. auxiliaries.nmap.run_scan      d=0.21  Run an nmap port/service scan...
+  2. auxiliaries.masscan.run_masscan d=0.34 ...
+daharness> run auxiliaries.nmap.run_scan --target 10.0.0.105 --options "-sV -p 1-1000"
+  job <id> launched → poll with nmap_status
+daharness> run auxiliaries.nmap.run_scan --target 10.0.0.205 --options "-Pn -sV"
+  ScopeGateError: target '10.0.0.205': not confirmed in-scope for program
+  'local-lab'; refused (strict). Bless a resolved IP with
+  'scope add-ip <ip> <hostname>' ... in the Tool REPL, or 'scope off'
+  for lab mode.
+  ^ nothing was sent — a blocked target raises before any traffic
+
+daharness> report_finding --title "HTTP on 10.0.0.105:80" --severity P4 ...
+  Finding 17 reported. Use render_findings to review all findings.
+```
+
+The same dispatches through the gateway look like:
+`POST /tools/execute` → `{"tool_id": ..., "result": {...}}` with oversized
+results truncated to a `scratch_ref` + continuation call instead of flooding
+model context.
+
+## How the lanes fit together
+
+```mermaid
+flowchart LR
+    driver["Your LLM<br/>(local, any client)"] -->|REST /tools/*<br/>POST /mcp| gw["API gateway<br/>(FastAPI, :5000)"]
+    driver -->|operator REPL| repl["tool REPL<br/>(daharness-repl)"]
+    repl -->|search / run| gw
+    gw -->|UDS, 4-byte framing| brain["Brain sidecar"]
+    brain -->|dispatch| tools["@framework_tool callables<br/>(nmap, ZAP, MSF, ...)"]
+    brain -.->|socket down| ipf["in-process fallback"]
+    ipf --> tools
+    tools -->|oversized/digested results| proj["result projection"]
+    proj -->|scratch_ref| scratch["scratch store<br/>(SQLite, per-agent)"]
+    tools -->|traffic| gate["scope gate<br/>(operator-armed)"]
+    gate -->|blocked → error| tools
+    tools -->|findings| ids["findings / evidence<br/>(ids.db)"]
+```
+
+Python orchestrates; the dispatch plane has a Rust port (`rust/brain` —
+same wire protocol over a tokio UDS listener) and the scratch/pcap lanes
+have Rust twins cross-compatible over the same on-disk stores; C plugins
+remain an optional seam (`listeners/`).
 
 ## Quick start (system package)
 
@@ -131,8 +189,22 @@ env conffile, Postgres init bundle, and the man-page sources
   untrusted-target tools get stamped provenance
   (`daharness/models.py:ExecutionEnvelope`).
 
+The dispatch plane is being ported to **Rust** (`rust/`): `rust/brain` (a
+tokio reimplementation of the Brain UDS transport — byte-compatible
+4-byte framing, typed event parsing, `flock` singleton guard, worker IPC
+over the same codec, `BRAIN_EXEC_CEILING + 30s` backstop), `rust/scratch`
+(the scratch store, cross-compatible over the same `scratch.db`), and
+`rust/pcap` (the packet-forensic lane's codec/dissect/search core). Python
+stays the reference implementation and owns tool execution; the Rust lane
+ships as source in the deb and builds opt-in via `daharness-rust(1)`. C
+plugins (`listeners/`, e.g. the Brain event gate) remain a small
+optional seam. Language weight today: Python ~2.9 MB, Rust ~250 KB, Shell
+~78 KB (man-page + packaging plumbing), PLpgSQL ~19 KB (the engagement
+cobweb's Postgres lane).
+
 Anatomy, transports, and the envelope contract: `daharness-tools(7)` and
-[`AGENTS.md`](AGENTS.md) (agent-facing deep dive).
+[`AGENTS.md`](AGENTS.md) (agent-facing deep dive; invariants + pitfalls live
+here, deeper topic notes under `knowledge/`).
 
 ## External dependencies
 
@@ -229,8 +301,11 @@ sitecustomize.py        Vendored-closure import path armer (deb lane)
 AGENTS.md               Agent-facing architecture + development guidelines
 auxiliaries/            Recon & access lanes (nmap, ZAP, r2, jadx, scope, web session)
 payloads/               Offensive lanes (MSF, msfvenom, ffuf, hydra, sqlmap, cracking)
-listeners/              Brain sidecar, OOB collaborator, C plugins
+listeners/              Brain sidecar (Python reference + Rust port under rust/),
+                        OOB collaborator, C plugins
 utils/                  Harness plumbing (scope gate, projection, scratch, findings)
+rust/                   Rust dispatch plane: brain/ (tokio Brain transport),
+                        scratch/ (scratch store port), pcap/ (packet forensic core)
 knowledge/              Short operator/model reference docs (scope, lanes, findings)
 tests/                  pytest suite for registry + dispatch flows
 scripts/                Stub generator + dev systemd units
@@ -242,7 +317,8 @@ apk/ binaries/ dropbox/ pcaps/   Drop folders (READMEs document the lanes)
 
 The code directories (`auxiliaries/`, `payloads/`, `listeners/`, `utils/`,
 `tests/` and the drop folders) each carry their own
-`README.md` with the per-module inventory; `daharness/`, `replkit/` and the
-packaging tree document through docstrings, module summaries and man pages
-instead. Man-page sources live in `packaging/man/` as `.md` renditions of
-the roff pages.
+`README.md` with the per-module inventory; `rust/brain/README.md`,
+`rust/scratch/README.md` and `rust/pcap/README.md` document the Rust crates;
+`daharness/`, `replkit/` and the packaging tree document through
+docstrings, module summaries and man pages instead. Man-page sources live
+in `packaging/man/` as `.md` renditions of the roff pages.
