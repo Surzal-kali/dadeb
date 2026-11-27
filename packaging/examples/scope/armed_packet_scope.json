@@ -1,0 +1,9 @@
+{
+  "handle": "local-lab",
+  "platform": "lab",
+  "strict": true,
+  "ip_boundary": false,
+  "allowlist": {},
+  "blessed_hosts": {},
+  "disabled_tools": []
+}

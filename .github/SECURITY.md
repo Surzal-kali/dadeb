@@ -52,9 +52,10 @@ product working as intended:
 
 - "It can port-scan / fuzz / brute-force / exploit systems."
 - "It runs nmap / MSF / sqlmap / hydra — those tools attack things."
-- "With the scope gate disarmed (the default), tools reach any target."
-  The armed gate is operator-controlled by design; the disarmed lab default
-  is a documented deployment decision, not a bypass.
+- "The default Debian install arms a strict local-lab scope; source
+  checkouts without an armed-state file are disarmed."
+  The gate is operator-controlled by design, and no model lane can toggle
+  it.
 - "The driving model can request tool executions." That is the
   architecture: the harness ships no conversation model and no approval
   gate — an integrating harness that wants sign-off adds its own layer in

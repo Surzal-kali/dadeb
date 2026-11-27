@@ -174,12 +174,26 @@ if [ -r "$_TEMPLATE" ]; then
             if install -m 0660 -o daharness -g daharness \
                 "$_TEMPLATE" /var/lib/daharness/scope/lab_local-lab.json; then
                 echo "daharness: seeded lab scope template at /var/lib/daharness/scope/lab_local-lab.json"
-                echo "  edit the subnet/ROE, then arm: python tool_repl.py scope on local-lab --platform lab"
+                echo "  edit the subnet/ROE; the strict local-lab gate is armed by default"
             fi
         fi
     fi
 fi
 unset _TEMPLATE
+
+# Seed an armed local-lab gate on a fresh install only. Do not re-arm an
+# operator who deliberately disarmed it when a later package upgrade runs.
+_ARMED_TEMPLATE=/usr/share/daharness/examples/scope/armed_packet_scope.json
+_ARMED_STATE=/var/lib/daharness/scope/.armed_packet_scope.json
+if [ -z "${2:-}" ] && [ -r "$_ARMED_TEMPLATE" ] && \
+   [ -r /var/lib/daharness/scope/lab_local-lab.json ] && \
+   [ ! -e "$_ARMED_STATE" ]; then
+    install -m 0660 -o daharness -g daharness \
+        "$_ARMED_TEMPLATE" "$_ARMED_STATE"
+    echo "daharness: armed the strict local-lab scope gate by default"
+    echo "  edit /var/lib/daharness/scope/lab_local-lab.json to match your lab"
+fi
+unset _ARMED_TEMPLATE _ARMED_STATE
 
 
 # Gateway API key: generate once when the conffile placeholder is still

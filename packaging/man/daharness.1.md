@@ -73,13 +73,15 @@ an honest `lane_blocked: true` permission report from
 phantom "down".
 
 Scope manifests get the same treatment: *postinst* seeds the editable
-lab template into */var/lib/daharness/scope/lab_local-lab.json* (never
-stomping an existing file) so a temp local-lab scope is authored-off-rip
-— edit the subnet/ROE lines, then `python tool_repl.py scope on
-local-lab --platform lab`. Custom manifests follow
+lab template into */var/lib/daharness/scope/lab_local-lab.json* and arms
+the strict *lab/local-lab* scope by default (never stomping existing
+files). Edit the subnet/ROE lines before using traffic tools; the armed
+gate reads the manifest live. Custom manifests follow
 *scope/&lt;platform&gt;_&lt;handle&gt;.json* in the state root and arm
 with any `--platform` value. The pristine copy lives at
 */usr/share/daharness/examples/scope/lab_local-lab.json*.
+The default armed-state template is
+*/usr/share/daharness/examples/scope/armed_packet_scope.json*.
 
 Privileged lanes (raw-socket scanning, low-port OOB) are not part of this
 baseline; they degrade honestly and are documented in **daharness-safety(7)**.
@@ -93,6 +95,8 @@ baseline; they degrade honestly and are documented in **daharness-safety(7)**.
 WORKSPACE_ROOT + BRAIN_SOCKET for shells that lack them)
 */usr/share/daharness/examples/scope/lab_local-lab.json* — editable lab
 scope-manifest template (postinst seeds it into the state root's *scope/*)
+*/usr/share/daharness/examples/scope/armed_packet_scope.json* — default
+strict local-lab armed-state template
 
 # SEE ALSO
 

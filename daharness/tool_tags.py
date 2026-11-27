@@ -272,6 +272,7 @@ TOOL_TAGS: dict[str, tuple[str, ...]] = {
     "utils.cookie_jar.jar_clear": ("infra",),
     "utils.cookie_jar.jar_cookie_header": ("infra",),
     "utils.paramiko_client.list_sessions": ("infra",),
+    "utils.scope_gate.read_armed_scope": ("infra",),
     "auxiliaries.zap.zap_report": ("infra",),
     "auxiliaries.zap.zap_sync_scope": ("infra",),
     # --- net.services (non-HTTP service interaction; operator-added 09/22) ---

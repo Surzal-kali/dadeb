@@ -7,9 +7,11 @@ they both call — the verdict logic is the unit under test here.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
+from daharness.tool_tags import resolve_tags
 from utils import scope_gate
 
 
@@ -149,6 +151,7 @@ class TestReadArmedScope:
         assert result["scope"] == on_disk
         assert result["scope"] != cached_state
         assert scope_gate.read_armed_scope._is_framework_tool
+        assert resolve_tags("utils.scope_gate.read_armed_scope") == ("infra",)
 
     def test_reports_disarmed_scope(self, state_root):
         result = scope_gate.read_armed_scope()
@@ -171,6 +174,29 @@ class TestReadArmedScope:
         assert result["armed"]
         assert result["raw"] == "{invalid"
         assert "invalid JSON" in result["error"]
+
+
+class TestPackagedDefaultScope:
+    def test_strict_local_lab_scope_is_armed_by_default(self, state_root):
+        examples = (
+            Path(__file__).resolve().parents[1]
+            / "packaging"
+            / "examples"
+            / "scope"
+        )
+        manifest = json.loads((examples / "lab_local-lab.json").read_text())
+        state = json.loads((examples / "armed_packet_scope.json").read_text())
+        scope_dir = state_root / "scope"
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        (scope_dir / "lab_local-lab.json").write_text(json.dumps(manifest))
+        (scope_dir / ".armed_packet_scope.json").write_text(json.dumps(state))
+        scope_gate._CACHE.clear()
+
+        assert state["handle"] == "local-lab"
+        assert state["platform"] == "lab"
+        assert state["strict"] is True
+        assert not scope_gate.check_scan("203.0.113.10")[0]
+        assert scope_gate.check_scan("192.168.56.10")[0]
 
 
 class TestRejectEnvelope:

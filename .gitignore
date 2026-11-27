@@ -28,6 +28,9 @@ chroma-data/
 .pw-browsers/
 findings_md/
 scope/
+!packaging/examples/
+!packaging/examples/scope/
+!packaging/examples/scope/armed_packet_scope.json
 *.scope
 # --- drop folders (operator payloads & evidence, tracked README only) ---
 /binaries/*

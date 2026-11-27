@@ -42,10 +42,13 @@ Read them together:
 
 ## 3. Scope-gate messages are not errors
 
-If a tool raises `ScopeGateError`, the operator-armed gate chose to block
-that traffic — that is the framework working. Armed state is controlled
-only from the REPL (`scope on <handle>` / `scope off` / `scope status`);
-no model lane can toggle the gate. Disarmed (lab) mode is the default. Full
+If a tool raises `ScopeGateError`, the scope gate chose to block that
+traffic — that is the framework working. Debian installs start with the
+strict `lab/local-lab` scope armed; edit
+`/var/lib/daharness/scope/lab_local-lab.json` for your lab before using
+traffic tools. Source checkouts with no armed-state file are disarmed.
+Arming/disarming is controlled only from the REPL (`scope on <handle>` /
+`scope off` / `scope status`); no model lane can toggle the gate. Full
 semantics: [`knowledge/scope_gate.md`](scope_gate.md).
 
 ## 4. Still stuck

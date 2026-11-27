@@ -4,9 +4,10 @@ Scope enforcement so a mis-targeted scan or crafted packet can't drift onto
 an out-of-scope host.  Arming and disarming is a HUMAN authority action
 performed from the Tool REPL (``scope on`` / ``scope off``) — it is
 deliberately NOT exposed as an ``@framework_tool``, so the secretary agent
-has no way to toggle or circumvent it.  When armed, every traffic-sending
-tool consults this gate before firing; when disarmed (the default —
-lab / VPN-practice mode) tools behave exactly as before.
+has no way to toggle or circumvent it. Debian installs seed a strict
+local-lab armed state; source checkouts without an armed-state file are
+disarmed by default. When armed, every traffic-sending tool consults this
+gate before firing.
 
 Coverage
 --------

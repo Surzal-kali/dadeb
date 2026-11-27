@@ -8,13 +8,17 @@ daharness-safety — daharness safety model: scope gate, approvals, budgets, ret
 
 # DESCRIPTION
 
-## Scope gate (operator-armed only)
+## Scope gate (operator-controlled)
 
-Traffic-sending tools resolve every target through an operator-armed scope
-state. Arming happens ONLY at the operator REPL (`scope on <handle>`) and is
-deliberately NOT exposed as an LLM-callable tool, so no model lane can
-toggle it. State persists across processes (the REPL can re-arm a running
-Brain). Blocked targets raise a scope error instead of transmitting.
+Traffic-sending tools resolve every target through an operator-controlled
+scope state. Debian installs seed a strict `lab/local-lab` state armed by
+default; edit the local-lab manifest before using traffic tools. Source
+checkouts without an armed-state file are disarmed. Arming and disarming
+are available ONLY at the operator REPL (`scope on <handle>` / `scope off`)
+and are deliberately NOT exposed as LLM-callable tools, so no model lane
+can toggle the gate. State persists across processes (the REPL can re-arm
+a running Brain). Blocked targets raise a scope error instead of
+transmitting.
 
 ## Human-in-the-loop approval
 
