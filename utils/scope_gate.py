@@ -91,7 +91,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from constants import resolve_workspace_root
+from constants import framework_tool, resolve_workspace_root
 from utils._scope_gate_disabled import (
     disable_tools,
     disabled_reject_envelope,
@@ -838,6 +838,36 @@ def status() -> dict[str, Any]:
     return out
 
 
+@framework_tool(
+    "Read the complete operator-armed scope gate document directly from "
+    "scope/.armed_packet_scope.json. Returns every stored field, including "
+    "lab/local-lab scope state, rather than the program-manifest summary "
+    "returned by scope status. This tool is read-only; it never arms or "
+    "disarms the scope gate."
+)
+def read_armed_scope() -> dict[str, Any]:
+    """Read the complete armed scope state directly from its JSON file."""
+    path = _state_path()
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return {"ok": True, "armed": False, "path": str(path), "scope": None}
+    except OSError as exc:
+        return {"ok": False, "path": str(path), "error": f"could not read armed scope: {exc}"}
+
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {
+            "ok": False,
+            "armed": True,
+            "path": str(path),
+            "error": f"armed scope file contains invalid JSON: {exc}",
+            "raw": raw,
+        }
+    return {"ok": True, "armed": True, "path": str(path), "scope": state}
+
+
 
 
 def is_armed() -> bool:
@@ -858,6 +888,7 @@ __all__ = [
     "remove_host",
     "list_ips",
     "status",
+    "read_armed_scope",
     "is_armed",
     "is_disabled",
     "disable_tools",

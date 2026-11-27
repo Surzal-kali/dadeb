@@ -135,6 +135,44 @@ class TestStatusSurface:
         assert st["disabled_tools_count"] == 0
 
 
+class TestReadArmedScope:
+    def test_reads_full_scope_document_directly_from_disk(self, armed_scope):
+        path = armed_scope / "scope" / ".armed_packet_scope.json"
+        cached_state = scope_gate._load_state()
+        on_disk = json.loads(path.read_text())
+        on_disk["disk_only"] = {"local_lab_setting": True}
+        path.write_text(json.dumps(on_disk))
+
+        result = scope_gate.read_armed_scope()
+
+        assert result["ok"] and result["armed"]
+        assert result["scope"] == on_disk
+        assert result["scope"] != cached_state
+        assert scope_gate.read_armed_scope._is_framework_tool
+
+    def test_reports_disarmed_scope(self, state_root):
+        result = scope_gate.read_armed_scope()
+
+        assert result == {
+            "ok": True,
+            "armed": False,
+            "path": str(state_root / "scope" / ".armed_packet_scope.json"),
+            "scope": None,
+        }
+
+    def test_reports_malformed_scope_file(self, state_root):
+        path = state_root / "scope" / ".armed_packet_scope.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{invalid")
+
+        result = scope_gate.read_armed_scope()
+
+        assert not result["ok"]
+        assert result["armed"]
+        assert result["raw"] == "{invalid"
+        assert "invalid JSON" in result["error"]
+
+
 class TestRejectEnvelope:
     def test_envelope_shape(self):
         env = scope_gate.disabled_reject_envelope(
