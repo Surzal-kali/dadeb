@@ -9,6 +9,7 @@ on:
     paths: ["**.py", "pyproject.toml", "requirements.txt", ".github/workflows/python.yml"]
   pull_request:
     paths: ["**.py", "pyproject.toml", "requirements.txt", ".github/workflows/python.yml"]
+  workflow_dispatch: {}   # re-runnable from the Actions tab without a new push
 
 permissions:
   contents: read

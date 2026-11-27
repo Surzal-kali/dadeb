@@ -387,6 +387,25 @@ def run_ffuf(url: str, wordlist: str = "", options: str = "",
     if not _sc_ok:
         raise ScopeGateError(f"scope gate: {_sc_reason}")
 
+    # Fleet duplicate check BEFORE the wordlist preflight (2026-11-26 CI
+    # lesson): a duplicate answer is a no-launch decision that must win
+    # over a missing-wordlist error — one identical unit already fuzzing
+    # means "poll its job_id", regardless of whether THIS lane could have
+    # resolved a wordlist (CI runners and deb lanes without the Kali
+    # metapackage often can't). Read-only peek; never conjures fleet.db.
+    from utils.fleet_scheduler import get_scheduler
+
+    live_dup = get_scheduler().peek_unit("ffuf", url)
+    if live_dup is not None:
+        return {
+            "status": "duplicate",
+            "job_id": live_dup["job_id"],
+            "unit_key": live_dup["unit_key"],
+            "started_by": live_dup["agent_id"],
+            "started": live_dup["started"],
+            "message": live_dup["message"],
+        }
+
     wordlist = (wordlist or "").strip()
     default_used = False
     if not wordlist:

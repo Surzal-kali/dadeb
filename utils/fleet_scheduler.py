@@ -703,6 +703,47 @@ class FleetScheduler:
             out["warning"] = warning
         return out
 
+    def peek_unit(self, tool: str, target: str, *, body: str = "") -> dict[str, Any] | None:
+        """Read-only duplicate check: is a unit with this canonical key
+        RUNNING right now (2026-11-26: preflight ordering for launchers
+        whose argument preflight can error out BEFORE the fleet decision —
+        a duplicate answer means "poll the live job", which must win over
+        a missing-wordlist error that would fire first and mislabel the
+        launch as failed when the unit is in fact running).
+
+        Returns the same shape as the ``duplicate`` decision envelope
+        (``unit_key``/``job_id``/``agent_id``/``started``/``message``),
+        or ``None`` when no live unit matches (or no fleet lane exists —
+        never conjures the store). Never raises."""
+        try:
+            if not _store_dir().exists():
+                return None
+            sched = self if isinstance(self, FleetScheduler) else get_scheduler()
+            unit_key = canonical_unit_key(tool, target, body=body)
+            sched.sweep_stale()
+            with sched.db_lock:
+                row = sched.conn.execute(
+                    "SELECT * FROM fleet_units WHERE unit_key = ? AND status = 'running'",
+                    (unit_key,),
+                ).fetchone()
+            if row is None or row["status"] != "running":
+                return None
+            return {
+                "unit_key": unit_key,
+                "job_id": row["job_id"],
+                "agent_id": row["agent_id"],
+                "started": row["started"],
+                "message": (
+                    f"unit already running (key {unit_key}, started by "
+                    f"{row['agent_id']}); poll its job_id instead of "
+                    "launching a second process"
+                ),
+            }
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "swallowed exception in peek_unit", exc_info=True)
+            return None
+
     # -- job binding + release ----------------------------------------------------
 
     def bind_job(self, unit_key: str, job_id: str) -> dict[str, Any]:

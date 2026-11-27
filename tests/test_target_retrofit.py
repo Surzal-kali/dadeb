@@ -186,6 +186,16 @@ def test_ffuf_verbatim_on_duplicate(fleet_env, monkeypatch):
         "message": "unit already running",
     }
     monkeypatch.setattr(ffuf_mod, "launch_job", lambda *a, **k: dict(dup_env))
+    # Box-neutral preflight (2026-11-26 CI lesson): the runner has no
+    # /usr/share/wordlists, and the preflight fires BEFORE launch — stub
+    # the default resolution so the test pins the passthrough itself, not
+    # wordlist availability. (run_ffuf also peeks the fleet scheduler for
+    # a live duplicate first; nothing launched here, so the peek is None
+    # and the flow reaches the stubbed launch with a resolvable wordlist.)
+    monkeypatch.setattr(ffuf_mod, "resolve_default_wordlist",
+                        lambda kind, root=None: str(fleet_env["state"] / "wl.txt"))
+    monkeypatch.setattr(ffuf_mod, "resolve_wordlist",
+                        lambda rel, root=None: rel)
     res = ffuf_mod.run_ffuf("http://192.168.56.106/FUZZ")
     # post-launch decoration (note/wordlist keys) must NOT land on it
     assert res == dup_env

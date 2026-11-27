@@ -309,16 +309,54 @@ HEADER_FORMAT = "!I"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # guard against bogus/oversized length headers
 
-lib = ctypes.CDLL(LIB_PATH)
-# Bind path from the shared resolver: the socket lives in the checkout's
-# run/ dir so every lane that mounts this tree (host REPL, jupyter kernel,
-# open-terminal) reaches the SAME inode — a /tmp socket is per-namespace and
-# can never cross a container boundary. $BRAIN_SOCKET overrides.
-socket_path = str(brain_socket_path())
+# The optional C event-gate plugin (frameit.so) is a gitignored build
+# artifact (compiled at deb-build time in debian/rules; on a git checkout
+# compile it with: gcc -shared -o listeners/plugins/frameit.so -fPIC
+# listeners/plugins/frameit.c). The load used to be unguarded and
+# module-level, so EVERY listeners.* / memories / utils.memory_tools
+# import died with OSError on any tree without the .so — the whole
+# discovery dynamic scan for listeners/+utils/ (and every test importing
+# memories) went down with it, live on a fresh CI runner 2026-11-26.
+# The plugin is an optional seam (it only printf-echoes legacy events the
+# Python handler table already covers), so degrade honestly: lib=None,
+# the send_event forwarding path reports the miss instead of raising.
+lib = None
+try:
+    lib = ctypes.CDLL(LIB_PATH)
+except OSError as _lib_err:
+    logging.getLogger(__name__).debug(
+        "optional C event gate %s not loadable (%s) — unknown Brain events "
+        "will not be forwarded to it; compile it with: gcc -shared -o "
+        "listeners/plugins/frameit.so -fPIC listeners/plugins/frameit.c",
+        LIB_PATH, _lib_err,
+    )
 
-# Tell ctypes the C signature: void send_event(const FrameworkEvent *event);
-lib.send_event.argtypes = [ctypes.POINTER(FrameworkEvent)]
-lib.send_event.restype = None
+
+def _send_event_to_c(event) -> None:
+    """Forward an unknown event to the C gate (best effort).
+
+    A library that loaded but somehow lacks the symbol (or a None lib on a
+    checkout without the build artifact) degrades to a debug log — never a
+    crash in the dispatch path, which runs inside the Brain's connection
+    handler. The default C bridge only printf-echoes events; losing it on a
+    bare checkout loses nothing the Python handler table needs.
+    """
+    if lib is None:
+        logging.getLogger(__name__).debug(
+            "unknown event %r arrived on a lane without frameit.so; "
+            "no C forwarding available", event.event_type)
+        return
+    try:
+        lib.send_event.argtypes = [ctypes.POINTER(FrameworkEvent)]
+        lib.send_event.restype = None
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, lib.send_event, ctypes.byref(event))
+    except (AttributeError, OSError, RuntimeError):
+        logging.getLogger(__name__).debug(
+            "C event-gate forward failed (swallowed; plugin is optional)",
+            exc_info=True)
+
+socket_path = str(brain_socket_path())
 
 
 def pack_message(payload: bytes) -> bytes:
@@ -848,8 +886,9 @@ async def dispatch(event, full_payload=None):
         await handler(event)
     else:
         # Default: forward to the C library if no Python handler is found
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, lib.send_event, ctypes.byref(event))
+        # (best effort — frameit.so is an optional gitignored artifact; a
+        # lane without it logs and continues instead of crashing dispatch).
+        _send_event_to_c(event)
 
 if __name__ == "__main__":
     try:

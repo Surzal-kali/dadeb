@@ -130,19 +130,29 @@ def _load_display_classes() -> dict[str, Any]:
     it degrades gracefully to a second print below the first — harmless, just
     not in-place.  The terminal can't do in-place updates (scrolling buffer),
     so this is the honest fallback rather than a fake no-op.
+
+    On lanes without IPython installed (core/dev harness install — the
+    ``[jupyter]`` extra owns that dependency), the classes simply don't get
+    injected: an empty dict instead of the ImportError that used to kill
+    namespace builds (and with them the stub generator) outside the
+    notebook/REPL lane. Live on a CI runner 2026-11-26.
     """
     global _DISPLAY_CLASSES
     if _DISPLAY_CLASSES is None:
-        from IPython.display import (
-            DisplayHandle,
-            HTML,
-            Image,
-            JSON,
-            Javascript,
-            Latex,
-            Markdown,
-            Math,
-        )
+        try:
+            from IPython.display import (
+                DisplayHandle,
+                HTML,
+                Image,
+                JSON,
+                Javascript,
+                Latex,
+                Markdown,
+                Math,
+            )
+        except ImportError:
+            _DISPLAY_CLASSES = {}
+            return _DISPLAY_CLASSES
 
         _DISPLAY_CLASSES = {
             "Markdown": Markdown,

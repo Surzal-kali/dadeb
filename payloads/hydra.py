@@ -205,6 +205,26 @@ def run_hydra(target: str, options: str = "") -> dict[str, Any]:
     if not _sc_ok:
         raise ScopeGateError(f"scope gate: {_sc_reason}")
 
+    # Fleet duplicate check BEFORE the default-credential injection
+    # preflight (2026-11-26 CI lesson, ffuf precedent): a duplicate answer
+    # is a no-launch decision that must win over a missing-cred-source
+    # error — one identical unit is already running, and a lane without
+    # SecLists installed cannot resolve the defaults even when the live
+    # unit (launched elsewhere) can. Read-only peek; never conjures
+    # fleet.db.
+    from utils.fleet_scheduler import get_scheduler
+
+    live_dup = get_scheduler().peek_unit("hydra", target)
+    if live_dup is not None:
+        return {
+            "status": "duplicate",
+            "job_id": live_dup["job_id"],
+            "unit_key": live_dup["unit_key"],
+            "started_by": live_dup["agent_id"],
+            "started": live_dup["started"],
+            "message": live_dup["message"],
+        }
+
     opt_list = shlex.split(options) if options else []
     opt_list, creds_meta = _inject_default_credentials(opt_list)
     if "error" in creds_meta:
